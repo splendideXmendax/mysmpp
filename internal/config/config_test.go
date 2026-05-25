@@ -30,3 +30,23 @@ func TestNormalizeOutboundDefaults(t *testing.T) {
 		t.Fatalf("unexpected content type %s", cfg.Outbound[0].ContentType)
 	}
 }
+
+func TestLoadExampleConfig(t *testing.T) {
+	cfg, err := Load("../../configs/example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.HTTPAddr != ":8080" {
+		t.Fatalf("unexpected http addr %s", cfg.Server.HTTPAddr)
+	}
+}
+
+func TestLoadDockerConfig(t *testing.T) {
+	cfg, err := Load("../../configs/docker.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SMPP.Password == "secret" {
+		t.Fatal("docker config should not keep the development SMPP password")
+	}
+}

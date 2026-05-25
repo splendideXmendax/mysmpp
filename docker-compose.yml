@@ -1,0 +1,14 @@
+services:
+  mysmpp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mysmpp:local
+    container_name: mysmpp
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "2775:2775"
+    volumes:
+      - ./configs/docker.json:/app/configs/config.json:ro
+    command: ["-config", "/app/configs/config.json"]

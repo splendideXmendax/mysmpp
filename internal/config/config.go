@@ -148,11 +148,20 @@ func (c Config) Validate() error {
 		if rule.Name == "" {
 			return fmt.Errorf("outbound rule name is required")
 		}
-		if rule.Fields["to"] == "" || rule.Fields["text"] == "" {
+		if !mapsTo(rule.Fields, "to") || !mapsTo(rule.Fields, "text") {
 			return fmt.Errorf("outbound rule %q must map to and text", rule.Name)
 		}
 	}
 	return nil
+}
+
+func mapsTo(fields map[string]string, internal string) bool {
+	for _, source := range fields {
+		if source == internal {
+			return true
+		}
+	}
+	return false
 }
 
 func Load(path string) (Config, error) {

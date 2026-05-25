@@ -41,6 +41,21 @@ Open the simple configuration page:
 http://127.0.0.1:8080/ui/config
 ```
 
+## Docker
+
+Build and run with Docker Compose:
+
+```powershell
+docker compose up -d --build
+```
+
+The Compose file exposes:
+
+- HTTP/API/config UI: `http://127.0.0.1:8080`
+- SMPP: `127.0.0.1:2775`
+
+Docker uses `configs/docker.json` by default. See [docs/DOCKER.md](docs/DOCKER.md) for build, deployment, production configuration, and troubleshooting details.
+
 ## HTTP API
 
 Submit an MT message:

@@ -1,0 +1,71 @@
+{
+  "server": {
+    "http_addr": ":8080",
+    "shutdown_timeout": "10s"
+  },
+  "smpp": {
+    "addr": ":2775",
+    "system_id": "mysmpp",
+    "password": "change-me",
+    "system_type": "gateway",
+    "max_sessions": 128,
+    "window_size": 16,
+    "enquire_period": "30s"
+  },
+  "routes": [
+    {
+      "name": "default",
+      "prefix": [],
+      "provider": "demo-http-provider",
+      "priority": 1
+    }
+  ],
+  "providers": [
+    {
+      "name": "demo-http-provider",
+      "protocol": "http",
+      "endpoint": "https://sms-provider.example.com/send",
+      "rule": "demo-http-json",
+      "enabled": true
+    }
+  ],
+  "inbound": [
+    {
+      "name": "provider-callback",
+      "method": "POST",
+      "path": "/callback/provider",
+      "content_type": "application/json",
+      "auth_header": "X-Token",
+      "auth_token": "change-me",
+      "fields": {
+        "id": "message_id",
+        "from": "source",
+        "to": "destination",
+        "text": "content"
+      },
+      "success_status": 200,
+      "success_body": "{\"status\":\"ok\"}"
+    }
+  ],
+  "outbound": [
+    {
+      "name": "demo-http-json",
+      "method": "POST",
+      "content_type": "application/json",
+      "fields": {
+        "messageId": "id",
+        "sender": "from",
+        "receiver": "to",
+        "content": "text",
+        "coding": "encoding"
+      },
+      "headers": {
+        "X-Request-ID": "{{id}}"
+      }
+    }
+  ],
+  "storage": {
+    "driver": "memory",
+    "dsn": ""
+  }
+}
