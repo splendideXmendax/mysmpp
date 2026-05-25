@@ -1,30 +1,30 @@
 # mysmpp 配置设计
 
-这份文档描述 `mysmpp` 的配置思路。核心原则是把短信网关拆成四层：下游接入、标准消息模型、路由决策、上游投递。
+这份文档说明 `mysmpp` 的配置模型。整体思路是把短信网关拆成四层：下游接入、统一消息模型、路由决策、上游投递。
 
 ## 角色定义
 
-- 下游：你的客户、业务系统、SMPP 客户端、HTTP 调用方。它们把短信交给网关，或接收网关回调。
-- 上游：运营商、短信供应商、聚合通道。网关把短信投递给它们，或接收它们的状态报告和上行短信。
+- 下游：客户系统、业务系统、SMPP 客户端、HTTP 调用方。它们把短信交给网关，或者接收网关回调。
+- 上游：运营商、短信供应商、聚合通道。网关把短信投递给它们，也会接收它们的上行短信或状态报告。
 - 路由：根据号码、客户、短信类型、优先级等条件决定走哪个上游。
-- 规则：把不同 HTTP 接口的字段名、鉴权、请求格式转换到统一消息模型。
+- 规则：把不同 HTTP 接口的字段名、鉴权方式、请求格式转换到统一消息模型。
 
 ## 配置页面
 
-启动后访问：
+启动服务后访问：
 
 ```text
 http://127.0.0.1:8080/ui/config
 ```
 
-页面会调用：
+配置页面使用以下 API：
 
 ```text
 GET /v1/config
 PUT /v1/config
 ```
 
-当前实现是运行时生效，不会自动写回 `configs/example.json`。这是有意保守的第一版，避免页面误操作覆盖本地配置文件。后续可以加 `config_path` 和保存到文件的能力。
+当前页面修改的是运行时内存配置，不会自动写回 `configs/example.json` 或 `configs/docker.json`。这是第一版的保守设计，避免误操作覆盖本地文件。生产使用时建议先在页面验证规则，再把最终 JSON 写回配置文件并重启服务。
 
 ## 完整结构
 
@@ -69,13 +69,13 @@ PUT /v1/config
 - `addr`：SMPP TCP 监听地址。
 - `system_id` / `password`：下游 SMPP 客户端 bind 凭证。
 - `system_type`：保留字段，后续可用于区分客户类型。
-- `max_sessions`：最大会话数，当前文档化，后续在会话管理中强制执行。
+- `max_sessions`：最大会话数，当前已配置化，后续会在会话管理中强制执行。
 - `window_size`：SMPP 并发窗口，后续用于 submit/deliver 流控。
-- `enquire_period`：链路保活周期，后续用于主动 enquire_link。
+- `enquire_period`：链路保活周期，后续用于主动 `enquire_link`。
 
-## 下游入站 HTTP inbound
+## 下游入站 HTTP：inbound
 
-`inbound` 描述“外部系统调用我”的规则，适合接收上行短信、状态回调，或客户通过自定义 HTTP 接口提交短信。
+`inbound` 描述“外部系统调用网关”的规则，适合接收上行短信、状态回调，或者客户通过自定义 HTTP 接口提交短信。
 
 ```json
 {
@@ -96,17 +96,17 @@ PUT /v1/config
 }
 ```
 
-字段含义：
+字段说明：
 
-- `name`：规则名，也会记录到消息的 `Provider` 字段，方便追踪来源。
+- `name`：规则名，也会记录到消息来源字段，方便排查。
 - `method`：允许的 HTTP 方法，默认 `POST`。
 - `path`：回调路径，必须以 `/` 开头。
-- `content_type`：说明预期类型；当前请求解析支持 JSON、query、form。
+- `content_type`：预期请求类型；当前解析支持 JSON、query、form。
 - `auth_header` / `auth_token`：简单 header token 鉴权。
-- `fields`：统一字段到外部字段的映射。
+- `fields`：内部字段到外部请求字段的映射。
 - `success_status` / `success_body`：处理成功后返回给对方的响应。
 
-`fields` 的左边是网关内部字段，右边是外部请求字段：
+`fields` 左边是网关内部字段，右边是外部请求字段：
 
 ```json
 {
@@ -117,9 +117,9 @@ PUT /v1/config
 }
 ```
 
-## 上游供应商 providers
+## 上游供应商：providers
 
-`providers` 描述“我要发给谁”。供应商自身只记录连接信息和引用哪条 outbound 规则。
+`providers` 描述“短信要发给谁”。供应商配置只记录连接信息，并引用一条 `outbound` 规则。
 
 ```json
 {
@@ -131,16 +131,16 @@ PUT /v1/config
 }
 ```
 
-- `name`：供应商唯一名。
-- `protocol`：当前建议 `http` 或 `smpp`，第一版实现以 HTTP 规则渲染为主。
-- `endpoint`：HTTP URL 或后续 SMPP 连接地址。
+- `name`：供应商唯一名称。
+- `protocol`：当前建议使用 `http` 或 `smpp`，第一版以 HTTP 规则渲染为主。
+- `endpoint`：HTTP URL，或后续 SMPP 上游连接地址。
 - `rule`：引用 `outbound[].name`。
-- `system_id` / `password`：上游需要账号时使用。
+- `system_id` / `password`：上游账号。
 - `enabled`：是否启用。
 
-## 路由 routes
+## 路由规则：routes
 
-`routes` 描述“哪些短信走哪个上游”。当前实现是按手机号前缀和优先级匹配。
+`routes` 描述“哪些短信走哪个上游”。当前实现按手机号前缀和优先级匹配。
 
 ```json
 {
@@ -157,15 +157,15 @@ PUT /v1/config
 2. `prefix` 为空代表默认路由。
 3. 号码 `to` 命中某个前缀后使用对应 `provider`。
 
-建议设计：
+建议：
 
 - 给精确号段更高优先级。
-- 保留一个 `prefix: []` 的默认路由。
-- 不同客户的专属通道后续可以增加 `customer_id`、`country`、`message_type` 等字段。
+- 保留一条 `prefix: []` 的默认路由。
+- 后续可增加 `customer_id`、`country`、`message_type`、`price_level` 等条件。
 
-## 上游出站 HTTP outbound
+## 上游出站 HTTP：outbound
 
-`outbound` 描述“发给供应商时怎么组织请求”。
+`outbound` 描述“发给供应商时如何组织 HTTP 请求”。
 
 ```json
 {
@@ -185,10 +185,10 @@ PUT /v1/config
 }
 ```
 
-这里 `fields` 的左边是供应商参数名，右边是网关内部消息字段：
+这里 `fields` 左边是供应商参数名，右边是网关内部字段：
 
 - `id`：网关消息 ID。
-- `from`：主叫、签名号、短信端口。
+- `from`：主叫、签名号或短信端口。
 - `to`：被叫手机号。
 - `text`：短信内容。
 - `encoding`：`gsm7` 或 `ucs2`。
@@ -196,30 +196,30 @@ PUT /v1/config
 
 请求格式：
 
-- `method=GET`：字段会进入 query string。
-- `content_type=application/json`：字段会序列化成 JSON。
+- `method=GET`：字段进入 query string。
+- `content_type=application/json`：字段序列化成 JSON。
 - 其他情况：默认按 `application/x-www-form-urlencoded` 发送。
 
 ## 长短信策略
 
 统一消息进入网关后会拆成 `segments`：
 
-- GSM-7：单条 160，长短信每段 153。
-- UCS-2：单条 70，长短信每段 67。
+- GSM-7：单条 160 字符，长短信每段 153 字符。
+- UCS-2：单条 70 字符，长短信每段 67 字符。
 - 每段包含 `Part`、`Total`、`Reference`、`UDH`。
 
-出站适配器应该根据供应商要求选择：
+出站适配器后续可以根据供应商要求选择：
 
 - 供应商自动拆分：只发完整 `text`。
 - 供应商要求 UDH：逐段发送并带 `UDH`。
 - 供应商要求自定义长短信字段：把 `Reference`、`Part`、`Total` 映射到供应商参数。
 
-当前 outbound 规则先覆盖完整 `text` 模式。逐段投递会在 dispatcher 阶段加入。
+当前 outbound 规则先覆盖完整 `text` 模式，逐段投递会在 dispatcher 阶段加入。
 
 ## 推荐生产配置方向
 
-1. 把下游客户独立成 `clients`，每个客户有 SMPP/HTTP 凭证、限速、签名策略。
-2. 把上游通道独立健康状态，支持失败熔断和备用通道。
+1. 增加 `clients` 配置，把每个下游客户的 SMPP/HTTP 凭证、限速、签名策略独立出来。
+2. 为上游通道增加健康状态、失败熔断、备用通道和价格策略。
 3. 路由条件扩展到国家码、号段、客户、内容类型、模板、价格优先级。
-4. 持久化消息、分段、回执、重试记录。
+4. 持久化消息、分段、回执和重试记录。
 5. 配置页面增加保存到文件、导入导出、规则测试器和变更审计。

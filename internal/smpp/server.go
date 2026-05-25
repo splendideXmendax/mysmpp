@@ -15,6 +15,7 @@ import (
 )
 
 type Server struct {
+	mu       sync.RWMutex
 	cfg      config.SMPPConfig
 	store    store.Store
 	logger   *slog.Logger
@@ -31,7 +32,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.listener = ln
+	s.mu.Unlock()
 	s.logger.Info("smpp listening", "addr", s.cfg.Addr)
 
 	go func() {
@@ -54,6 +57,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			s.handleSession(ctx, conn)
 		}()
 	}
+}
+
+func (s *Server) Addr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
 }
 
 func (s *Server) handleSession(ctx context.Context, conn net.Conn) {

@@ -1,6 +1,6 @@
 # Docker 部署文档
 
-这份文档说明如何用 Docker 或 Docker Compose 部署 `mysmpp`。当前项目没有外部数据库依赖，默认使用内存存储，适合本地测试、协议联调和早期网关验证。
+这份文档说明如何使用 Docker 或 Docker Compose 部署 `mysmpp`。当前项目默认使用内存存储，适合本地测试、协议联调和早期网关验证。生产环境建议尽快接入持久化存储和外部监控。
 
 ## 端口
 
@@ -112,10 +112,10 @@ vi configs/prod.json
 docker compose up -d --build
 ```
 
-如果使用云服务器安全组，需要开放：
+如果使用云服务器安全组，建议：
 
-- `8080`：只建议对内网或管理 IP 开放。
-- `2775`：只对下游 SMPP 客户端 IP 开放。
+- `8080` 只对内网或管理 IP 开放。
+- `2775` 只对下游 SMPP 客户端 IP 开放。
 
 ## Dockerfile 说明
 
@@ -150,9 +150,9 @@ services:
 字段说明：
 
 - `ports`：把宿主机端口映射到容器端口。
-- `volumes`：挂载外部配置，改配置后重启容器即可生效。
+- `volumes`：挂载外部配置，修改配置文件后重启容器即可生效。
 - `command`：指定容器内配置文件路径。
-- `restart: unless-stopped`：异常退出自动重启。
+- `restart: unless-stopped`：异常退出后自动重启。
 
 ## 配置页面与容器
 
@@ -176,9 +176,9 @@ docker compose restart mysmpp
 GET /healthz
 ```
 
-Docker Compose 的健康检查建议使用 HTTP 客户端镜像或在运行镜像中加入探测工具。当前 distroless 镜像不包含 `curl` 或 `wget`，所以生产环境更建议由外部负载均衡、Prometheus blackbox exporter、Nginx 或云探针访问 `/healthz`。
+当前运行镜像使用 distroless，不包含 `curl` 或 `wget`。生产环境更建议使用外部负载均衡、Prometheus blackbox exporter、Nginx 或云探针访问 `/healthz`。
 
-如果必须使用 Compose 内置 healthcheck，可以改用包含 shell 工具的运行镜像，例如 `debian:bookworm-slim`，但镜像体积和攻击面会变大。
+如果必须使用 Compose 内置 healthcheck，可以改成带 HTTP 客户端工具的运行镜像，例如 `debian:bookworm-slim`，但镜像体积和攻击面会变大。
 
 ## 持久化与日志
 
@@ -188,7 +188,7 @@ Docker Compose 的健康检查建议使用 HTTP 客户端镜像或在运行镜�
 - PostgreSQL/MySQL：适合多实例和长期运营。
 - Redis/队列：适合重试、限速和异步派发。
 
-日志输出到 stdout，使用 Docker 标准日志采集：
+日志输出到 stdout，可用 Docker 标准日志查看：
 
 ```powershell
 docker compose logs -f mysmpp
@@ -216,8 +216,8 @@ docker compose logs mysmpp
 
 - 宿主机是否开放 `2775`。
 - `smpp.system_id` 和 `smpp.password` 是否和客户端一致。
-- 客户端 bind 类型是否为 receiver/transmitter/transceiver。
+- 客户端 bind 类型是否为 receiver、transmitter 或 transceiver。
 
 ### 修改配置后重启丢失
 
-配置页面只改运行时内存配置。需要把最终配置保存到挂载的 JSON 文件。
+配置页面只改运行时内存配置。需要把最终配置保存到挂载的 JSON 文件，或者在后续版本增加“保存到文件”的能力。
