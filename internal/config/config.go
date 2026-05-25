@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -82,6 +83,78 @@ func Default() Config {
 	}
 }
 
+func (c *Config) Normalize() {
+	if c.Server.HTTPAddr == "" {
+		c.Server.HTTPAddr = ":8080"
+	}
+	if c.Server.ShutdownTimeout == "" {
+		c.Server.ShutdownTimeout = "10s"
+	}
+	if c.SMPP.Addr == "" {
+		c.SMPP.Addr = ":2775"
+	}
+	if c.Storage.Driver == "" {
+		c.Storage.Driver = "memory"
+	}
+	for i := range c.Inbound {
+		if c.Inbound[i].Method == "" {
+			c.Inbound[i].Method = "POST"
+		}
+		if c.Inbound[i].SuccessStatus == 0 {
+			c.Inbound[i].SuccessStatus = 200
+		}
+	}
+	for i := range c.Outbound {
+		if c.Outbound[i].Method == "" {
+			c.Outbound[i].Method = "POST"
+		}
+		if c.Outbound[i].ContentType == "" {
+			c.Outbound[i].ContentType = "application/x-www-form-urlencoded"
+		}
+	}
+}
+
+func (c Config) Validate() error {
+	names := map[string]string{}
+	for _, provider := range c.Providers {
+		if provider.Name == "" {
+			return fmt.Errorf("provider name is required")
+		}
+		if _, ok := names["provider:"+provider.Name]; ok {
+			return fmt.Errorf("duplicate provider %q", provider.Name)
+		}
+		names["provider:"+provider.Name] = provider.Name
+	}
+	for _, route := range c.Routes {
+		if route.Name == "" {
+			return fmt.Errorf("route name is required")
+		}
+		if route.Provider == "" {
+			return fmt.Errorf("route %q provider is required", route.Name)
+		}
+	}
+	for _, rule := range c.Inbound {
+		if rule.Name == "" {
+			return fmt.Errorf("inbound rule name is required")
+		}
+		if rule.Path == "" || !strings.HasPrefix(rule.Path, "/") {
+			return fmt.Errorf("inbound rule %q path must start with /", rule.Name)
+		}
+		if rule.Fields["from"] == "" || rule.Fields["to"] == "" || rule.Fields["text"] == "" {
+			return fmt.Errorf("inbound rule %q must map from, to, and text", rule.Name)
+		}
+	}
+	for _, rule := range c.Outbound {
+		if rule.Name == "" {
+			return fmt.Errorf("outbound rule name is required")
+		}
+		if rule.Fields["to"] == "" || rule.Fields["text"] == "" {
+			return fmt.Errorf("outbound rule %q must map to and text", rule.Name)
+		}
+	}
+	return nil
+}
+
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
@@ -94,14 +167,9 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.Server.HTTPAddr == "" {
-		cfg.Server.HTTPAddr = ":8080"
-	}
-	if cfg.SMPP.Addr == "" {
-		cfg.SMPP.Addr = ":2775"
-	}
-	if cfg.Storage.Driver == "" {
-		cfg.Storage.Driver = "memory"
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("validate config: %w", err)
 	}
 	return cfg, nil
 }

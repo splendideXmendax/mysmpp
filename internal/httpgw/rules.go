@@ -9,14 +9,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/message"
+	"github.com/splendideXmendax/mysmpp/internal/router"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 type Gateway struct {
+	mu    sync.RWMutex
 	cfg   config.Config
 	store store.Store
 	mux   *http.ServeMux
@@ -35,15 +38,9 @@ func (g *Gateway) Handler() http.Handler {
 func (g *Gateway) routes() {
 	g.mux.HandleFunc("/healthz", g.health)
 	g.mux.HandleFunc("/v1/messages", g.messages)
-	for _, rule := range g.cfg.Inbound {
-		rule := rule
-		if rule.Path == "" {
-			continue
-		}
-		g.mux.HandleFunc(rule.Path, func(w http.ResponseWriter, r *http.Request) {
-			g.handleInboundRule(w, r, rule)
-		})
-	}
+	g.mux.HandleFunc("/v1/config", g.configAPI)
+	g.mux.HandleFunc("/ui/config", g.configPage)
+	g.mux.HandleFunc("/", g.dynamicInbound)
 }
 
 func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
@@ -70,9 +67,14 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		cfg := g.Config()
 		msg := message.New(newID(), message.DirectionMT, req.From, req.To, req.Text)
 		msg.Metadata = req.Meta
 		msg.Segments = message.Split(req.Text, message.SplitOptions{ForceEncoding: msg.Encoding})
+		if route, ok := router.New(cfg.Routes).Match(msg); ok {
+			msg.Route = route.Name
+			msg.Provider = route.Provider
+		}
 		if err := g.store.SaveMessage(r.Context(), msg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -81,6 +83,59 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (g *Gateway) Config() config.Config {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.cfg
+}
+
+func (g *Gateway) UpdateConfig(cfg config.Config) error {
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cfg = cfg
+	return nil
+}
+
+func (g *Gateway) configAPI(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, g.Config())
+	case http.MethodPut, http.MethodPost:
+		var cfg config.Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if err := g.UpdateConfig(cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, g.Config())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (g *Gateway) configPage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(configPageHTML))
+}
+
+func (g *Gateway) dynamicInbound(w http.ResponseWriter, r *http.Request) {
+	cfg := g.Config()
+	for _, rule := range cfg.Inbound {
+		if rule.Path == r.URL.Path {
+			g.handleInboundRule(w, r, rule)
+			return
+		}
+	}
+	http.NotFound(w, r)
 }
 
 func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule config.HTTPRuleConfig) {

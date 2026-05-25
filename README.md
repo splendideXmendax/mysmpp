@@ -35,6 +35,12 @@ Defaults:
 - SMPP listener: `:2775`
 - SMPP bind: `system_id=mysmpp`, `password=secret`
 
+Open the simple configuration page:
+
+```text
+http://127.0.0.1:8080/ui/config
+```
+
 ## HTTP API
 
 Submit an MT message:
@@ -78,6 +84,8 @@ Outbound HTTP rules map provider parameter names to internal message fields:
 ```
 
 This makes it possible to support providers that expect form posts, JSON payloads, custom headers, or query strings without changing gateway code.
+
+For detailed route, upstream, downstream, and HTTP rule design, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## SMPP Support
 
