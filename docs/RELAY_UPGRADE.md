@@ -6,6 +6,7 @@ This document records the parts of `mysmpp改造方案.md` implemented in this p
 
 - SMPP bind authentication now reads the current runtime config, so `/v1/config` changes take effect without restarting.
 - Admin Basic Auth no longer allows loopback bypass. Admin username and password are always required.
+- A server-rendered `/admin/` management console is available without a frontend framework. It uses in-memory sessions, HttpOnly SameSite cookies, CSRF-protected forms, login throttling, and atomic config persistence.
 - Secret placeholders named `CHANGE_ME_BEFORE_DEPLOY` are rejected during config validation.
 - SMPP `readLoop` no longer polls with a one-second read deadline.
 - SMPP `window_size` now throttles concurrent `submit_sm` requests with `ESME_RTHROTTLED`.
@@ -22,6 +23,18 @@ This document records the parts of `mysmpp改造方案.md` implemented in this p
 - Providers can be wrapped with per-provider `rate_limit` settings.
 - `/healthz` returns queue and pending checks.
 - PostgreSQL schema migrations are provided under `migrations/`.
+
+## Management Console
+
+The newer management UI lives under `/admin/` and intentionally keeps the frontend small: standard HTML forms, one embedded CSS file, and no JavaScript framework. It currently includes:
+
+- Login/logout backed by `admin.username` and `admin.password`.
+- Dashboard counts for routes, providers, ESMEs, inbound/outbound rules, and clients.
+- Routes CRUD with Post-Redirect-Get.
+- JSON form pages for providers, ESMEs, inbound rules, outbound rules, risk, SMPP, and the full raw config.
+- CSRF validation on every POST and atomic writeback to the `-config` file when one is provided.
+
+The old `/ui/config` page is still available as an emergency runtime-only editor.
 
 ## Queue Flow
 

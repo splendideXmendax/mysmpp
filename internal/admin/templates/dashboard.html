@@ -1,0 +1,15 @@
+{{define "content"}}
+<header class="page-header">
+  <h2>概览</h2>
+  <a class="btn" href="/admin/raw">编辑原始 JSON</a>
+</header>
+<div class="stats">
+  <div class="stat"><strong>{{.RouteCount}}</strong><span class="muted">线路</span></div>
+  <div class="stat"><strong>{{.ProviderCount}}</strong><span class="muted">上游供应商</span></div>
+  <div class="stat"><strong>{{.ESMECount}}</strong><span class="muted">ESME 账号</span></div>
+  <div class="stat"><strong>{{.InboundCount}}</strong><span class="muted">入站规则</span></div>
+  <div class="stat"><strong>{{.OutboundCount}}</strong><span class="muted">出站规则</span></div>
+  <div class="stat"><strong>{{.ClientCount}}</strong><span class="muted">HTTP 客户端</span></div>
+</div>
+<p class="muted">配置文件：{{if .ConfigPath}}{{.ConfigPath}}{{else}}未指定，后台只更新运行时配置{{end}}</p>
+{{end}}

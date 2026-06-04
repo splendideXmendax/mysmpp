@@ -11,7 +11,15 @@
 
 ## 配置页面
 
-启动服务后访问：
+推荐使用新的服务端渲染管理后台：
+
+```text
+http://127.0.0.1:8080/admin/
+```
+
+它使用 `admin.username` / `admin.password` 登录，session cookie 为 `HttpOnly`、`SameSite=Strict`，所有 POST 表单都带 CSRF token。后台当前提供概览、线路 CRUD、`providers` / `esmes` / `inbound` / `outbound` / `risk` / `smpp` 分区 JSON 编辑，以及完整原始 JSON 编辑。保存时会先执行完整配置校验并更新运行时配置，再原子写回启动参数 `-config` 指定的配置文件。
+
+旧配置页面仍保留：
 
 ```text
 http://127.0.0.1:8080/ui/config
@@ -24,7 +32,7 @@ GET /v1/config
 PUT /v1/config
 ```
 
-当前页面修改的是运行时内存配置，不会自动写回 `configs/example.json` 或 `configs/docker.json`。这是第一版的保守设计，避免误操作覆盖本地文件。生产使用时建议先在页面验证规则，再把最终 JSON 写回配置文件并重启服务。
+旧页面修改的是运行时内存配置，不会自动写回 `configs/example.json` 或 `configs/docker.json`。生产使用建议优先使用 `/admin/`，旧页面只作为应急入口。
 
 ## 完整结构
 

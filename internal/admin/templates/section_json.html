@@ -1,0 +1,19 @@
+{{define "content"}}
+<header class="page-header">
+  <h2>{{.SectionTitle}}</h2>
+  <a href="/admin/raw" class="btn">编辑完整 JSON</a>
+</header>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<form method="POST" action="/admin/{{.Section}}" class="form" style="max-width: 980px">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <div class="field">
+    <label>{{.SectionTitle}} JSON</label>
+    <textarea name="config" rows="24" required>{{.Config}}</textarea>
+    <small>保存时会执行完整配置校验，并原子写回配置文件。</small>
+  </div>
+  <div class="actions">
+    <button type="submit" class="btn primary">保存</button>
+    <a href="/admin/" class="btn">取消</a>
+  </div>
+</form>
+{{end}}

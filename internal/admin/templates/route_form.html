@@ -1,0 +1,37 @@
+{{define "content"}}
+<header class="page-header">
+  <h2>{{.Title}}</h2>
+  <a href="/admin/routes" class="btn">返回列表</a>
+</header>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<form method="POST" action="{{if .IsEdit}}/admin/routes/{{.Route.Name}}{{else}}/admin/routes{{end}}" class="form">
+  <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+  <div class="field">
+    <label>名称</label>
+    <input name="name" value="{{.Route.Name}}" required pattern="[a-zA-Z0-9_-]+" {{if .IsEdit}}readonly{{end}}>
+    <small>字母、数字、下划线、短横线。</small>
+  </div>
+  <div class="field">
+    <label>号段前缀</label>
+    <textarea name="prefix" rows="7">{{.Prefix}}</textarea>
+    <small>一行一个，留空表示默认线路。</small>
+  </div>
+  <div class="field">
+    <label>上游供应商</label>
+    <select name="provider" required>
+      <option value="">-- 选择 --</option>
+      {{range .Providers}}
+        <option value="{{.Name}}" {{if eq .Name $.Route.Provider}}selected{{end}}>{{.Name}}</option>
+      {{end}}
+    </select>
+  </div>
+  <div class="field">
+    <label>优先级</label>
+    <input type="number" name="priority" value="{{.Route.Priority}}" min="0" max="10000">
+  </div>
+  <div class="actions">
+    <button type="submit" class="btn primary">保存</button>
+    <a href="/admin/routes" class="btn">取消</a>
+  </div>
+</form>
+{{end}}

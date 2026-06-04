@@ -71,6 +71,10 @@ func (g *Gateway) Handler() http.Handler {
 	return g.mux
 }
 
+func (g *Gateway) Mount(pattern string, handler http.Handler) {
+	g.mux.Handle(pattern, handler)
+}
+
 func (g *Gateway) routes() {
 	g.mux.HandleFunc("/healthz", g.health)
 	g.mux.HandleFunc("/v1/messages", g.messages)

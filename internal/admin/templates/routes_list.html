@@ -1,0 +1,31 @@
+{{define "content"}}
+<header class="page-header">
+  <h2>线路配置</h2>
+  <a href="/admin/routes/new" class="btn primary">新建线路</a>
+</header>
+<table>
+  <thead>
+    <tr><th>名称</th><th>前缀</th><th>上游</th><th>优先级</th><th>操作</th></tr>
+  </thead>
+  <tbody>
+  {{range .Routes}}
+    <tr>
+      <td><a href="/admin/routes/{{.Name}}">{{.Name}}</a></td>
+      <td>{{truncate (join .Prefix ", ") 42}}</td>
+      <td>{{.Provider}}</td>
+      <td>{{.Priority}}</td>
+      <td>
+        <a href="/admin/routes/{{.Name}}">编辑</a>
+        <form method="POST" action="/admin/routes/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('确认删除 {{.Name}}?')">
+          <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+          <button type="submit" class="link-danger">删除</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  {{if not .Routes}}
+    <tr><td colspan="5" class="empty">尚未配置线路</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

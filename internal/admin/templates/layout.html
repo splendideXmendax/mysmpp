@@ -1,0 +1,37 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} - mysmpp 管理后台</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <h1>mysmpp</h1>
+    <nav>
+      <a href="/admin/" {{if eq .Active "dashboard"}}class="active"{{end}}>概览</a>
+      <a href="/admin/routes" {{if eq .Active "routes"}}class="active"{{end}}>线路</a>
+      <a href="/admin/providers" {{if eq .Active "providers"}}class="active"{{end}}>上游</a>
+      <a href="/admin/esmes" {{if eq .Active "esmes"}}class="active"{{end}}>下游 ESME</a>
+      <a href="/admin/inbound" {{if eq .Active "inbound"}}class="active"{{end}}>入站规则</a>
+      <a href="/admin/outbound" {{if eq .Active "outbound"}}class="active"{{end}}>出站规则</a>
+      <a href="/admin/risk" {{if eq .Active "risk"}}class="active"{{end}}>风控</a>
+      <a href="/admin/smpp" {{if eq .Active "smpp"}}class="active"{{end}}>SMPP</a>
+      <a href="/admin/raw" {{if eq .Active "raw"}}class="active"{{end}}>原始 JSON</a>
+    </nav>
+    <form method="POST" action="/admin/logout" class="logout">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit">登出 ({{.Username}})</button>
+    </form>
+  </aside>
+  <main>
+    {{template "_flash" .}}
+    {{template "content" .}}
+  </main>
+</div>
+</body>
+</html>
+{{end}}

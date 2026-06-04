@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/splendideXmendax/mysmpp/internal/admin"
 	"github.com/splendideXmendax/mysmpp/internal/authutil"
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
@@ -41,6 +42,10 @@ func main() {
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx)
+	adminServer := admin.New(httpGateway, *configPath, logger)
+	defer adminServer.Close()
+	httpGateway.Mount("/admin", http.RedirectHandler("/admin/", http.StatusSeeOther))
+	httpGateway.Mount("/admin/", adminServer)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,

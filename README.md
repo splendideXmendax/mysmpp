@@ -17,8 +17,9 @@
 cmd/mysmpp          网关入口
 cmd/testesme        本地 SMPP ESME 测试客户端
 internal/config     JSON 配置结构、加载、校验
-internal/core       SMPP 中转核心、provider 调度、DLR 映射
-internal/httpgw     HTTP API、配置页面、入站/出站 HTTP 规则
+internal/admin      服务端渲染管理后台、session、CSRF、配置持久化
+internal/dispatch   统一提交调度、outbox worker、DLR 分发
+internal/httpgw     HTTP API、旧配置页面、入站/出站 HTTP 规则
 internal/message    消息模型、编码识别、长短信拆分和重组
 internal/provider   上游适配器接口和 mock provider
 internal/router     按号码前缀匹配上游供应商
@@ -48,6 +49,14 @@ go run ./cmd/mysmpp -config configs/example.json
 ```text
 http://127.0.0.1:8080/ui/config
 ```
+
+新的服务端渲染管理后台：
+
+```text
+http://127.0.0.1:8080/admin/
+```
+
+`/admin/` 使用配置里的 `admin.username` / `admin.password` 登录，提供概览、线路 CRUD、各配置分区 JSON 表单和完整 JSON 编辑。通过后台保存时会先更新运行时配置，再原子写回 `-config` 指定的配置文件；旧 `/ui/config` 仍保留为应急入口，但只更新运行时配置。
 
 ## SMPP DLR 验证
 
@@ -187,6 +196,7 @@ go test ./...
 当前测试覆盖：
 
 - 配置加载和校验。
+- 服务端渲染管理后台登录、CSRF、线路保存和配置落盘。
 - Docker 配置加载。
 - HTTP 提交和路由匹配。
 - 动态入站 HTTP 规则。
@@ -203,5 +213,5 @@ go test ./...
 1. 增加 SQLite、PostgreSQL、MySQL 存储实现，持久化消息和 DLR mapping。
 2. 增加真实上游 provider，支持 SMPP/HTTP 投递、重试、限速、失败切换。
 3. 完整实现 SMPP deliver_sm、MO、TLV、长短信和窗口控制。
-4. 增加管理 API，查看路由、供应商、队列、消息轨迹。
+4. 补齐管理后台的细粒度表单体验和消息/队列轨迹页面。
 5. 增加指标、审计日志和配置变更记录。
