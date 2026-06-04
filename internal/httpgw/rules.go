@@ -26,6 +26,8 @@ type Gateway struct {
 	cfg        config.Config
 	store      store.Store
 	dispatcher *dispatch.Dispatcher
+	registry   *provider.Registry
+	ctx        context.Context
 	mux        *http.ServeMux
 }
 
@@ -35,8 +37,18 @@ func New(cfg config.Config, st store.Store) *Gateway {
 	return g
 }
 
-func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.Dispatcher) *Gateway {
-	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, mux: http.NewServeMux()}
+func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.Dispatcher, extras ...any) *Gateway {
+	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, ctx: context.Background(), mux: http.NewServeMux()}
+	for _, extra := range extras {
+		switch v := extra.(type) {
+		case *provider.Registry:
+			g.registry = v
+		case context.Context:
+			if v != nil {
+				g.ctx = v
+			}
+		}
+	}
 	g.routes()
 	return g
 }
@@ -98,6 +110,15 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
+			msg := message.New(receipt.GatewayID, message.DirectionMT, req.From, req.To, req.Text)
+			msg.Metadata = req.Meta
+			msg.Route = receipt.Route
+			msg.Provider = receipt.Provider
+			msg.Segments = message.Split(req.Text, message.SplitOptions{ForceEncoding: msg.Encoding})
+			if err := g.store.SaveMessage(r.Context(), msg); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, http.StatusAccepted, receipt)
 			return
 		}
@@ -131,8 +152,14 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 		return err
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.cfg = cfg
+	g.mu.Unlock()
+	if g.registry != nil {
+		g.registry.Replace(provider.BuildProviders(g.ctx, cfg))
+	}
+	if g.dispatcher != nil {
+		g.dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+	}
 	return nil
 }
 

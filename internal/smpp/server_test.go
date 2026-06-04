@@ -3,6 +3,7 @@ package smpp
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"testing"
@@ -18,6 +19,46 @@ func TestParseSubmitSM(t *testing.T) {
 	}
 	if msg.From != "1069" || msg.To != "13800138000" || msg.Text != "hello" {
 		t.Fatalf("unexpected message: %+v", msg)
+	}
+}
+
+func TestParseSubmitSMStripsUDH(t *testing.T) {
+	body := submitSMBodyWith(0x40, 0x00, append([]byte{0x06, 0x08, 0x04, 0x12, 0x34, 0x02, 0x01}, []byte("hello")...))
+	submit, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 8, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.Text != "hello" {
+		t.Fatalf("expected UDH stripped text, got %q", submit.Text)
+	}
+	if submit.Concat == nil || submit.Concat.Reference != 0x1234 || submit.Concat.Total != 2 || submit.Concat.Part != 1 {
+		t.Fatalf("concat not parsed: %+v", submit.Concat)
+	}
+}
+
+func TestParseSubmitSMMessagePayloadTLV(t *testing.T) {
+	body := submitSMBodyWith(0x00, 0x00, nil)
+	body = appendTLV(body, TagMessagePayload, []byte("payload text"))
+	submit, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 9, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.Text != "payload text" {
+		t.Fatalf("expected message_payload text, got %q", submit.Text)
+	}
+}
+
+func TestParseSubmitSMSARTLV(t *testing.T) {
+	body := submitSMBodyWith(0x00, 0x00, []byte("part"))
+	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12, 0x34})
+	body = appendTLV(body, TagSARTotalSegments, []byte{0x02})
+	body = appendTLV(body, TagSARSegmentSeqnum, []byte{0x02})
+	submit, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 10, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.Concat == nil || submit.Concat.Reference != 0x1234 || submit.Concat.Total != 2 || submit.Concat.Part != 2 {
+		t.Fatalf("sar tlv not parsed: %+v", submit.Concat)
 	}
 }
 
@@ -119,6 +160,48 @@ func TestSMPPClientServerSession(t *testing.T) {
 	}
 }
 
+func TestServerRejectsWhenMaxSessionsReached(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(config.SMPPConfig{
+		Addr:        "127.0.0.1:0",
+		SystemID:    "client-a",
+		MaxSessions: 1,
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool { return true },
+		nil,
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+
+	addr := waitServerAddr(t, server)
+	conn1, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn1.Close()
+	conn2, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	_ = conn2.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := ReadPDU(conn2); err == nil {
+		t.Fatal("expected second connection to be closed")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
 func waitServerAddr(t *testing.T, server *Server) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -143,17 +226,33 @@ func bindBody(systemID, password string) []byte {
 }
 
 func submitSMBody(from, to, text string) []byte {
+	return submitSMBodyWithAddr(from, to, 0x00, 0x00, []byte(text))
+}
+
+func submitSMBodyWith(esmClass, dataCoding byte, shortMessage []byte) []byte {
+	return submitSMBodyWithAddr("1069", "13800138000", esmClass, dataCoding, shortMessage)
+}
+
+func submitSMBodyWithAddr(from, to string, esmClass, dataCoding byte, shortMessage []byte) []byte {
 	body := []byte{}
 	body = append(body, CString("")...)
 	body = append(body, 0x01, 0x01)
 	body = append(body, CString(from)...)
 	body = append(body, 0x01, 0x01)
 	body = append(body, CString(to)...)
-	body = append(body, 0x00, 0x00, 0x00)
+	body = append(body, esmClass, 0x00, 0x00)
 	body = append(body, CString("")...)
 	body = append(body, CString("")...)
-	body = append(body, 0x01, 0x00, 0x00, 0x00)
-	body = append(body, byte(len(text)))
-	body = append(body, []byte(text)...)
+	body = append(body, 0x01, 0x00, dataCoding, 0x00)
+	body = append(body, byte(len(shortMessage)))
+	body = append(body, shortMessage...)
 	return body
+}
+
+func appendTLV(body []byte, tag uint16, value []byte) []byte {
+	var header [4]byte
+	binary.BigEndian.PutUint16(header[0:2], tag)
+	binary.BigEndian.PutUint16(header[2:4], uint16(len(value)))
+	body = append(body, header[:]...)
+	return append(body, value...)
 }

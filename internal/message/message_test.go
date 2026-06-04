@@ -24,6 +24,9 @@ func TestSplitLongGSM7Message(t *testing.T) {
 	if segments[0].Total != 2 || segments[1].Part != 2 {
 		t.Fatalf("unexpected segment numbering: %+v", segments)
 	}
+	if len(segments[0].UDH) != 7 || segments[0].UDH[1] != 0x08 || segments[0].UDH[2] != 0x04 {
+		t.Fatalf("expected 16-bit concat UDH, got % x", segments[0].UDH)
+	}
 	if Join(segments) != text {
 		t.Fatal("joined text does not match original")
 	}

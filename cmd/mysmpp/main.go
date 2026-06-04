@@ -34,12 +34,12 @@ func main() {
 
 	st := store.NewMemory()
 	registry := provider.NewRegistry()
-	registry.Replace(buildProviders(ctx, cfg))
+	registry.Replace(provider.BuildProviders(ctx, cfg))
 	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute)
 	defer dispatcher.Close()
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
-	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher)
+	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,
@@ -61,7 +61,7 @@ func main() {
 				return true
 			}
 		}
-		return cfg.SMPP.SystemID != "" && systemID == cfg.SMPP.SystemID && password == cfg.SMPP.Password
+		return false
 	}
 	onSubmit := func(session *smpp.Session, submit smpp.SubmitSM) {
 		receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
@@ -115,37 +115,4 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown failed", "err", err)
 	}
-}
-
-func buildProviders(ctx context.Context, cfg config.Config) map[string]provider.Provider {
-	ruleByName := map[string]config.HTTPRuleConfig{}
-	for _, rule := range cfg.Outbound {
-		ruleByName[rule.Name] = rule
-	}
-	out := map[string]provider.Provider{}
-	for _, p := range cfg.Providers {
-		if !p.Enabled {
-			continue
-		}
-		switch p.Protocol {
-		case "http", "https":
-			rule, ok := ruleByName[p.Rule]
-			if !ok {
-				continue
-			}
-			out[p.Name] = provider.NewHTTPProvider(p, rule)
-		case "mock":
-			mock := provider.NewNamedMock(ctx, p.Name)
-			mock.DelayMin = 2 * time.Second
-			mock.DelayMax = 4 * time.Second
-			out[p.Name] = mock
-		}
-	}
-	if len(out) == 0 {
-		mock := provider.NewNamedMock(ctx, "mock")
-		mock.DelayMin = 2 * time.Second
-		mock.DelayMax = 4 * time.Second
-		out["mock"] = mock
-	}
-	return out
 }

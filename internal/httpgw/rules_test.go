@@ -71,7 +71,8 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
-	gateway := NewWithDispatcher(cfg, store.NewMemory(), dispatcher)
+	st := store.NewMemory()
+	gateway := NewWithDispatcher(cfg, st, dispatcher)
 	body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -83,6 +84,13 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"provider":"mock-a"`) {
 		t.Fatalf("dispatcher receipt not returned: %s", rec.Body.String())
+	}
+	messages, err := st.ListMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Direction != message.DirectionMT || messages[0].Provider != "mock-a" {
+		t.Fatalf("dispatcher submit should store MT message: %+v", messages)
 	}
 }
 
@@ -215,6 +223,61 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected dynamic inbound to work, got %d", rec.Code)
+	}
+}
+
+func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
+	cfg := config.Default()
+	cfg.Routes = []config.RouteConfig{{
+		Name:     "old",
+		Provider: "mock-a",
+		Priority: 1,
+	}}
+	cfg.Providers = []config.ProviderConfig{{
+		Name:     "mock-a",
+		Protocol: "mock",
+		Enabled:  true,
+	}}
+	reg := provider.NewRegistry()
+	reg.Replace(provider.BuildProviders(context.Background(), cfg))
+	defer reg.CloseAll()
+	dispatcher := dispatch.New(nil, reg, nil, time.Minute)
+	defer dispatcher.Close()
+	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+
+	st := store.NewMemory()
+	gateway := NewWithDispatcher(cfg, st, dispatcher, reg, context.Background())
+	cfg.Routes = []config.RouteConfig{{
+		Name:     "new",
+		Provider: "mock-b",
+		Priority: 1,
+	}}
+	cfg.Providers = []config.ProviderConfig{{
+		Name:     "mock-b",
+		Protocol: "mock",
+		Enabled:  true,
+	}}
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"provider":"mock-b"`) || !strings.Contains(rec.Body.String(), `"route":"new"`) {
+		t.Fatalf("dispatcher did not use reloaded config: %s", rec.Body.String())
 	}
 }
 

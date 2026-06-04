@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ func NewHTTPProvider(p config.ProviderConfig, rule config.HTTPRuleConfig) *HTTPP
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		providerIDField: firstNonEmpty(rule.Fields["__response_id"], "messageId"),
+		providerIDField: firstNonEmpty(rule.Fields["__response_id_path"], firstNonEmpty(rule.Fields["__response_id"], "messageId")),
 	}
 }
 
@@ -70,7 +71,7 @@ func (p *HTTPProvider) Send(msg OutboundMessage) (string, error) {
 	if resp.StatusCode >= http.StatusBadRequest {
 		return "", fmt.Errorf("provider %s status %d: %s", p.name, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	id := extractProviderID(body, resp.Header.Get("Content-Type"), p.providerIDField)
+	id := extractProviderID(body, resp.Header.Get("Content-Type"), p.providerIDField, p.rule.Fields["__response_id_regex"])
 	if id == "" {
 		id = msg.GatewayID
 	}
@@ -177,7 +178,7 @@ func encodingName(dataCoding uint8) string {
 	return "gsm7"
 }
 
-func extractProviderID(body []byte, contentType, field string) string {
+func extractProviderID(body []byte, contentType, field, pattern string) string {
 	value := strings.TrimSpace(string(body))
 	if value == "" {
 		return ""
@@ -185,7 +186,7 @@ func extractProviderID(body []byte, contentType, field string) string {
 	if strings.Contains(contentType, "application/json") || strings.HasPrefix(value, "{") {
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err == nil {
-			if raw, ok := payload[field]; ok {
+			if raw, ok := valueAtPath(payload, field); ok {
 				return strings.TrimSpace(fmt.Sprint(raw))
 			}
 			if raw, ok := payload["id"]; ok {
@@ -193,5 +194,40 @@ func extractProviderID(body []byte, contentType, field string) string {
 			}
 		}
 	}
+	if pattern != "" {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return ""
+		}
+		matches := re.FindStringSubmatch(value)
+		if len(matches) > 1 {
+			return strings.TrimSpace(matches[1])
+		}
+		if len(matches) == 1 {
+			return strings.TrimSpace(matches[0])
+		}
+		return ""
+	}
+	if field != "" && field != "messageId" {
+		return ""
+	}
 	return value
+}
+
+func valueAtPath(payload map[string]any, path string) (any, bool) {
+	if path == "" {
+		return nil, false
+	}
+	var current any = payload
+	for _, part := range strings.Split(path, ".") {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }

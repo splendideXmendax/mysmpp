@@ -135,7 +135,7 @@ func chunkRunes(text string, limit int) []string {
 }
 
 func concatUDH(ref uint16, part, total int) []byte {
-	return []byte{0x05, 0x00, 0x03, byte(ref), byte(total), byte(part)}
+	return []byte{0x06, 0x08, 0x04, byte(ref >> 8), byte(ref), byte(total), byte(part)}
 }
 
 func randomReference() uint16 {

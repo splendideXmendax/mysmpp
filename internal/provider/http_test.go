@@ -50,3 +50,61 @@ func TestHTTPProviderSendsRenderedRequest(t *testing.T) {
 		t.Fatalf("body not rendered: %q", gotBody)
 	}
 }
+
+func TestHTTPProviderExtractsProviderIDWithRegex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("OK MsgID: abc123 accepted"))
+	}))
+	defer server.Close()
+
+	p := NewHTTPProvider(config.ProviderConfig{
+		Name:     "http-a",
+		Endpoint: server.URL,
+	}, config.HTTPRuleConfig{
+		Method:      "POST",
+		ContentType: "application/x-www-form-urlencoded",
+		Fields: map[string]string{
+			"mobile":              "to",
+			"msg":                 "text",
+			"__response_id_regex": `MsgID:\s+([A-Za-z0-9_-]+)`,
+		},
+	})
+	defer p.Close()
+
+	id, err := p.Send(OutboundMessage{GatewayID: "g1", DestAddr: "13800138000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "abc123" {
+		t.Fatalf("unexpected provider id %q", id)
+	}
+}
+
+func TestHTTPProviderDoesNotUseWholeBodyWhenPathMisses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
+	p := NewHTTPProvider(config.ProviderConfig{
+		Name:     "http-a",
+		Endpoint: server.URL,
+	}, config.HTTPRuleConfig{
+		Method:      "POST",
+		ContentType: "application/x-www-form-urlencoded",
+		Fields: map[string]string{
+			"mobile":        "to",
+			"msg":           "text",
+			"__response_id": "msgid",
+		},
+	})
+	defer p.Close()
+
+	id, err := p.Send(OutboundMessage{GatewayID: "g1", DestAddr: "13800138000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "g1" {
+		t.Fatalf("expected gateway id fallback, got %q", id)
+	}
+}

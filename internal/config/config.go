@@ -183,6 +183,10 @@ func mapsTo(fields map[string]string, internal string) bool {
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
+		cfg.Normalize()
+		if err := cfg.Validate(); err != nil {
+			return cfg, fmt.Errorf("validate config: %w", err)
+		}
 		return cfg, nil
 	}
 	data, err := os.ReadFile(path)

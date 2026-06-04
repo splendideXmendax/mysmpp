@@ -19,6 +19,10 @@ type SubmitSM struct {
 	ReplaceIfPresent     uint8
 	SMDefaultMsgID       uint8
 	OptionalParamsOffset int
+	Payload              []byte
+	UDH                  []byte
+	Concat               *ConcatInfo
+	TLVs                 []TLV
 }
 
 func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
@@ -61,11 +65,32 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	}
 	smLen := int(pdu.Body[offset])
 	offset++
+	var raw []byte
 	if offset+smLen > len(pdu.Body) {
 		return SubmitSM{}, errors.New("short short_message")
 	}
-	text := message.DecodeText(pdu.Body[offset:offset+smLen], dataCoding)
+	raw = append([]byte(nil), pdu.Body[offset:offset+smLen]...)
 	offset += smLen
+	tlvs := ParseTLVs(pdu.Body[offset:])
+	if payload, ok := FindTLV(tlvs, TagMessagePayload); ok && len(payload) > 0 {
+		raw = append([]byte(nil), payload...)
+	}
+	udh, body, err := SplitUDH(raw, esmClass)
+	if err != nil {
+		return SubmitSM{}, err
+	}
+	var concat *ConcatInfo
+	if udh != nil {
+		if parsed, ok := ParseConcat(udh); ok {
+			concat = &parsed
+		}
+	}
+	if concat == nil {
+		if parsed, ok := ParseSAR(tlvs); ok {
+			concat = &parsed
+		}
+	}
+	text := message.DecodeText(body, dataCoding)
 	return SubmitSM{
 		SequenceID:           pdu.SequenceID,
 		From:                 from,
@@ -79,6 +104,10 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 		ReplaceIfPresent:     replaceIfPresent,
 		SMDefaultMsgID:       smDefaultMsgID,
 		OptionalParamsOffset: offset,
+		Payload:              append([]byte(nil), body...),
+		UDH:                  udh,
+		Concat:               concat,
+		TLVs:                 tlvs,
 	}, nil
 }
 

@@ -58,6 +58,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
+		if s.maxSessionsReached() {
+			s.logger.Warn("max sessions reached", "remote", conn.RemoteAddr(), "limit", s.cfg.MaxSessions)
+			_ = conn.Close()
+			continue
+		}
 		session := NewSession(conn, SessionConfig{
 			Logger:      s.logger,
 			OwnSystemID: s.cfg.SystemID,
@@ -100,4 +105,10 @@ func (s *Server) unregister(session *Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, session.ID())
+}
+
+func (s *Server) maxSessionsReached() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.MaxSessions > 0 && len(s.sessions) >= s.cfg.MaxSessions
 }
