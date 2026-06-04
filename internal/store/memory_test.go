@@ -66,3 +66,65 @@ func TestMemoryStoreTrimsOldMessages(t *testing.T) {
 		t.Fatal("trimmed message should not be addressable by id")
 	}
 }
+
+func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnqueueOutbox(context.Background(), OutboxItem{
+		GatewayID: "g1",
+		Provider:  "mock",
+		Payload: OutboxPayload{
+			GatewayID:  "g1",
+			Provider:   "mock",
+			From:       "1069",
+			To:         "13800138000",
+			Text:       "hello",
+			ReceivedAt: time.Now().UTC(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePending(context.Background(), Pending{
+		ProviderID: "p1",
+		GatewayID:  "g1",
+		Provider:   "mock",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveIdempotency(context.Background(), "client", "key", "g1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := reopened.GetMessage(context.Background(), "g1"); err != nil {
+		t.Fatal(err)
+	} else if !ok || got.Text != "hello" {
+		t.Fatalf("message was not persisted: ok=%v msg=%+v", ok, got)
+	}
+	if _, ok, err := reopened.GetPending(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("pending record was not persisted")
+	}
+	if id, ok, err := reopened.CheckIdempotency(context.Background(), "client", "key"); err != nil {
+		t.Fatal(err)
+	} else if !ok || id != "g1" {
+		t.Fatalf("idempotency was not persisted: ok=%v id=%q", ok, id)
+	}
+	if depth, err := reopened.OutboxDepth(context.Background(), "pending"); err != nil {
+		t.Fatal(err)
+	} else if depth != 1 {
+		t.Fatalf("outbox was not persisted, depth=%d", depth)
+	}
+}

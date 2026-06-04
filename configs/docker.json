@@ -1,92 +1,42 @@
 {
   "server": {
-    "http_addr": ":8080",
+    "http_addr": "0.0.0.0:19087",
     "shutdown_timeout": "10s"
   },
   "smpp": {
-    "addr": ":2775",
-    "system_id": "mysmpp",
-    "password": "CHANGE_ME_BEFORE_DEPLOY",
+    "addr": "0.0.0.0:29175",
+    "system_id": "mysmpp-dev",
+    "password": "AUTO_GENERATE_ON_FIRST_RUN",
     "system_type": "gateway",
     "max_sessions": 128,
+    "max_sessions_per_system_id": 4,
     "window_size": 16,
     "enquire_period": "30s"
   },
   "esmes": [
     {
-      "system_id": "esme1",
-      "password": "CHANGE_ME_BEFORE_DEPLOY"
-    },
-    {
-      "system_id": "load-tester",
-      "password": "CHANGE_ME_BEFORE_DEPLOY"
+      "system_id": "dev-esme",
+      "password": "AUTO_GENERATE_ON_FIRST_RUN"
     }
   ],
   "routes": [
     {
       "name": "default",
       "prefix": [],
-      "provider": "demo-http-provider",
+      "provider": "dev-mock",
       "priority": 1
     }
   ],
   "providers": [
     {
-      "name": "demo-http-provider",
+      "name": "dev-mock",
       "protocol": "mock",
-      "endpoint": "",
-      "rule": "demo-http-json",
-      "enabled": true,
-      "rate_limit": {
-        "tps": 200,
-        "burst": 400,
-        "timeout_ms": 2000
-      }
+      "enabled": true
     }
   ],
-  "inbound": [
-    {
-      "name": "provider-callback",
-      "method": "POST",
-      "path": "/callback/provider",
-      "content_type": "application/json",
-      "auth_header": "X-Token",
-      "auth_token": "CHANGE_ME_BEFORE_DEPLOY",
-      "fields": {
-        "id": "message_id",
-        "from": "source",
-        "to": "destination",
-        "text": "content"
-      },
-      "success_status": 200,
-      "success_body": "{\"status\":\"ok\"}"
-    }
-  ],
-  "outbound": [
-    {
-      "name": "demo-http-json",
-      "method": "POST",
-      "content_type": "application/json",
-      "fields": {
-        "messageId": "id",
-        "sender": "from",
-        "receiver": "to",
-        "content": "text",
-        "coding": "encoding"
-      },
-      "headers": {
-        "X-Request-ID": "{{id}}"
-      }
-    }
-  ],
-  "clients": [
-    {
-      "client_id": "demo-client",
-      "token": "CHANGE_ME_BEFORE_DEPLOY",
-      "enabled": true,
-      "allowed_ips": ["127.0.0.1/32", "::1/128"]
-    }
-  ],
+  "inbound": [],
+  "outbound": [],
+  "clients": [],
   "risk": {
     "blocked_to_prefix": [],
     "blocked_keywords": [],
@@ -95,11 +45,11 @@
     "per_client_per_second": 100
   },
   "storage": {
-    "driver": "memory",
+    "driver": "file",
     "dsn": ""
   },
   "admin": {
     "username": "admin",
-    "password": "CHANGE_ME_BEFORE_DEPLOY"
+    "password": "AUTO_GENERATE_ON_FIRST_RUN"
   }
 }

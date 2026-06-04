@@ -33,6 +33,7 @@ type Gateway struct {
 	dispatcher *dispatch.Dispatcher
 	registry   *provider.Registry
 	ctx        context.Context
+	configPath string
 	mux        *http.ServeMux
 	riskMu     sync.Mutex
 	riskCounts map[string]rateWindow
@@ -61,6 +62,8 @@ func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.D
 			if v != nil {
 				g.ctx = v
 			}
+		case string:
+			g.configPath = v
 		}
 	}
 	g.routes()
@@ -408,6 +411,12 @@ func (g *Gateway) configAPI(w http.ResponseWriter, r *http.Request) {
 		if err := g.UpdateConfig(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if g.configPath != "" {
+			if err := config.AtomicWrite(g.configPath, g.Config()); err != nil {
+				http.Error(w, "runtime config updated but persist failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, g.Config())
 	default:

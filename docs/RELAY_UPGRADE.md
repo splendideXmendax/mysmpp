@@ -116,7 +116,7 @@ Inbound DLR callback rules:
 
 ## Required Before Production
 
-- Replace every `CHANGE_ME_BEFORE_DEPLOY` value before starting the service.
+- For production, copy `configs/production.example.json` and replace every `CHANGE_ME_BEFORE_DEPLOY` value before starting the service. The default `configs/example.json` is a runnable local development config on cold ports.
 - Keep each provider DLR callback on a distinct authenticated inbound rule, and set `provider` to the exact configured provider name.
 - Move `storage.driver` to `postgres` after implementing the PostgreSQL Store and applying `migrations/001_init.up.sql`.
 - Put the service behind TLS termination if exposed outside a trusted network.

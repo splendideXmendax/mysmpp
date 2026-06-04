@@ -7,8 +7,10 @@ services:
     container_name: mysmpp
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "2775:2775"
+      - "19087:19087"
+      - "29175:29175"
     volumes:
-      - ./configs/docker.json:/app/configs/config.json:ro
-    command: ["-config", "/app/configs/config.json"]
+      - mysmpp-data:/app/data
+
+volumes:
+  mysmpp-data:

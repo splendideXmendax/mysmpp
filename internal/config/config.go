@@ -4,11 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 const PlaceholderSecret = "CHANGE_ME_BEFORE_DEPLOY"
+const AutoGenerateSecret = "AUTO_GENERATE_ON_FIRST_RUN"
+
+const (
+	DefaultHTTPAddr = "127.0.0.1:19087"
+	DefaultSMPPAddr = "127.0.0.1:29175"
+)
 
 type Config struct {
 	Server    ServerConfig     `json:"server"`
@@ -116,11 +123,10 @@ type AdminConfig struct {
 
 func Default() Config {
 	return Config{
-		Server: ServerConfig{HTTPAddr: ":8080", ShutdownTimeout: "10s"},
+		Server: ServerConfig{HTTPAddr: DefaultHTTPAddr, ShutdownTimeout: "10s"},
 		SMPP: SMPPConfig{
-			Addr:                   ":2775",
+			Addr:                   DefaultSMPPAddr,
 			SystemID:               "mysmpp",
-			Password:               "secret",
 			SystemType:             "gateway",
 			MaxSessions:            128,
 			MaxSessionsPerSystemID: 4,
@@ -133,13 +139,13 @@ func Default() Config {
 
 func (c *Config) Normalize() {
 	if c.Server.HTTPAddr == "" {
-		c.Server.HTTPAddr = ":8080"
+		c.Server.HTTPAddr = DefaultHTTPAddr
 	}
 	if c.Server.ShutdownTimeout == "" {
 		c.Server.ShutdownTimeout = "10s"
 	}
 	if c.SMPP.Addr == "" {
-		c.SMPP.Addr = ":2775"
+		c.SMPP.Addr = DefaultSMPPAddr
 	}
 	if c.Storage.Driver == "" {
 		c.Storage.Driver = "memory"
@@ -297,6 +303,10 @@ func isPlaceholder(value string) bool {
 	return value == PlaceholderSecret
 }
 
+func IsAutoGenerate(value string) bool {
+	return value == AutoGenerateSecret
+}
+
 var prefixPattern = regexp.MustCompile(`^[0-9+*#]*$`)
 
 func validPrefix(prefix string) bool {
@@ -329,8 +339,22 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 	cfg.Normalize()
+	resolveStoragePath(path, &cfg)
 	if err := cfg.Validate(); err != nil {
 		return cfg, fmt.Errorf("validate config: %w", err)
 	}
 	return cfg, nil
+}
+
+func resolveStoragePath(configPath string, cfg *Config) {
+	if !strings.EqualFold(cfg.Storage.Driver, "file") && !strings.EqualFold(cfg.Storage.Driver, "json") {
+		return
+	}
+	if cfg.Storage.DSN == "" {
+		cfg.Storage.DSN = filepath.Join(filepath.Dir(configPath), "store.json")
+		return
+	}
+	if !filepath.IsAbs(cfg.Storage.DSN) {
+		cfg.Storage.DSN = filepath.Join(filepath.Dir(configPath), cfg.Storage.DSN)
+	}
 }

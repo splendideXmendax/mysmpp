@@ -14,15 +14,15 @@
 推荐使用新的服务端渲染管理后台：
 
 ```text
-http://127.0.0.1:8080/admin/
+http://127.0.0.1:19087/admin/
 ```
 
-它使用 `admin.username` / `admin.password` 登录，session cookie 为 `HttpOnly`、`SameSite=Strict`，所有 POST 表单都带 CSRF token。后台当前提供概览、线路 CRUD、`providers` / `esmes` / `inbound` / `outbound` / `risk` / `smpp` 分区 JSON 编辑，以及完整原始 JSON 编辑。保存时会先执行完整配置校验并更新运行时配置，再原子写回启动参数 `-config` 指定的配置文件。
+它使用 `admin.username` / `admin.password` 登录，session cookie 为 `HttpOnly`、`SameSite=Strict`，所有 POST 表单都带 CSRF token。后台当前提供概览、线路 CRUD、`providers` / `esmes` / `clients` / `inbound` / `outbound` / `risk` / `smpp` 分区 JSON 编辑，以及完整原始 JSON 编辑。保存时会先执行完整配置校验并更新运行时配置，再原子写回启动参数 `-config` 指定的配置文件。
 
 旧配置页面仍保留：
 
 ```text
-http://127.0.0.1:8080/ui/config
+http://127.0.0.1:19087/ui/config
 ```
 
 配置页面使用以下 API：
@@ -32,7 +32,29 @@ GET /v1/config
 PUT /v1/config
 ```
 
-旧页面修改的是运行时内存配置，不会自动写回 `configs/example.json` 或 `configs/docker.json`。生产使用建议优先使用 `/admin/`，旧页面只作为应急入口。
+旧页面走 `/v1/config`，在 `cmd/mysmpp` 正常启动时也会写回启动参数 `-config` 指定的配置文件。生产使用仍建议优先使用 `/admin/`，旧页面只作为应急入口。
+
+## 配置文件
+
+仓库里的配置文件默认都使用冷门端口，拉代码后可以直接编译启动：
+
+| 文件 | 用途 | HTTP | SMPP | 是否可直接启动 |
+|---|---|---:|---:|---|
+| `configs/example.json` | 本机开发示例 | `127.0.0.1:19087` | `127.0.0.1:29175` | 是 |
+| `configs/dev.json` | 本机开发备用配置 | `127.0.0.1:19087` | `127.0.0.1:29175` | 是 |
+| `configs/docker.json` | Docker/Compose 默认配置 | `0.0.0.0:19087` | `0.0.0.0:29175` | 是 |
+| `configs/production.example.json` | 生产模板 | `:19087` | `:29175` | 否，必须替换占位符 |
+
+开发默认账号：
+
+- 管理后台：`admin` / `mysmpp-admin-19087`
+- SMPP ESME：`dev-esme` / `mysmpp-esme-29175`
+
+这些开发凭据只写在 `configs/example.json`、`configs/dev.json` 和 `configs/docker.json` 中；`internal/config.Default()` 不内置任何 admin、ESME 或 provider 凭据。`cmd/mysmpp` 的 `-config` 默认值是 `configs/example.json`，所以在仓库根目录执行 `go run ./cmd/mysmpp` 就能直接启动。
+
+Docker 快速启动、账号密码、短信路由、上游供应商和 DLR 回调的完整可复制示例见 [QUICKSTART_DOCKER.md](QUICKSTART_DOCKER.md)。
+
+生产模板中的 `CHANGE_ME_BEFORE_DEPLOY` 会被配置校验拒绝，目的是防止忘记替换凭据后上线。
 
 ## 完整结构
 
@@ -53,7 +75,7 @@ PUT /v1/config
 
 ```json
 {
-  "http_addr": ":8080",
+  "http_addr": "127.0.0.1:19087",
   "shutdown_timeout": "10s"
 }
 ```
@@ -65,9 +87,9 @@ PUT /v1/config
 
 ```json
 {
-  "addr": ":2775",
-  "system_id": "mysmpp",
-  "password": "secret",
+  "addr": "127.0.0.1:29175",
+  "system_id": "mysmpp-dev",
+  "password": "mysmpp-smpp-29175",
   "system_type": "gateway",
   "max_sessions": 128,
   "window_size": 16,
@@ -90,8 +112,8 @@ PUT /v1/config
 ```json
 [
   {
-    "system_id": "esme1",
-    "password": "secret"
+    "system_id": "dev-esme",
+    "password": "mysmpp-esme-29175"
   },
   {
     "system_id": "load-tester",
@@ -112,7 +134,7 @@ PUT /v1/config
 当前 SMPP 中转 MVP 的链路如下：
 
 ```text
-ESME submit_sm -> Session -> Core -> Mock Provider -> Core -> deliver_sm DLR -> ESME
+ESME submit_sm -> Session -> Dispatcher -> Mock Provider -> Dispatcher -> deliver_sm DLR -> ESME
 ```
 
 `submit_sm_resp` 中返回的 message_id 形如 `g0000000001`。如果 ESME 在 `registered_delivery` 中请求回执，mock provider 会在几秒后生成 `DELIVRD` 状态，网关构造 DLR：
@@ -125,8 +147,8 @@ ESME submit_sm -> Session -> Core -> Mock Provider -> Core -> deliver_sm DLR -> 
 本地验证：
 
 ```powershell
-go run ./cmd/mysmpp -config configs/example.json
-go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
+go run ./cmd/mysmpp
+go run ./cmd/testesme -text ping
 ```
 
 ## 下游入站 HTTP：inbound
@@ -292,7 +314,7 @@ go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
 
 ## 推荐生产配置方向
 
-1. 增加 `clients` 配置，把每个下游客户的 SMPP/HTTP 凭证、限速、签名策略独立出来。
+1. 继续完善 `clients` 配置，把每个下游客户的 SMPP/HTTP 凭证、限速、签名策略和路由策略独立出来。
 2. 为上游通道增加健康状态、失败熔断、备用通道和价格策略。
 3. 路由条件扩展到国家码、号段、客户、内容类型、模板、价格优先级。
 4. 持久化消息、分段、回执和重试记录。

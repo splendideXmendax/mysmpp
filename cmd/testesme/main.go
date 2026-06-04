@@ -12,9 +12,9 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "localhost:2775", "gateway address")
-	user := flag.String("u", "esme1", "system_id")
-	pass := flag.String("p", "secret", "password")
+	addr := flag.String("addr", "127.0.0.1:29175", "gateway address")
+	user := flag.String("u", "dev-esme", "system_id")
+	pass := flag.String("p", "mysmpp-esme-29175", "password")
 	src := flag.String("src", "10690000", "source address")
 	dst := flag.String("dst", "13800138000", "destination address")
 	text := flag.String("text", "ping", "message text")

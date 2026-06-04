@@ -8,14 +8,17 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/mysmpp ./cmd/mysmpp
+RUN mkdir -p /out/data && touch /out/data/.keep
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 COPY --from=build /out/mysmpp /app/mysmpp
-COPY configs/example.json /app/configs/example.json
+COPY --from=build --chown=nonroot:nonroot /out/data /app/data
+COPY --chown=nonroot:nonroot configs/docker.json /app/configs/docker.json
 
-EXPOSE 8080 2775
+EXPOSE 19087 29175
+ENV MYSMPP_CONFIG_SEED=/app/configs/docker.json
 USER nonroot:nonroot
 ENTRYPOINT ["/app/mysmpp"]
-CMD ["-config", "/app/configs/example.json"]
+CMD ["-config", "/app/data/config.json"]

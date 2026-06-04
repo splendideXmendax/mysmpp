@@ -24,36 +24,49 @@ internal/message    消息模型、编码识别、长短信拆分和重组
 internal/provider   上游适配器接口和 mock provider
 internal/router     按号码前缀匹配上游供应商
 internal/smpp       SMPP TCP 服务、session、PDU 读写、submit/DLR 处理
-internal/store      存储接口和内存实现
+internal/store      存储接口、内存实现和文件持久化实现
 configs             示例配置
 docs                配置和部署文档
 ```
 
 ## 本地运行
 
-`configs/example.json` 是生产前检查模板，包含 `CHANGE_ME_BEFORE_DEPLOY` 占位符。首次运行前请复制一份本地配置并替换 admin、SMPP ESME、HTTP client token 等占位值。
+一拉代码即可直接启动开发环境；程序默认读取仓库里的 `configs/example.json`：
+
+```powershell
+go run ./cmd/mysmpp
+```
+
+开发默认地址使用本机冷门端口，避免撞常见服务：
+
+- HTTP API / 管理后台：`127.0.0.1:19087`
+- SMPP 监听：`127.0.0.1:29175`
+- 管理后台登录：`admin` / `mysmpp-admin-19087`
+- 示例 ESME bind：`system_id=dev-esme`，`password=mysmpp-esme-29175`
+
+这些开发账号和密码都写在 `configs/example.json` 里，Go 代码里的默认配置不内置任何 admin 或 ESME 凭据。也可以显式指定同一个配置文件：
 
 ```powershell
 go run ./cmd/mysmpp -config configs/example.json
 ```
 
-默认地址：
+配置文件说明：
 
-- HTTP API：`:8080`
-- SMPP 监听：`:2775`
-- SMPP 网关标识：`system_id=mysmpp`
-- 示例 ESME bind：`system_id=esme1`，`password=<你在配置里设置的密码>`
+- `configs/example.json`：本机开发配置，可直接启动，监听 `127.0.0.1:19087` 和 `127.0.0.1:29175`。
+- `configs/dev.json`：同样的本机开发配置，保留给脚本或本地覆盖使用。
+- `configs/docker.json`：Docker 配置，容器内监听 `0.0.0.0:19087` 和 `0.0.0.0:29175`。
+- `configs/production.example.json`：生产模板，保留 `CHANGE_ME_BEFORE_DEPLOY` 占位符，生产使用时复制它并替换所有凭据。
 
 配置页面：
 
 ```text
-http://127.0.0.1:8080/ui/config
+http://127.0.0.1:19087/ui/config
 ```
 
 新的服务端渲染管理后台：
 
 ```text
-http://127.0.0.1:8080/admin/
+http://127.0.0.1:19087/admin/
 ```
 
 `/admin/` 使用配置里的 `admin.username` / `admin.password` 登录，提供概览、线路 CRUD、各配置分区 JSON 表单和完整 JSON 编辑。通过后台保存时会先更新运行时配置，再原子写回 `-config` 指定的配置文件；旧 `/ui/config` 仍保留为应急入口，但只更新运行时配置。
@@ -63,7 +76,7 @@ http://127.0.0.1:8080/admin/
 启动网关后，另开一个终端运行测试 ESME：
 
 ```powershell
-go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p <你的ESME密码> -text ping
+go run ./cmd/testesme -text ping
 ```
 
 预期能看到类似输出：
@@ -86,17 +99,21 @@ docker compose up -d --build
 
 默认暴露：
 
-- HTTP/API/配置页面：`http://127.0.0.1:8080`
-- SMPP：`127.0.0.1:2775`
+- HTTP/API/配置页面：`http://127.0.0.1:19087`
+- SMPP：`127.0.0.1:29175`
 
-Docker 默认使用 `configs/docker.json`。详细部署、端口、安全组、日志和常见问题见 [docs/DOCKER.md](docs/DOCKER.md)。
+Docker 镜像用 `/app/configs/docker.json` 作为首次启动种子，运行配置和持久化数据写入 `/app/data`。直接 `docker run` 或 `docker compose up` 都不需要额外传配置。详细部署、端口、安全组、日志和常见问题见 [docs/DOCKER.md](docs/DOCKER.md)。
+
+如果只想拉代码后立刻用 Docker 跑起来，并了解账号、密码、短信路由和上游供应商怎么配，直接看 [docs/QUICKSTART_DOCKER.md](docs/QUICKSTART_DOCKER.md)。
+
+当前 Docker 默认不启动数据库，也不依赖数据库；运行时使用文件 Store 持久化消息、outbox、pending DLR、幂等记录和配置文件。生产如果需要多实例共享存储，再接 SQL Store。
 
 ## HTTP API
 
 提交一条 MT 短信：
 
 ```powershell
-Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/messages `
+Invoke-RestMethod -Method Post http://127.0.0.1:19087/v1/messages `
   -ContentType "application/json" `
   -Body '{"from":"10690000","to":"13800138000","text":"hello"}'
 ```
@@ -104,13 +121,13 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/messages `
 查看已记录消息：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8080/v1/messages
+Invoke-RestMethod http://127.0.0.1:19087/v1/messages
 ```
 
 查看配置：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8080/v1/config
+Invoke-RestMethod http://127.0.0.1:19087/v1/config
 ```
 
 ## 配置模型
@@ -124,7 +141,7 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/config
 - `providers`：上游供应商配置，包含协议、地址、账号和使用的规则。
 - `inbound`：下游或供应商回调到网关时的 HTTP 入站规则。
 - `outbound`：网关请求上游供应商时的 HTTP 出站规则。
-- `storage`：存储配置，当前默认内存存储。
+- `storage`：存储配置，本机示例默认内存存储，Docker 默认文件持久化。
 
 详细说明见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
 

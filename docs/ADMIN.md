@@ -5,7 +5,7 @@
 ## 入口
 
 ```text
-http://127.0.0.1:8080/admin/
+http://127.0.0.1:19087/admin/
 ```
 
 登录凭据来自配置：
@@ -13,18 +13,20 @@ http://127.0.0.1:8080/admin/
 ```json
 "admin": {
   "username": "admin",
-  "password": "change-me"
+  "password": "mysmpp-admin-19087"
 }
 ```
+
+默认开发启动时，程序读取 `configs/example.json`，所以默认登录是 `admin` / `mysmpp-admin-19087`。如果使用其他配置文件，以该文件里的 `admin.username` / `admin.password` 为准。
 
 ## 已实现页面
 
 - 概览：显示 routes、providers、ESMEs、inbound、outbound、clients 数量。
 - 线路：支持新建、编辑、删除 routes。
-- 上游供应商、下游 ESME、入站规则、出站规则、风控、SMPP：按分区 JSON 表单编辑。
+- 上游供应商、下游 ESME、HTTP 客户端、入站规则、出站规则、风控、SMPP：按分区 JSON 表单编辑。
 - 原始 JSON：编辑完整配置。
 
-保存动作都会先执行完整配置校验和运行时热更新，再通过临时文件 + rename 原子写回 `-config` 指定的配置文件。未指定 `-config` 时只更新运行时配置。
+保存动作都会先执行完整配置校验和运行时热更新，再通过临时文件 + rename 原子写回 `-config` 指定的配置文件。默认开发启动时会写回 `configs/example.json`。
 
 ## 安全行为
 

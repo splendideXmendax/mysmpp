@@ -519,6 +519,49 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	}
 }
 
+func TestConfigAPIPersistsConfigWhenPathConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
+	cfg.Routes = []config.RouteConfig{{
+		Name:     "old",
+		Provider: "mock-a",
+		Priority: 1,
+	}}
+	cfg.Providers = []config.ProviderConfig{{
+		Name:     "mock-a",
+		Protocol: "mock",
+		Enabled:  true,
+	}}
+	configPath := t.TempDir() + "/config.json"
+	gateway := NewWithDispatcher(cfg, store.NewMemory(), nil, configPath)
+
+	cfg.Routes = []config.RouteConfig{{
+		Name:     "persisted",
+		Provider: "mock-a",
+		Priority: 9,
+	}}
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
+	req.SetBasicAuth("admin", "secret")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Routes) != 1 || loaded.Routes[0].Name != "persisted" {
+		t.Fatalf("config api did not persist route: %+v", loaded.Routes)
+	}
+}
+
 func waitForMessages(t *testing.T, st store.Store, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

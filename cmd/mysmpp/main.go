@@ -21,27 +21,37 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to JSON config file")
+	configPath := flag.String("config", "configs/example.json", "path to JSON config file")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	cfg, err := config.Load(*configPath)
+	cfg, boot, err := config.LoadStartup(*configPath, os.Getenv("MYSMPP_CONFIG_SEED"))
 	if err != nil {
 		logger.Error("load config failed", "err", err)
 		os.Exit(1)
+	}
+	if boot.Seeded {
+		logger.Info("seeded config", "config", boot.ConfigPath)
+	}
+	if boot.Generated {
+		logger.Info("generated startup credentials", "config", boot.ConfigPath, "credentials", boot.CredentialsPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	st := store.NewMemory()
+	st, err := store.NewFromConfig(cfg)
+	if err != nil {
+		logger.Error("init store failed", "err", err)
+		os.Exit(1)
+	}
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
 	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute, st)
 	defer dispatcher.Close()
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
-	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx)
+	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx, *configPath)
 	adminServer := admin.New(httpGateway, *configPath, logger)
 	defer adminServer.Close()
 	httpGateway.Mount("/admin", http.RedirectHandler("/admin/", http.StatusSeeOther))
