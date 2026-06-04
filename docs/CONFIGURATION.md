@@ -32,6 +32,7 @@ PUT /v1/config
 {
   "server": {},
   "smpp": {},
+  "esmes": [],
   "routes": [],
   "providers": [],
   "inbound": [],
@@ -67,11 +68,58 @@ PUT /v1/config
 ```
 
 - `addr`：SMPP TCP 监听地址。
-- `system_id` / `password`：下游 SMPP 客户端 bind 凭证。
+- `system_id`：网关在 bind 响应里返回给 ESME 的 system_id。
+- `password`：兼容旧配置的单 ESME bind 密码；新配置建议使用 `esmes`。
 - `system_type`：保留字段，后续可用于区分客户类型。
 - `max_sessions`：最大会话数，当前已配置化，后续会在会话管理中强制执行。
 - `window_size`：SMPP 并发窗口，后续用于 submit/deliver 流控。
 - `enquire_period`：链路保活周期，后续用于主动 `enquire_link`。
+
+## esmes
+
+`esmes` 描述允许连接到网关的下游 SMPP 客户端账号。SMPP 客户端 bind 时提交的 `system_id` 和 `password` 会先匹配这个数组；如果没有命中，会再兼容旧配置里的 `smpp.system_id` / `smpp.password`。
+
+```json
+[
+  {
+    "system_id": "esme1",
+    "password": "secret"
+  },
+  {
+    "system_id": "load-tester",
+    "password": "test123"
+  }
+]
+```
+
+字段说明：
+
+- `system_id`：下游 ESME 的 bind 用户名，必须唯一。
+- `password`：下游 ESME 的 bind 密码。
+
+当前版本的 DLR mapping 会记录 ESME 所在 session。mock provider 返回 DLR 后，网关根据 mapping 找回原 session，并用 `deliver_sm` 把回执推回该连接。
+
+## SMPP 中转与 DLR
+
+当前 SMPP 中转 MVP 的链路如下：
+
+```text
+ESME submit_sm -> Session -> Core -> Mock Provider -> Core -> deliver_sm DLR -> ESME
+```
+
+`submit_sm_resp` 中返回的 message_id 形如 `g0000000001`。如果 ESME 在 `registered_delivery` 中请求回执，mock provider 会在几秒后生成 `DELIVRD` 状态，网关构造 DLR：
+
+- `esm_class=0x04`，表示 SMSC Delivery Receipt。
+- `short_message` 包含 SMPP receipt text，例如 `id:g0000000001 ... stat:DELIVRD ...`。
+- TLV 包含 `receipted_message_id` 和 `message_state`。
+- DLR 的 `source_addr` / `destination_addr` 会相对原 submit_sm 反向。
+
+本地验证：
+
+```powershell
+go run ./cmd/mysmpp -config configs/example.json
+go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
+```
 
 ## 下游入站 HTTP：inbound
 

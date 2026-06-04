@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -9,6 +10,11 @@ import (
 )
 
 type MockProvider struct {
+	name   string
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
 	mu sync.Mutex
 	cb DLRCallback
 
@@ -19,11 +25,27 @@ type MockProvider struct {
 }
 
 func NewMock() *MockProvider {
+	return NewNamedMock(context.Background(), "mock")
+}
+
+func NewNamedMock(parent context.Context, name string) *MockProvider {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if name == "" {
+		name = "mock"
+	}
+	ctx, cancel := context.WithCancel(parent)
 	return &MockProvider{
+		name:     name,
+		ctx:      ctx,
+		cancel:   cancel,
 		DelayMin: time.Second,
 		DelayMax: 5 * time.Second,
 	}
 }
+
+func (m *MockProvider) Name() string { return m.name }
 
 func (m *MockProvider) OnDLR(cb DLRCallback) {
 	m.mu.Lock()
@@ -35,17 +57,25 @@ func (m *MockProvider) Send(msg OutboundMessage) (string, error) {
 	n := m.seq.Add(1)
 	providerID := fmt.Sprintf("p%016x", n)
 	if msg.RegisteredDelivery&0x03 != 0 {
+		m.wg.Add(1)
 		go m.scheduleDLR(providerID)
 	}
 	return providerID, nil
 }
 
 func (m *MockProvider) scheduleDLR(providerID string) {
+	defer m.wg.Done()
 	delay := m.DelayMin
 	if m.DelayMax > m.DelayMin {
 		delay += time.Duration(rand.Int63n(int64(m.DelayMax - m.DelayMin)))
 	}
-	time.Sleep(delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-m.ctx.Done():
+		return
+	}
 
 	state := "DELIVRD"
 	errCode := 0
@@ -66,4 +96,12 @@ func (m *MockProvider) scheduleDLR(providerID string) {
 		ErrorCode:  errCode,
 		DoneAt:     time.Now().UTC(),
 	})
+}
+
+func (m *MockProvider) Close() error {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.wg.Wait()
+	return nil
 }

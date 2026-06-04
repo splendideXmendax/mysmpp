@@ -8,25 +8,35 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/dispatch"
 	"github.com/splendideXmendax/mysmpp/internal/message"
+	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/router"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 type Gateway struct {
-	mu    sync.RWMutex
-	cfg   config.Config
-	store store.Store
-	mux   *http.ServeMux
+	mu         sync.RWMutex
+	cfg        config.Config
+	store      store.Store
+	dispatcher *dispatch.Dispatcher
+	mux        *http.ServeMux
 }
 
 func New(cfg config.Config, st store.Store) *Gateway {
 	g := &Gateway{cfg: cfg, store: st, mux: http.NewServeMux()}
+	g.routes()
+	return g
+}
+
+func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.Dispatcher) *Gateway {
+	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, mux: http.NewServeMux()}
 	g.routes()
 	return g
 }
@@ -58,13 +68,37 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, messages)
 	case http.MethodPost:
 		var req struct {
-			From string            `json:"from"`
-			To   string            `json:"to"`
-			Text string            `json:"text"`
-			Meta map[string]string `json:"meta"`
+			From         string            `json:"from"`
+			To           string            `json:"to"`
+			Text         string            `json:"text"`
+			CallbackURL  string            `json:"callback_url"`
+			CallbackRule string            `json:"callback_rule"`
+			Meta         map[string]string `json:"meta"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if g.dispatcher != nil {
+			receipt, err := g.dispatcher.Submit(r.Context(), dispatch.Envelope{
+				From:               req.From,
+				To:                 req.To,
+				Text:               req.Text,
+				Encoding:           message.DetectEncoding(req.Text),
+				RegisteredDelivery: 1,
+				Source: dispatch.SubmitSource{
+					Kind:         dispatch.SourceHTTPAPI,
+					CallbackURL:  req.CallbackURL,
+					CallbackRule: req.CallbackRule,
+				},
+				ReceivedAt: time.Now().UTC(),
+				Meta:       req.Meta,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, receipt)
 			return
 		}
 		cfg := g.Config()
@@ -153,6 +187,17 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if g.dispatcher != nil && rule.Fields["provider_id"] != "" && rule.Fields["status"] != "" {
+		errCode, _ := strconv.Atoi(valueOf(values, rule.Fields["error_code"], "0"))
+		g.dispatcher.OnDLR(provider.DLR{
+			ProviderID: valueOf(values, rule.Fields["provider_id"], ""),
+			State:      valueOf(values, rule.Fields["status"], ""),
+			ErrorCode:  errCode,
+			DoneAt:     time.Now().UTC(),
+		})
+		g.writeInboundSuccess(w, rule)
+		return
+	}
 	msg := message.New(
 		valueOf(values, rule.Fields["id"], newID()),
 		message.DirectionMO,
@@ -167,6 +212,10 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 		return
 	}
 
+	g.writeInboundSuccess(w, rule)
+}
+
+func (g *Gateway) writeInboundSuccess(w http.ResponseWriter, rule config.HTTPRuleConfig) {
 	status := rule.SuccessStatus
 	if status == 0 {
 		status = http.StatusOK

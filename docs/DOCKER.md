@@ -31,7 +31,10 @@ Docker Compose 默认挂载：
 
 生产部署前至少要修改：
 
-- `smpp.password`
+- `smpp.system_id`
+- `smpp.password`，如果继续使用旧的单账号兼容模式
+- `esmes[].system_id`
+- `esmes[].password`
 - `inbound[].auth_token`
 - `providers[].endpoint`
 - `providers[].system_id`
@@ -70,6 +73,18 @@ Invoke-RestMethod http://127.0.0.1:8080/healthz
 Invoke-RestMethod -Method Post http://127.0.0.1:8080/v1/messages `
   -ContentType "application/json" `
   -Body '{"from":"10690000","to":"13800138000","text":"hello from docker"}'
+```
+
+验证 SMPP DLR：
+
+```powershell
+go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text "hello from docker"
+```
+
+预期测试客户端会先显示 `submitted msg_id=...`，随后收到一条 `deliver_sm` DLR：
+
+```text
+[DLR] 13800138000 -> 10690000 : id:g0000000001 ... stat:DELIVRD err:000 text:hello from docker
 ```
 
 ## 使用裸 Docker
@@ -215,8 +230,18 @@ docker compose logs mysmpp
 检查：
 
 - 宿主机是否开放 `2775`。
-- `smpp.system_id` 和 `smpp.password` 是否和客户端一致。
+- 客户端 bind 的 `system_id` / `password` 是否存在于 `esmes`。
+- 如果没有配置 `esmes`，再检查旧兼容字段 `smpp.system_id` 和 `smpp.password` 是否和客户端一致。
 - 客户端 bind 类型是否为 receiver、transmitter 或 transceiver。
+
+### submit 成功但没有 DLR
+
+检查：
+
+- 客户端提交 `submit_sm` 时是否设置了 `registered_delivery`。
+- 客户端 bind 类型是否能接收下行 PDU，建议使用 `bind_transceiver`。
+- ESME 连接是否在 mock provider 回执返回前断开。
+- 日志中是否有 `submit_sm` 和 `push dlr`。
 
 ### 修改配置后重启丢失
 

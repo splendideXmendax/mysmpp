@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
-	"github.com/splendideXmendax/mysmpp/internal/core"
+	"github.com/splendideXmendax/mysmpp/internal/dispatch"
 	"github.com/splendideXmendax/mysmpp/internal/httpgw"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
@@ -33,12 +33,13 @@ func main() {
 	defer stop()
 
 	st := store.NewMemory()
-	httpGateway := httpgw.New(cfg, st)
-	relayCore := core.New(logger)
-	mockProvider := provider.NewMock()
-	mockProvider.DelayMin = 2 * time.Second
-	mockProvider.DelayMax = 4 * time.Second
-	relayCore.SetProvider(mockProvider)
+	registry := provider.NewRegistry()
+	registry.Replace(buildProviders(ctx, cfg))
+	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute)
+	defer dispatcher.Close()
+	defer registry.CloseAll()
+	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,
@@ -62,8 +63,33 @@ func main() {
 		}
 		return cfg.SMPP.SystemID != "" && systemID == cfg.SMPP.SystemID && password == cfg.SMPP.Password
 	}
-	smppServer := smpp.NewServer(cfg.SMPP, logger, auth, relayCore.OnSubmit)
-	relayCore.SetServer(smppServer)
+	onSubmit := func(session *smpp.Session, submit smpp.SubmitSM) {
+		receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
+			From:               submit.From,
+			To:                 submit.To,
+			Text:               submit.Text,
+			DataCoding:         submit.DataCoding,
+			RegisteredDelivery: submit.RegisteredDelivery,
+			ReceivedAt:         time.Now().UTC(),
+			Source: dispatch.SubmitSource{
+				Kind:          dispatch.SourceSMPP,
+				SMPPSessionID: session.ID(),
+				SMPPSystemID:  session.SystemID(),
+			},
+		})
+		resp := smpp.PDU{
+			CommandID:  smpp.CommandSubmitSMResp,
+			SequenceID: submit.SequenceID,
+		}
+		if err != nil {
+			resp.Status = 0x00000045
+		} else {
+			resp.Body = smpp.CString(receipt.GatewayID)
+		}
+		session.Send(resp)
+	}
+	smppServer := smpp.NewServer(cfg.SMPP, logger, auth, onSubmit)
+	dispatcher.SetSMPPServer(smppServer)
 	go func() {
 		if err := smppServer.ListenAndServe(ctx); err != nil {
 			errCh <- err
@@ -89,4 +115,37 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown failed", "err", err)
 	}
+}
+
+func buildProviders(ctx context.Context, cfg config.Config) map[string]provider.Provider {
+	ruleByName := map[string]config.HTTPRuleConfig{}
+	for _, rule := range cfg.Outbound {
+		ruleByName[rule.Name] = rule
+	}
+	out := map[string]provider.Provider{}
+	for _, p := range cfg.Providers {
+		if !p.Enabled {
+			continue
+		}
+		switch p.Protocol {
+		case "http", "https":
+			rule, ok := ruleByName[p.Rule]
+			if !ok {
+				continue
+			}
+			out[p.Name] = provider.NewHTTPProvider(p, rule)
+		case "mock":
+			mock := provider.NewNamedMock(ctx, p.Name)
+			mock.DelayMin = 2 * time.Second
+			mock.DelayMax = 4 * time.Second
+			out[p.Name] = mock
+		}
+	}
+	if len(out) == 0 {
+		mock := provider.NewNamedMock(ctx, "mock")
+		mock.DelayMin = 2 * time.Second
+		mock.DelayMax = 4 * time.Second
+		out["mock"] = mock
+	}
+	return out
 }

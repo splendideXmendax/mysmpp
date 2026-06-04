@@ -15,19 +15,42 @@ type Router struct {
 func New(routes []config.RouteConfig) *Router {
 	cp := make([]config.RouteConfig, len(routes))
 	copy(cp, routes)
-	sort.SliceStable(cp, func(i, j int) bool {
-		return cp[i].Priority > cp[j].Priority
-	})
+	sortRoutes(cp)
 	return &Router{routes: cp}
 }
 
+func NewWithProviders(routes []config.RouteConfig, providers []config.ProviderConfig) *Router {
+	enabled := map[string]bool{}
+	for _, p := range providers {
+		enabled[p.Name] = p.Enabled
+	}
+	cp := make([]config.RouteConfig, 0, len(routes))
+	for _, route := range routes {
+		if enabled[route.Provider] {
+			cp = append(cp, route)
+		}
+	}
+	sortRoutes(cp)
+	return &Router{routes: cp}
+}
+
+func sortRoutes(routes []config.RouteConfig) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		return routes[i].Priority > routes[j].Priority
+	})
+}
+
 func (r *Router) Match(msg message.Message) (config.RouteConfig, bool) {
+	return r.MatchPhone(msg.To)
+}
+
+func (r *Router) MatchPhone(to string) (config.RouteConfig, bool) {
 	for _, route := range r.routes {
 		if len(route.Prefix) == 0 {
 			return route, true
 		}
 		for _, prefix := range route.Prefix {
-			if strings.HasPrefix(msg.To, prefix) {
+			if strings.HasPrefix(to, prefix) {
 				return route, true
 			}
 		}

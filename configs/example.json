@@ -39,15 +39,15 @@
   "providers": [
     {
       "name": "provider-a",
-      "protocol": "http",
-      "endpoint": "https://sms-a.example.com/send",
+      "protocol": "mock",
+      "endpoint": "",
       "rule": "http-form-a",
       "enabled": true
     },
     {
       "name": "provider-b",
-      "protocol": "http",
-      "endpoint": "https://sms-b.example.com/api/v1/messages",
+      "protocol": "mock",
+      "endpoint": "",
       "rule": "http-json-b",
       "enabled": true
     }
