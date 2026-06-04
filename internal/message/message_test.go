@@ -32,6 +32,20 @@ func TestSplitLongGSM7Message(t *testing.T) {
 	}
 }
 
+func TestSplitCountsGSM7ExtensionSeptets(t *testing.T) {
+	text := ""
+	for i := 0; i < 160; i++ {
+		text += "{"
+	}
+	segments := Split(text, SplitOptions{})
+	if len(segments) != 3 {
+		t.Fatalf("expected three segments for 320 septets, got %d", len(segments))
+	}
+	if Join(segments) != text {
+		t.Fatal("joined text does not match original")
+	}
+}
+
 func TestDetectUCS2(t *testing.T) {
 	if got := DetectEncoding("你好"); got != "ucs2" {
 		t.Fatalf("expected ucs2, got %s", got)
@@ -45,6 +59,17 @@ func TestUCS2CodecRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected encoded length %d", len(encoded))
 	}
 	if got := DecodeText(encoded, 0x08); got != text {
+		t.Fatalf("expected %q, got %q", text, got)
+	}
+}
+
+func TestGSM7CodecRoundTrip(t *testing.T) {
+	text := "hello @{}[]\\~^|€"
+	encoded := EncodeText(text, 0x00)
+	if string(encoded) == text {
+		t.Fatal("gsm7 data should be packed, not raw ascii")
+	}
+	if got := DecodeText(encoded, 0x00); got != text {
 		t.Fatalf("expected %q, got %q", text, got)
 	}
 }

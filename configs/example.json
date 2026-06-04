@@ -101,5 +101,9 @@
   "storage": {
     "driver": "memory",
     "dsn": ""
+  },
+  "admin": {
+    "username": "admin",
+    "password": "admin"
   }
 }

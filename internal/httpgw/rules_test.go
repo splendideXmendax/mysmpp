@@ -210,6 +210,7 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
@@ -223,6 +224,40 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected dynamic inbound to work, got %d", rec.Code)
+	}
+}
+
+func TestConfigAPIRequiresAdminForNonLoopback(t *testing.T) {
+	gateway := New(config.Default(), store.NewMemory())
+	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req.RemoteAddr = "203.0.113.10:12345"
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestConfigAPIRequiresBasicAuthWhenConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
+	gateway := New(cfg, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without credentials, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "secret")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with credentials, got %d", rec.Code)
 	}
 }
 
@@ -262,6 +297,7 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/message"
 )
 
 func TestParseSubmitSM(t *testing.T) {
@@ -23,7 +24,7 @@ func TestParseSubmitSM(t *testing.T) {
 }
 
 func TestParseSubmitSMStripsUDH(t *testing.T) {
-	body := submitSMBodyWith(0x40, 0x00, append([]byte{0x06, 0x08, 0x04, 0x12, 0x34, 0x02, 0x01}, []byte("hello")...))
+	body := submitSMBodyWith(0x40, 0x00, append([]byte{0x06, 0x08, 0x04, 0x12, 0x34, 0x02, 0x01}, message.EncodeText("hello", 0x00)...))
 	submit, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 8, Body: body})
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +39,7 @@ func TestParseSubmitSMStripsUDH(t *testing.T) {
 
 func TestParseSubmitSMMessagePayloadTLV(t *testing.T) {
 	body := submitSMBodyWith(0x00, 0x00, nil)
-	body = appendTLV(body, TagMessagePayload, []byte("payload text"))
+	body = appendTLV(body, TagMessagePayload, message.EncodeText("payload text", 0x00))
 	submit, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 9, Body: body})
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +50,7 @@ func TestParseSubmitSMMessagePayloadTLV(t *testing.T) {
 }
 
 func TestParseSubmitSMSARTLV(t *testing.T) {
-	body := submitSMBodyWith(0x00, 0x00, []byte("part"))
+	body := submitSMBodyWith(0x00, 0x00, message.EncodeText("part", 0x00))
 	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12, 0x34})
 	body = appendTLV(body, TagSARTotalSegments, []byte{0x02})
 	body = appendTLV(body, TagSARSegmentSeqnum, []byte{0x02})
@@ -202,6 +203,52 @@ func TestServerRejectsWhenMaxSessionsReached(t *testing.T) {
 	}
 }
 
+func TestServerSendsEnquireLink(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(config.SMPPConfig{
+		Addr:          "127.0.0.1:0",
+		SystemID:      "client-a",
+		EnquirePeriod: "50ms",
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool { return true },
+		nil,
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+
+	conn, err := net.DialTimeout("tcp", waitServerAddr(t, server), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := WritePDU(conn, PDU{CommandID: commandBindTransceiver, SequenceID: 1, Body: bindBody("client-a", "secret")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPDU(conn); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	pdu, err := ReadPDU(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pdu.CommandID != commandEnquireLink {
+		t.Fatalf("expected enquire_link, got %+v", pdu)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
 func waitServerAddr(t *testing.T, server *Server) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -226,7 +273,7 @@ func bindBody(systemID, password string) []byte {
 }
 
 func submitSMBody(from, to, text string) []byte {
-	return submitSMBodyWithAddr(from, to, 0x00, 0x00, []byte(text))
+	return submitSMBodyWithAddr(from, to, 0x00, 0x00, message.EncodeText(text, 0x00))
 }
 
 func submitSMBodyWith(esmClass, dataCoding byte, shortMessage []byte) []byte {

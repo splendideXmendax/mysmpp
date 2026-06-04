@@ -3,9 +3,11 @@ package httpgw
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -60,13 +62,44 @@ func (g *Gateway) Handler() http.Handler {
 func (g *Gateway) routes() {
 	g.mux.HandleFunc("/healthz", g.health)
 	g.mux.HandleFunc("/v1/messages", g.messages)
-	g.mux.HandleFunc("/v1/config", g.configAPI)
-	g.mux.HandleFunc("/ui/config", g.configPage)
+	g.mux.HandleFunc("/v1/config", g.requireAdmin(g.configAPI))
+	g.mux.HandleFunc("/ui/config", g.requireAdmin(g.configPage))
 	g.mux.HandleFunc("/", g.dynamicInbound)
 }
 
 func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		admin := g.Config().Admin
+		if admin.Username == "" || admin.Password == "" {
+			if isLoopbackRequest(r) {
+				next(w, r)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", `Basic realm="mysmpp-admin"`)
+			http.Error(w, "admin credentials are required", http.StatusUnauthorized)
+			return
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare([]byte(username), []byte(admin.Username)) != 1 || subtle.ConstantTimeCompare([]byte(password), []byte(admin.Password)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="mysmpp-admin"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {

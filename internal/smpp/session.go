@@ -27,11 +27,13 @@ type SubmitHandler func(*Session, SubmitSM)
 type AuthFunc func(systemID, password string) bool
 
 type SessionConfig struct {
-	Logger      *slog.Logger
-	OwnSystemID string
-	Auth        AuthFunc
-	OnSubmit    SubmitHandler
-	OnClosed    func(*Session)
+	ID            string
+	Logger        *slog.Logger
+	OwnSystemID   string
+	Auth          AuthFunc
+	OnSubmit      SubmitHandler
+	OnClosed      func(*Session)
+	EnquirePeriod time.Duration
 }
 
 type Session struct {
@@ -46,6 +48,7 @@ type Session struct {
 	bindMode atomic.Int32
 	nextSeq  atomic.Uint32
 	systemID atomic.Value
+	lastSeen atomic.Int64
 }
 
 func NewSession(conn net.Conn, cfg SessionConfig) *Session {
@@ -53,8 +56,12 @@ func NewSession(conn net.Conn, cfg SessionConfig) *Session {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	id := cfg.ID
+	if id == "" {
+		id = conn.RemoteAddr().String()
+	}
 	s := &Session{
-		id:     conn.RemoteAddr().String(),
+		id:     id,
 		conn:   conn,
 		logger: logger.With("remote", conn.RemoteAddr().String()),
 		cfg:    cfg,
@@ -63,6 +70,7 @@ func NewSession(conn net.Conn, cfg SessionConfig) *Session {
 	}
 	s.systemID.Store("")
 	s.nextSeq.Store(0)
+	s.lastSeen.Store(time.Now().UnixNano())
 	return s
 }
 
@@ -102,7 +110,17 @@ func (s *Session) Serve(ctx context.Context) {
 			s.cfg.OnClosed(s)
 		}
 	}()
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.Close()
+		case <-s.closed:
+		}
+	}()
 	go s.writeLoop()
+	if s.cfg.EnquirePeriod > 0 {
+		go s.enquireLoop(ctx)
+	}
 	s.readLoop(ctx)
 }
 
@@ -138,7 +156,33 @@ func (s *Session) readLoop(ctx context.Context) {
 			}
 			return
 		}
+		s.lastSeen.Store(time.Now().UnixNano())
 		s.dispatch(pdu)
+	}
+}
+
+func (s *Session) enquireLoop(ctx context.Context) {
+	t := time.NewTicker(s.cfg.EnquirePeriod)
+	defer t.Stop()
+	timeout := int64(2 * s.cfg.EnquirePeriod)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.closed:
+			return
+		case <-t.C:
+			if s.currentBind() == BindNone {
+				continue
+			}
+			last := s.lastSeen.Load()
+			if last > 0 && time.Now().UnixNano()-last > timeout {
+				s.logger.Warn("smpp session idle timeout")
+				s.Close()
+				return
+			}
+			s.Send(PDU{CommandID: commandEnquireLink, Status: statusOK, SequenceID: s.NextSeq()})
+		}
 	}
 }
 

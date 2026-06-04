@@ -16,6 +16,7 @@ type Config struct {
 	Inbound   []HTTPRuleConfig `json:"inbound"`
 	Outbound  []HTTPRuleConfig `json:"outbound"`
 	Storage   StorageConfig    `json:"storage"`
+	Admin     AdminConfig      `json:"admin"`
 }
 
 type ServerConfig struct {
@@ -71,6 +72,11 @@ type HTTPRuleConfig struct {
 type StorageConfig struct {
 	Driver string `json:"driver"`
 	DSN    string `json:"dsn"`
+}
+
+type AdminConfig struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 func Default() Config {

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
 )
@@ -19,6 +22,7 @@ type Server struct {
 	listener net.Listener
 	sessions map[string]*Session
 	wg       sync.WaitGroup
+	nextID   atomic.Uint64
 }
 
 func NewServer(cfg config.SMPPConfig, logger *slog.Logger, auth AuthFunc, onSubmit SubmitHandler) *Server {
@@ -58,19 +62,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
-		if s.maxSessionsReached() {
+		enquirePeriod, _ := time.ParseDuration(s.cfg.EnquirePeriod)
+		session := NewSession(conn, SessionConfig{
+			ID:            s.nextSessionID(),
+			Logger:        s.logger,
+			OwnSystemID:   s.cfg.SystemID,
+			Auth:          s.auth,
+			OnSubmit:      s.onSubmit,
+			OnClosed:      s.unregister,
+			EnquirePeriod: enquirePeriod,
+		})
+		if !s.register(session) {
 			s.logger.Warn("max sessions reached", "remote", conn.RemoteAddr(), "limit", s.cfg.MaxSessions)
 			_ = conn.Close()
 			continue
 		}
-		session := NewSession(conn, SessionConfig{
-			Logger:      s.logger,
-			OwnSystemID: s.cfg.SystemID,
-			Auth:        s.auth,
-			OnSubmit:    s.onSubmit,
-			OnClosed:    s.unregister,
-		})
-		s.register(session)
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -95,10 +101,14 @@ func (s *Server) Session(id string) (*Session, bool) {
 	return session, ok
 }
 
-func (s *Server) register(session *Session) {
+func (s *Server) register(session *Session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.cfg.MaxSessions > 0 && len(s.sessions) >= s.cfg.MaxSessions {
+		return false
+	}
 	s.sessions[session.ID()] = session
+	return true
 }
 
 func (s *Server) unregister(session *Session) {
@@ -107,8 +117,6 @@ func (s *Server) unregister(session *Session) {
 	delete(s.sessions, session.ID())
 }
 
-func (s *Server) maxSessionsReached() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg.MaxSessions > 0 && len(s.sessions) >= s.cfg.MaxSessions
+func (s *Server) nextSessionID() string {
+	return "s" + strconv.FormatUint(s.nextID.Add(1), 10)
 }

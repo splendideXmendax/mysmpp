@@ -84,7 +84,7 @@ func bindBody(systemID, password string) []byte {
 
 func submitBody(from, to, text string, registeredDelivery byte) []byte {
 	dataCoding := byte(0x00)
-	encoded := []byte(text)
+	encoded := message.EncodeText(text, dataCoding)
 	if message.DetectEncoding(text) == "ucs2" {
 		dataCoding = 0x08
 		encoded = message.EncodeText(text, dataCoding)

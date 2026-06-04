@@ -83,11 +83,18 @@ func Split(text string, opts SplitOptions) []Segment {
 		concatLimit = DefaultUCS2ConcatLimit
 	}
 
-	if utf8.RuneCountInString(text) <= singleLimit {
+	textLen := utf8.RuneCountInString(text)
+	if strings.EqualFold(encoding, "gsm7") {
+		textLen = gsm7SeptetLen(text)
+	}
+	if textLen <= singleLimit {
 		return []Segment{{Part: 1, Total: 1, Text: text}}
 	}
 
 	chunks := chunkRunes(text, concatLimit)
+	if strings.EqualFold(encoding, "gsm7") {
+		chunks = chunkGSM7(text, concatLimit)
+	}
 	ref := randomReference()
 	segments := make([]Segment, 0, len(chunks))
 	for i, chunk := range chunks {
@@ -130,6 +137,41 @@ func chunkRunes(text string, limit int) []string {
 		}
 		chunks = append(chunks, string(runes[:end]))
 		runes = runes[end:]
+	}
+	return chunks
+}
+
+func gsm7SeptetLen(text string) int {
+	total := 0
+	for _, r := range text {
+		if _, ok := gsm7RuneToExt[r]; ok {
+			total += 2
+		} else {
+			total++
+		}
+	}
+	return total
+}
+
+func chunkGSM7(text string, limit int) []string {
+	var chunks []string
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		size := 1
+		if _, ok := gsm7RuneToExt[r]; ok {
+			size = 2
+		}
+		if used > 0 && used+size > limit {
+			chunks = append(chunks, b.String())
+			b.Reset()
+			used = 0
+		}
+		b.WriteRune(r)
+		used += size
+	}
+	if b.Len() > 0 {
+		chunks = append(chunks, b.String())
 	}
 	return chunks
 }

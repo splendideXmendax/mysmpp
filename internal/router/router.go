@@ -36,8 +36,21 @@ func NewWithProviders(routes []config.RouteConfig, providers []config.ProviderCo
 
 func sortRoutes(routes []config.RouteConfig) {
 	sort.SliceStable(routes, func(i, j int) bool {
-		return routes[i].Priority > routes[j].Priority
+		if routes[i].Priority != routes[j].Priority {
+			return routes[i].Priority > routes[j].Priority
+		}
+		return longestPrefix(routes[i].Prefix) > longestPrefix(routes[j].Prefix)
 	})
+}
+
+func longestPrefix(prefixes []string) int {
+	longest := 0
+	for _, prefix := range prefixes {
+		if len(prefix) > longest {
+			longest = len(prefix)
+		}
+	}
+	return longest
 }
 
 func (r *Router) Match(msg message.Message) (config.RouteConfig, bool) {
