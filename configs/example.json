@@ -12,6 +12,16 @@
     "window_size": 16,
     "enquire_period": "30s"
   },
+  "esmes": [
+    {
+      "system_id": "esme1",
+      "password": "secret"
+    },
+    {
+      "system_id": "load-tester",
+      "password": "test123"
+    }
+  ],
   "routes": [
     {
       "name": "china-mobile",

@@ -34,3 +34,14 @@ func TestDetectUCS2(t *testing.T) {
 		t.Fatalf("expected ucs2, got %s", got)
 	}
 }
+
+func TestUCS2CodecRoundTrip(t *testing.T) {
+	text := "你好世界"
+	encoded := EncodeText(text, 0x08)
+	if len(encoded) != 8 {
+		t.Fatalf("unexpected encoded length %d", len(encoded))
+	}
+	if got := DecodeText(encoded, 0x08); got != text {
+		t.Fatalf("expected %q, got %q", text, got)
+	}
+}

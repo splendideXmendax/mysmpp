@@ -10,6 +10,7 @@ import (
 type Config struct {
 	Server    ServerConfig     `json:"server"`
 	SMPP      SMPPConfig       `json:"smpp"`
+	ESMEs     []ESMECred       `json:"esmes"`
 	Routes    []RouteConfig    `json:"routes"`
 	Providers []ProviderConfig `json:"providers"`
 	Inbound   []HTTPRuleConfig `json:"inbound"`
@@ -30,6 +31,11 @@ type SMPPConfig struct {
 	MaxSessions   int    `json:"max_sessions"`
 	WindowSize    int    `json:"window_size"`
 	EnquirePeriod string `json:"enquire_period"`
+}
+
+type ESMECred struct {
+	SystemID string `json:"system_id"`
+	Password string `json:"password"`
 }
 
 type RouteConfig struct {
@@ -132,6 +138,16 @@ func (c Config) Validate() error {
 		if route.Provider == "" {
 			return fmt.Errorf("route %q provider is required", route.Name)
 		}
+	}
+	esmeNames := map[string]struct{}{}
+	for _, esme := range c.ESMEs {
+		if esme.SystemID == "" {
+			return fmt.Errorf("esme system_id is required")
+		}
+		if _, ok := esmeNames[esme.SystemID]; ok {
+			return fmt.Errorf("duplicate esme %q", esme.SystemID)
+		}
+		esmeNames[esme.SystemID] = struct{}{}
 	}
 	for _, rule := range c.Inbound {
 		if rule.Name == "" {

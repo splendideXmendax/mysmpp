@@ -1,0 +1,206 @@
+package smpp
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+type BindMode int32
+
+const (
+	BindNone BindMode = iota
+	BindRX
+	BindTX
+	BindTRX
+)
+
+func (m BindMode) CanSubmit() bool  { return m == BindTX || m == BindTRX }
+func (m BindMode) CanReceive() bool { return m == BindRX || m == BindTRX }
+
+type SubmitHandler func(*Session, SubmitSM)
+type AuthFunc func(systemID, password string) bool
+
+type SessionConfig struct {
+	Logger      *slog.Logger
+	OwnSystemID string
+	Auth        AuthFunc
+	OnSubmit    SubmitHandler
+	OnClosed    func(*Session)
+}
+
+type Session struct {
+	id      string
+	conn    net.Conn
+	logger  *slog.Logger
+	cfg     SessionConfig
+	out     chan PDU
+	closed  chan struct{}
+	closeMu sync.Once
+
+	bindMode atomic.Int32
+	nextSeq  atomic.Uint32
+	systemID atomic.Value
+}
+
+func NewSession(conn net.Conn, cfg SessionConfig) *Session {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s := &Session{
+		id:     conn.RemoteAddr().String(),
+		conn:   conn,
+		logger: logger.With("remote", conn.RemoteAddr().String()),
+		cfg:    cfg,
+		out:    make(chan PDU, 64),
+		closed: make(chan struct{}),
+	}
+	s.systemID.Store("")
+	s.nextSeq.Store(0)
+	return s
+}
+
+func (s *Session) ID() string { return s.id }
+
+func (s *Session) SystemID() string {
+	v, _ := s.systemID.Load().(string)
+	return v
+}
+
+func (s *Session) currentBind() BindMode {
+	return BindMode(s.bindMode.Load())
+}
+
+func (s *Session) NextSeq() uint32 {
+	return s.nextSeq.Add(1)
+}
+
+func (s *Session) Send(p PDU) {
+	select {
+	case s.out <- p:
+	case <-s.closed:
+	}
+}
+
+func (s *Session) Close() {
+	s.closeMu.Do(func() {
+		close(s.closed)
+		_ = s.conn.Close()
+	})
+}
+
+func (s *Session) Serve(ctx context.Context) {
+	defer func() {
+		s.Close()
+		if s.cfg.OnClosed != nil {
+			s.cfg.OnClosed(s)
+		}
+	}()
+	go s.writeLoop()
+	s.readLoop(ctx)
+}
+
+func (s *Session) writeLoop() {
+	for {
+		select {
+		case p := <-s.out:
+			if err := WritePDU(s.conn, p); err != nil {
+				s.logger.Warn("write smpp pdu failed", "err", err)
+				s.Close()
+				return
+			}
+		case <-s.closed:
+			return
+		}
+	}
+}
+
+func (s *Session) readLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = s.conn.SetReadDeadline(time.Now().Add(time.Second))
+		pdu, err := ReadPDU(s.conn)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				s.logger.Warn("read smpp pdu failed", "err", err)
+			}
+			return
+		}
+		s.dispatch(pdu)
+	}
+}
+
+func (s *Session) dispatch(pdu PDU) {
+	s.logger.Debug("smpp pdu", "command", commandName(pdu.CommandID), "sequence", pdu.SequenceID)
+	switch pdu.CommandID {
+	case commandBindReceiver, commandBindTransmitter, commandBindTransceiver:
+		s.handleBind(pdu)
+	case commandSubmitSM:
+		if !s.currentBind().CanSubmit() {
+			s.Send(PDU{CommandID: commandSubmitSMResp, Status: statusInvalidBind, SequenceID: pdu.SequenceID})
+			return
+		}
+		msg, err := ParseSubmitSM(pdu)
+		if err != nil {
+			s.logger.Warn("submit_sm parse failed", "err", err)
+			s.Send(PDU{CommandID: commandSubmitSMResp, Status: statusInvalidCmd, SequenceID: pdu.SequenceID})
+			return
+		}
+		if s.cfg.OnSubmit != nil {
+			s.cfg.OnSubmit(s, msg)
+		}
+	case commandDeliverSMResp:
+		s.logger.Debug("deliver_sm_resp", "sequence", pdu.SequenceID, "status", pdu.Status)
+	case commandEnquireLink:
+		s.Send(PDU{CommandID: commandEnquireLinkResp, Status: statusOK, SequenceID: pdu.SequenceID})
+	case commandUnbind:
+		s.Send(PDU{CommandID: commandUnbindResp, Status: statusOK, SequenceID: pdu.SequenceID})
+	case commandEnquireLinkResp, commandUnbindResp:
+	default:
+		s.Send(PDU{CommandID: commandGenericNack, Status: statusInvalidCmd, SequenceID: pdu.SequenceID})
+	}
+}
+
+func (s *Session) handleBind(pdu PDU) {
+	offset := 0
+	systemID := readCString(pdu.Body, &offset)
+	password := readCString(pdu.Body, &offset)
+
+	status := statusOK
+	if s.currentBind() != BindNone {
+		status = statusAlreadyBound
+	} else if s.cfg.Auth != nil && !s.cfg.Auth(systemID, password) {
+		status = statusBindFailed
+	}
+
+	mode := BindTRX
+	respID := commandBindTransceiverResp
+	switch pdu.CommandID {
+	case commandBindReceiver:
+		mode = BindRX
+		respID = commandBindReceiverResp
+	case commandBindTransmitter:
+		mode = BindTX
+		respID = commandBindTransmitterResp
+	}
+	if status == statusOK {
+		s.bindMode.Store(int32(mode))
+		s.systemID.Store(systemID)
+		s.logger.Info("bind ok", "system_id", systemID, "mode", mode)
+	} else {
+		s.logger.Warn("bind rejected", "system_id", systemID, "status", status)
+	}
+	s.Send(PDU{CommandID: respID, Status: status, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+}

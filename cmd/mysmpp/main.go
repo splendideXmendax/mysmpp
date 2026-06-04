@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/core"
 	"github.com/splendideXmendax/mysmpp/internal/httpgw"
+	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
@@ -32,6 +34,12 @@ func main() {
 
 	st := store.NewMemory()
 	httpGateway := httpgw.New(cfg, st)
+	relayCore := core.New(logger)
+	mockProvider := provider.NewMock()
+	mockProvider.DelayMin = 2 * time.Second
+	mockProvider.DelayMax = 4 * time.Second
+	relayCore.SetProvider(mockProvider)
+
 	httpServer := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,
 		Handler:           httpGateway.Handler(),
@@ -46,7 +54,16 @@ func main() {
 		}
 	}()
 
-	smppServer := smpp.NewServer(cfg.SMPP, st, logger)
+	auth := func(systemID, password string) bool {
+		for _, esme := range cfg.ESMEs {
+			if esme.SystemID == systemID && esme.Password == password {
+				return true
+			}
+		}
+		return cfg.SMPP.SystemID != "" && systemID == cfg.SMPP.SystemID && password == cfg.SMPP.Password
+	}
+	smppServer := smpp.NewServer(cfg.SMPP, logger, auth, relayCore.OnSubmit)
+	relayCore.SetServer(smppServer)
 	go func() {
 		if err := smppServer.ListenAndServe(ctx); err != nil {
 			errCh <- err

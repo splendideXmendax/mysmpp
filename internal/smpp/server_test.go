@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
-	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 func TestParseSubmitSM(t *testing.T) {
@@ -26,12 +25,20 @@ func TestSMPPClientServerSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	st := store.NewMemory()
+	submits := make(chan SubmitSM, 1)
 	server := NewServer(config.SMPPConfig{
 		Addr:     "127.0.0.1:0",
 		SystemID: "client-a",
 		Password: "secret",
-	}, st, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool {
+			return systemID == "client-a" && password == "secret"
+		},
+		func(session *Session, submit SubmitSM) {
+			submits <- submit
+			session.Send(PDU{CommandID: commandSubmitSMResp, Status: statusOK, SequenceID: submit.SequenceID, Body: CString("g0000000001")})
+		},
+	)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -67,15 +74,16 @@ func TestSMPPClientServerSession(t *testing.T) {
 		t.Fatalf("unexpected submit response: %+v", resp)
 	}
 
-	messages, err := st.ListMessages(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 1 {
-		t.Fatalf("expected one stored message, got %d", len(messages))
-	}
-	if messages[0].From != "1069" || messages[0].To != "13800138000" || messages[0].Text != "hello smpp" {
-		t.Fatalf("unexpected stored message: %+v", messages[0])
+	select {
+	case submit := <-submits:
+		if submit.From != "1069" || submit.To != "13800138000" || submit.Text != "hello smpp" {
+			t.Fatalf("unexpected submit: %+v", submit)
+		}
+		if submit.RegisteredDelivery != 0x01 {
+			t.Fatalf("expected registered delivery, got 0x%02x", submit.RegisteredDelivery)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("submit handler not called")
 	}
 
 	if err := WritePDU(conn, PDU{CommandID: commandEnquireLink, SequenceID: 3}); err != nil {

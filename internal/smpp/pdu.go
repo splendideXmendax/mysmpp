@@ -27,9 +27,11 @@ const (
 	commandBindTransceiverResp uint32 = 0x80000009
 	commandEnquireLinkResp     uint32 = 0x80000015
 
-	statusOK          uint32 = 0x00000000
-	statusInvalidBind uint32 = 0x0000000D
-	statusInvalidCmd  uint32 = 0x00000003
+	statusOK           uint32 = 0x00000000
+	statusInvalidCmd   uint32 = 0x00000003
+	statusInvalidBind  uint32 = 0x00000004
+	statusAlreadyBound uint32 = 0x00000005
+	statusBindFailed   uint32 = 0x0000000D
 )
 
 type PDU struct {
