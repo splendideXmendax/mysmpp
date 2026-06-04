@@ -12,4 +12,5 @@ const (
 	CommandEnquireLinkResp     = commandEnquireLinkResp
 	CommandUnbindResp          = commandUnbindResp
 	StatusOK                   = statusOK
+	StatusThrottled            = statusThrottled
 )

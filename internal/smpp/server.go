@@ -68,9 +68,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			Logger:        s.logger,
 			OwnSystemID:   s.cfg.SystemID,
 			Auth:          s.auth,
+			BindAllowed:   s.bindAllowed,
 			OnSubmit:      s.onSubmit,
 			OnClosed:      s.unregister,
 			EnquirePeriod: enquirePeriod,
+			WindowSize:    int32(s.cfg.WindowSize),
 		})
 		if !s.register(session) {
 			s.logger.Warn("max sessions reached", "remote", conn.RemoteAddr(), "limit", s.cfg.MaxSessions)
@@ -99,6 +101,25 @@ func (s *Server) Session(id string) (*Session, bool) {
 	defer s.mu.RUnlock()
 	session, ok := s.sessions[id]
 	return session, ok
+}
+
+func (s *Server) bindAllowed(candidate *Session, systemID string) bool {
+	limit := s.cfg.MaxSessionsPerSystemID
+	if limit <= 0 {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, session := range s.sessions {
+		if session == candidate {
+			continue
+		}
+		if session.SystemID() == systemID {
+			count++
+		}
+	}
+	return count < limit
 }
 
 func (s *Server) register(session *Session) bool {

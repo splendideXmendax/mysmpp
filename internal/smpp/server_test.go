@@ -203,6 +203,66 @@ func TestServerRejectsWhenMaxSessionsReached(t *testing.T) {
 	}
 }
 
+func TestServerRejectsWhenMaxSessionsPerSystemIDReached(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(config.SMPPConfig{
+		Addr:                   "127.0.0.1:0",
+		SystemID:               "client-a",
+		MaxSessions:            4,
+		MaxSessionsPerSystemID: 1,
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool { return true },
+		nil,
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+
+	addr := waitServerAddr(t, server)
+	conn1, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn1.Close()
+	if err := WritePDU(conn1, PDU{CommandID: commandBindTransceiver, SequenceID: 1, Body: bindBody("client-a", "secret")}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ReadPDU(conn1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != statusOK {
+		t.Fatalf("expected first bind ok, got %+v", resp)
+	}
+
+	conn2, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn2.Close()
+	if err := WritePDU(conn2, PDU{CommandID: commandBindTransceiver, SequenceID: 1, Body: bindBody("client-a", "secret")}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = ReadPDU(conn2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != statusBindFailed {
+		t.Fatalf("expected second bind rejected, got %+v", resp)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
 func TestServerSendsEnquireLink(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

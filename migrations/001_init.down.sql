@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS config_history;
+DROP TABLE IF EXISTS idempotency;
+DROP TABLE IF EXISTS outbox;
+DROP TABLE IF EXISTS pending;
+DROP TABLE IF EXISTS messages;

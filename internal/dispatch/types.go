@@ -17,10 +17,23 @@ type SubmitSource struct {
 	CallbackRule  string
 }
 
+func (k SourceKind) String() string {
+	switch k {
+	case SourceSMPP:
+		return "smpp"
+	case SourceHTTPAPI:
+		return "http"
+	default:
+		return "unknown"
+	}
+}
+
 type Envelope struct {
 	From               string
 	To                 string
 	Text               string
+	ClientID           string
+	ClientMsgID        string
 	DataCoding         uint8
 	Encoding           string
 	RegisteredDelivery uint8

@@ -17,18 +17,22 @@ func BuildProviders(ctx context.Context, cfg config.Config) map[string]Provider 
 		if !p.Enabled {
 			continue
 		}
+		var built Provider
 		switch p.Protocol {
 		case "http", "https":
 			rule, ok := ruleByName[p.Rule]
 			if !ok {
 				continue
 			}
-			out[p.Name] = NewHTTPProvider(p, rule)
+			built = NewHTTPProvider(p, rule)
 		case "mock":
 			mock := NewNamedMock(ctx, p.Name)
 			mock.DelayMin = 2 * time.Second
 			mock.DelayMax = 4 * time.Second
-			out[p.Name] = mock
+			built = mock
+		}
+		if built != nil {
+			out[p.Name] = NewRateLimitedProvider(built, p.RateLimit)
 		}
 	}
 	if len(out) == 0 {

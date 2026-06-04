@@ -31,22 +31,14 @@ func TestNormalizeOutboundDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadExampleConfig(t *testing.T) {
-	cfg, err := Load("../../configs/example.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Server.HTTPAddr != ":8080" {
-		t.Fatalf("unexpected http addr %s", cfg.Server.HTTPAddr)
+func TestLoadExampleConfigRejectsDeployPlaceholders(t *testing.T) {
+	if _, err := Load("../../configs/example.json"); err == nil {
+		t.Fatal("expected example config to reject deploy placeholders")
 	}
 }
 
-func TestLoadDockerConfig(t *testing.T) {
-	cfg, err := Load("../../configs/docker.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.SMPP.Password == "secret" {
-		t.Fatal("docker config should not keep the development SMPP password")
+func TestLoadDockerConfigRejectsDeployPlaceholders(t *testing.T) {
+	if _, err := Load("../../configs/docker.json"); err == nil {
+		t.Fatal("expected docker config to reject deploy placeholders")
 	}
 }

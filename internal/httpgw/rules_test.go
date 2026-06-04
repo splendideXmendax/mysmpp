@@ -50,6 +50,26 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	}
 }
 
+func TestMessagesGETUsesPagination(t *testing.T) {
+	st := store.NewMemory()
+	for i := 0; i < 3; i++ {
+		msg := message.New(string(rune('a'+i)), message.DirectionMT, "1069", "13800138000", "hello")
+		if err := st.SaveMessage(context.Background(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gateway := New(config.Default(), st)
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages?limit=1&offset=1", nil)
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"ID":"b"`) || strings.Contains(rec.Body.String(), `"ID":"a"`) || strings.Contains(rec.Body.String(), `"ID":"c"`) {
+		t.Fatalf("pagination not applied: %s", rec.Body.String())
+	}
+}
+
 func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	cfg := config.Default()
 	cfg.Routes = []config.RouteConfig{{
@@ -67,11 +87,11 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	mock.DelayMax = time.Hour
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute)
+	st := store.NewMemory()
+	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
-	st := store.NewMemory()
 	gateway := NewWithDispatcher(cfg, st, dispatcher)
 	body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
@@ -85,12 +105,124 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"provider":"mock-a"`) {
 		t.Fatalf("dispatcher receipt not returned: %s", rec.Body.String())
 	}
+	waitForMessages(t, st, 1)
 	messages, err := st.ListMessages(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(messages) != 1 || messages[0].Direction != message.DirectionMT || messages[0].Provider != "mock-a" {
 		t.Fatalf("dispatcher submit should store MT message: %+v", messages)
+	}
+}
+
+func TestMessageSubmitRequiresConfiguredClient(t *testing.T) {
+	cfg := config.Default()
+	cfg.Clients = []config.ClientAuth{{
+		ClientID: "client-a",
+		Token:    "token-a",
+		Enabled:  true,
+	}}
+	gateway := New(cfg, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without client credentials, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Client-ID", "client-a")
+	req.Header.Set("X-Token", "token-a")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 with client credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
+	cfg := config.Default()
+	cfg.Routes = []config.RouteConfig{{
+		Name:     "default",
+		Provider: "mock-a",
+		Priority: 1,
+	}}
+	cfg.Providers = []config.ProviderConfig{{
+		Name:    "mock-a",
+		Enabled: true,
+	}}
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+	st := store.NewMemory()
+	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
+	defer dispatcher.Close()
+	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+	gateway := NewWithDispatcher(cfg, st, dispatcher)
+
+	body := `{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"m-1"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Client-ID", "client-a")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var first dispatch.Receipt
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Client-ID", "client-a")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var second dispatch.Receipt
+	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.GatewayID != second.GatewayID {
+		t.Fatalf("expected idempotent gateway id, got %q and %q", first.GatewayID, second.GatewayID)
+	}
+	messages, err := st.ListMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected one stored message, got %d", len(messages))
+	}
+}
+
+func TestMessageSubmitRiskBlockedKeywordStoresBlockedMessage(t *testing.T) {
+	cfg := config.Default()
+	cfg.Risk.BlockedKeywords = []string{"spam"}
+	st := store.NewMemory()
+	gateway := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"buy spam now"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", rec.Code, rec.Body.String())
+	}
+	messages, err := st.ListMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].State != "blocked" || messages[0].Metadata["reason"] != "blocked_keyword" {
+		t.Fatalf("expected blocked message record, got %+v", messages)
 	}
 }
 
@@ -153,11 +285,11 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	mock.DelayMax = time.Hour
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute)
+	st := store.NewMemory()
+	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
-	st := store.NewMemory()
 	gateway := NewWithDispatcher(cfg, st, dispatcher)
 	receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
 		From:               "1069",
@@ -169,11 +301,19 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitForPending(t, dispatcher, 1)
 	if dispatcher.PendingSize() != 1 {
 		t.Fatalf("expected pending before dlr, got %d", dispatcher.PendingSize())
 	}
+	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || msg.ProviderID == "" {
+		t.Fatalf("expected sent message with provider id, got ok=%v msg=%+v", ok, msg)
+	}
 
-	body := strings.NewReader(`{"providerId":"` + receipt.ProviderID + `","state":"DELIVRD","err":"0"}`)
+	body := strings.NewReader(`{"providerId":"` + msg.ProviderID + `","state":"DELIVRD","err":"0"}`)
 	req := httptest.NewRequest(http.MethodPost, "/callback/dlr", body)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -189,13 +329,14 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 0 {
-		t.Fatalf("dlr callback should not store MO message: %+v", messages)
+	if len(messages) != 1 || messages[0].State != "DELIVRD" {
+		t.Fatalf("dlr callback should update MT message state: %+v", messages)
 	}
 }
 
 func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
 	st := store.NewMemory()
 	gateway := New(cfg, st)
 	cfg.Inbound = []config.HTTPRuleConfig{{
@@ -210,7 +351,7 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "secret")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
@@ -227,10 +368,9 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	}
 }
 
-func TestConfigAPIRequiresAdminForNonLoopback(t *testing.T) {
+func TestConfigAPIRequiresAdminWhenUnconfigured(t *testing.T) {
 	gateway := New(config.Default(), store.NewMemory())
 	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
-	req.RemoteAddr = "203.0.113.10:12345"
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -244,7 +384,6 @@ func TestConfigAPIRequiresBasicAuthWhenConfigured(t *testing.T) {
 	gateway := New(cfg, store.NewMemory())
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -252,7 +391,6 @@ func TestConfigAPIRequiresBasicAuthWhenConfigured(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/config", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth("admin", "secret")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
@@ -263,6 +401,7 @@ func TestConfigAPIRequiresBasicAuthWhenConfigured(t *testing.T) {
 
 func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
 	cfg.Routes = []config.RouteConfig{{
 		Name:     "old",
 		Provider: "mock-a",
@@ -276,7 +415,7 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Replace(provider.BuildProviders(context.Background(), cfg))
 	defer reg.CloseAll()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute)
+	dispatcher := dispatch.New(nil, reg, nil, time.Minute, store.NewMemory())
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
@@ -297,7 +436,7 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(payload))
-	req.RemoteAddr = "127.0.0.1:12345"
+	req.SetBasicAuth("admin", "secret")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
@@ -315,6 +454,35 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"provider":"mock-b"`) || !strings.Contains(rec.Body.String(), `"route":"new"`) {
 		t.Fatalf("dispatcher did not use reloaded config: %s", rec.Body.String())
 	}
+}
+
+func waitForMessages(t *testing.T, st store.Store, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		messages, err := st.ListMessages(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(messages) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	messages, _ := st.ListMessages(context.Background())
+	t.Fatalf("message count did not reach %d, got %d", want, len(messages))
+}
+
+func waitForPending(t *testing.T, d *dispatch.Dispatcher, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.PendingSize() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pending size did not reach %d, got %d", want, d.PendingSize())
 }
 
 func TestBuildOutboundRequestJSON(t *testing.T) {

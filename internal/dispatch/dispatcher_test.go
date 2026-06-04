@@ -10,6 +10,7 @@ import (
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
+	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 type fakeSMPPServer struct {
@@ -31,7 +32,8 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
 
-	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, time.Minute)
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, time.Minute, st)
 	defer d.Close()
 	d.ReloadRoutes([]config.RouteConfig{{
 		Name:     "mobile",
@@ -56,6 +58,7 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	if receipt.GatewayID != "g0000000001" || receipt.Provider != "mock-a" || receipt.Route != "mobile" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
+	waitForPending(t, d, 1)
 	if d.PendingSize() != 1 {
 		t.Fatalf("expected one pending record, got %d", d.PendingSize())
 	}
@@ -79,4 +82,16 @@ func TestDispatcherIgnoresDisabledProviderRoutes(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected no route error")
 	}
+}
+
+func waitForPending(t *testing.T, d *Dispatcher, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.PendingSize() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pending size did not reach %d, got %d", want, d.PendingSize())
 }

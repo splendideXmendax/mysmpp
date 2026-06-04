@@ -24,6 +24,7 @@ const (
 
 type Message struct {
 	ID          string
+	ProviderID  string
 	Direction   Direction
 	From        string
 	To          string
@@ -31,9 +32,15 @@ type Message struct {
 	Encoding    string
 	Route       string
 	Provider    string
+	SourceKind  string
+	SourceID    string
+	State       string
+	ErrorCode   int
 	Segments    []Segment
 	Metadata    map[string]string
 	SubmittedAt time.Time
+	SentAt      time.Time
+	DoneAt      time.Time
 }
 
 type Segment struct {
@@ -56,6 +63,7 @@ func New(id string, direction Direction, from, to, text string) Message {
 		To:          to,
 		Text:        text,
 		Encoding:    DetectEncoding(text),
+		State:       "submitted",
 		Metadata:    map[string]string{},
 		SubmittedAt: time.Now().UTC(),
 	}

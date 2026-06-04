@@ -31,9 +31,11 @@ type SessionConfig struct {
 	Logger        *slog.Logger
 	OwnSystemID   string
 	Auth          AuthFunc
+	BindAllowed   func(*Session, string) bool
 	OnSubmit      SubmitHandler
 	OnClosed      func(*Session)
 	EnquirePeriod time.Duration
+	WindowSize    int32
 }
 
 type Session struct {
@@ -46,6 +48,7 @@ type Session struct {
 	closeMu sync.Once
 
 	bindMode atomic.Int32
+	inflight atomic.Int32
 	nextSeq  atomic.Uint32
 	systemID atomic.Value
 	lastSeen atomic.Int64
@@ -144,13 +147,8 @@ func (s *Session) readLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		_ = s.conn.SetReadDeadline(time.Now().Add(time.Second))
 		pdu, err := ReadPDU(s.conn)
 		if err != nil {
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				continue
-			}
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				s.logger.Warn("read smpp pdu failed", "err", err)
 			}
@@ -196,14 +194,26 @@ func (s *Session) dispatch(pdu PDU) {
 			s.Send(PDU{CommandID: commandSubmitSMResp, Status: statusInvalidBind, SequenceID: pdu.SequenceID})
 			return
 		}
+		windowSize := s.cfg.WindowSize
+		if windowSize <= 0 {
+			windowSize = 16
+		}
+		if s.inflight.Add(1) > windowSize {
+			s.inflight.Add(-1)
+			s.Send(PDU{CommandID: commandSubmitSMResp, Status: statusThrottled, SequenceID: pdu.SequenceID})
+			return
+		}
 		msg, err := ParseSubmitSM(pdu)
 		if err != nil {
+			s.inflight.Add(-1)
 			s.logger.Warn("submit_sm parse failed", "err", err)
 			s.Send(PDU{CommandID: commandSubmitSMResp, Status: statusInvalidCmd, SequenceID: pdu.SequenceID})
 			return
 		}
 		if s.cfg.OnSubmit != nil {
 			s.cfg.OnSubmit(s, msg)
+		} else {
+			s.inflight.Add(-1)
 		}
 	case commandDeliverSMResp:
 		s.logger.Debug("deliver_sm_resp", "sequence", pdu.SequenceID, "status", pdu.Status)
@@ -217,6 +227,10 @@ func (s *Session) dispatch(pdu PDU) {
 	}
 }
 
+func (s *Session) CompleteSubmit() {
+	s.inflight.Add(-1)
+}
+
 func (s *Session) handleBind(pdu PDU) {
 	offset := 0
 	systemID := readCString(pdu.Body, &offset)
@@ -226,6 +240,8 @@ func (s *Session) handleBind(pdu PDU) {
 	if s.currentBind() != BindNone {
 		status = statusAlreadyBound
 	} else if s.cfg.Auth != nil && !s.cfg.Auth(systemID, password) {
+		status = statusBindFailed
+	} else if s.cfg.BindAllowed != nil && !s.cfg.BindAllowed(s, systemID) {
 		status = statusBindFailed
 	}
 

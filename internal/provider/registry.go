@@ -32,7 +32,7 @@ func (r *Registry) Replace(next map[string]Provider) {
 	r.mu.Unlock()
 
 	for name, p := range old {
-		if _, kept := next[name]; kept {
+		if kept, ok := next[name]; ok && kept == p {
 			continue
 		}
 		if closer, ok := p.(interface{ Close() error }); ok {

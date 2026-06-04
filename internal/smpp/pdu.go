@@ -32,6 +32,7 @@ const (
 	statusInvalidBind  uint32 = 0x00000004
 	statusAlreadyBound uint32 = 0x00000005
 	statusBindFailed   uint32 = 0x0000000D
+	statusThrottled    uint32 = 0x00000058
 )
 
 type PDU struct {

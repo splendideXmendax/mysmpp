@@ -30,6 +30,8 @@ docs                配置和部署文档
 
 ## 本地运行
 
+`configs/example.json` 是生产前检查模板，包含 `CHANGE_ME_BEFORE_DEPLOY` 占位符。首次运行前请复制一份本地配置并替换 admin、SMPP ESME、HTTP client token 等占位值。
+
 ```powershell
 go run ./cmd/mysmpp -config configs/example.json
 ```
@@ -39,7 +41,7 @@ go run ./cmd/mysmpp -config configs/example.json
 - HTTP API：`:8080`
 - SMPP 监听：`:2775`
 - SMPP 网关标识：`system_id=mysmpp`
-- 示例 ESME bind：`system_id=esme1`，`password=secret`
+- 示例 ESME bind：`system_id=esme1`，`password=<你在配置里设置的密码>`
 
 配置页面：
 
@@ -52,7 +54,7 @@ http://127.0.0.1:8080/ui/config
 启动网关后，另开一个终端运行测试 ESME：
 
 ```powershell
-go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
+go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p <你的ESME密码> -text ping
 ```
 
 预期能看到类似输出：

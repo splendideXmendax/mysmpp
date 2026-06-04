@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/splendideXmendax/mysmpp/internal/authutil"
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
 	"github.com/splendideXmendax/mysmpp/internal/httpgw"
@@ -35,7 +36,7 @@ func main() {
 	st := store.NewMemory()
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
-	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute)
+	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute, st)
 	defer dispatcher.Close()
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
@@ -56,14 +57,16 @@ func main() {
 	}()
 
 	auth := func(systemID, password string) bool {
-		for _, esme := range cfg.ESMEs {
-			if esme.SystemID == systemID && esme.Password == password {
+		current := httpGateway.Config()
+		for _, esme := range current.ESMEs {
+			if authutil.ConstantTimeEqual(esme.SystemID, systemID) && authutil.ConstantTimeEqual(esme.Password, password) {
 				return true
 			}
 		}
 		return false
 	}
 	onSubmit := func(session *smpp.Session, submit smpp.SubmitSM) {
+		defer session.CompleteSubmit()
 		receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
 			From:               submit.From,
 			To:                 submit.To,

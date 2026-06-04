@@ -1,22 +1,23 @@
 package httpgw
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/splendideXmendax/mysmpp/internal/authutil"
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/httprule"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/router"
@@ -31,16 +32,23 @@ type Gateway struct {
 	registry   *provider.Registry
 	ctx        context.Context
 	mux        *http.ServeMux
+	riskMu     sync.Mutex
+	riskCounts map[string]rateWindow
+}
+
+type rateWindow struct {
+	start time.Time
+	count int
 }
 
 func New(cfg config.Config, st store.Store) *Gateway {
-	g := &Gateway{cfg: cfg, store: st, mux: http.NewServeMux()}
+	g := &Gateway{cfg: cfg, store: st, mux: http.NewServeMux(), riskCounts: map[string]rateWindow{}}
 	g.routes()
 	return g
 }
 
 func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.Dispatcher, extras ...any) *Gateway {
-	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, ctx: context.Background(), mux: http.NewServeMux()}
+	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, ctx: context.Background(), mux: http.NewServeMux(), riskCounts: map[string]rateWindow{}}
 	for _, extra := range extras {
 		switch v := extra.(type) {
 		case *provider.Registry:
@@ -68,23 +76,33 @@ func (g *Gateway) routes() {
 }
 
 func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	pending, _ := g.store.PendingSize(context.Background())
+	outbox, _ := g.store.OutboxDepth(context.Background(), "pending")
+	status := "ok"
+	if outbox > 10000 {
+		status = "degraded"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": status,
+		"checks": map[string]any{
+			"storage":       "ok",
+			"pending_size":  pending,
+			"outbox_depth":  outbox,
+			"smpp_listener": "ok",
+		},
+	})
 }
 
 func (g *Gateway) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		admin := g.Config().Admin
 		if admin.Username == "" || admin.Password == "" {
-			if isLoopbackRequest(r) {
-				next(w, r)
-				return
-			}
 			w.Header().Set("WWW-Authenticate", `Basic realm="mysmpp-admin"`)
 			http.Error(w, "admin credentials are required", http.StatusUnauthorized)
 			return
 		}
 		username, password, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(username), []byte(admin.Username)) != 1 || subtle.ConstantTimeCompare([]byte(password), []byte(admin.Password)) != 1 {
+		if !ok || !authutil.ConstantTimeEqual(username, admin.Username) || !authutil.ConstantTimeEqual(password, admin.Password) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="mysmpp-admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -93,19 +111,13 @@ func (g *Gateway) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func isLoopbackRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		messages, err := g.store.ListMessages(r.Context())
+		messages, err := g.store.ListMessagesPage(r.Context(), store.ListOptions{
+			Limit:  intQuery(r, "limit", 100),
+			Offset: intQuery(r, "offset", 0),
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -116,6 +128,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			From         string            `json:"from"`
 			To           string            `json:"to"`
 			Text         string            `json:"text"`
+			ClientMsgID  string            `json:"client_msg_id"`
 			CallbackURL  string            `json:"callback_url"`
 			CallbackRule string            `json:"callback_rule"`
 			Meta         map[string]string `json:"meta"`
@@ -124,11 +137,25 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		clientID, ok := g.authorizeClient(w, r)
+		if !ok {
+			return
+		}
+		if err := validateSubmitRequest(req.From, req.To, req.Text, req.ClientMsgID, req.CallbackURL, req.Meta); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if blocked, reason := g.applyRisk(r.Context(), clientID, req.From, req.To, req.Text, req.Meta); blocked {
+			http.Error(w, reason, http.StatusTooManyRequests)
+			return
+		}
 		if g.dispatcher != nil {
 			receipt, err := g.dispatcher.Submit(r.Context(), dispatch.Envelope{
 				From:               req.From,
 				To:                 req.To,
 				Text:               req.Text,
+				ClientID:           clientID,
+				ClientMsgID:        req.ClientMsgID,
 				Encoding:           message.DetectEncoding(req.Text),
 				RegisteredDelivery: 1,
 				Source: dispatch.SubmitSource{
@@ -141,15 +168,6 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			msg := message.New(receipt.GatewayID, message.DirectionMT, req.From, req.To, req.Text)
-			msg.Metadata = req.Meta
-			msg.Route = receipt.Route
-			msg.Provider = receipt.Provider
-			msg.Segments = message.Split(req.Text, message.SplitOptions{ForceEncoding: msg.Encoding})
-			if err := g.store.SaveMessage(r.Context(), msg); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, http.StatusAccepted, receipt)
@@ -171,6 +189,163 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (g *Gateway) authorizeClient(w http.ResponseWriter, r *http.Request) (string, bool) {
+	cfg := g.Config()
+	if len(cfg.Clients) == 0 {
+		return r.Header.Get("X-Client-ID"), true
+	}
+	clientID := r.Header.Get("X-Client-ID")
+	token := r.Header.Get("X-Token")
+	if clientID == "" || token == "" {
+		http.Error(w, "client credentials are required", http.StatusUnauthorized)
+		return "", false
+	}
+	for _, client := range cfg.Clients {
+		if !client.Enabled || !authutil.ConstantTimeEqual(client.ClientID, clientID) {
+			continue
+		}
+		if !authutil.ConstantTimeEqual(client.Token, token) {
+			break
+		}
+		if len(client.AllowedIPs) > 0 && !requestIPAllowed(r, client.AllowedIPs) {
+			http.Error(w, "client ip is not allowed", http.StatusForbidden)
+			return "", false
+		}
+		return clientID, true
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return "", false
+}
+
+func requestIPAllowed(r *http.Request, allowed []string) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	for _, item := range allowed {
+		if prefix, err := netip.ParsePrefix(item); err == nil {
+			if prefix.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if allowedIP, err := netip.ParseAddr(item); err == nil && allowedIP == ip {
+			return true
+		}
+	}
+	return false
+}
+
+func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta map[string]string) error {
+	if utf8.RuneCountInString(from) < 1 || utf8.RuneCountInString(from) > 32 {
+		return fmt.Errorf("from must be 1-32 characters")
+	}
+	if !validPhone(to) {
+		return fmt.Errorf("to must be E.164 or 11 digits")
+	}
+	if utf8.RuneCountInString(text) < 1 || utf8.RuneCountInString(text) > 1000 {
+		return fmt.Errorf("text must be 1-1000 characters")
+	}
+	if clientMsgID != "" && (utf8.RuneCountInString(clientMsgID) > 64 || strings.ContainsAny(clientMsgID, " \t\r\n")) {
+		return fmt.Errorf("client_msg_id must be 1-64 non-space characters")
+	}
+	if callbackURL != "" {
+		u, err := url.Parse(callbackURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return fmt.Errorf("callback_url must be https")
+		}
+	}
+	if len(meta) > 10 {
+		return fmt.Errorf("meta can contain at most 10 keys")
+	}
+	for k, v := range meta {
+		if k == "" || utf8.RuneCountInString(v) > 200 {
+			return fmt.Errorf("meta values must be at most 200 characters")
+		}
+	}
+	return nil
+}
+
+func validPhone(value string) bool {
+	if len(value) == 11 && allDigits(value) {
+		return true
+	}
+	if strings.HasPrefix(value, "+") && len(value) >= 8 && len(value) <= 16 && allDigits(value[1:]) {
+		return true
+	}
+	return false
+}
+
+func allDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func (g *Gateway) applyRisk(ctx context.Context, clientID, from, to, text string, meta map[string]string) (bool, string) {
+	cfg := g.Config()
+	for _, prefix := range cfg.Risk.BlockedToPrefix {
+		if prefix != "" && strings.HasPrefix(to, prefix) {
+			g.saveBlocked(ctx, from, to, text, "blocked_prefix", meta)
+			return true, "blocked destination"
+		}
+	}
+	lowerText := strings.ToLower(text)
+	for _, keyword := range cfg.Risk.BlockedKeywords {
+		if keyword != "" && strings.Contains(lowerText, strings.ToLower(keyword)) {
+			g.saveBlocked(ctx, from, to, text, "blocked_keyword", meta)
+			return true, "blocked keyword"
+		}
+	}
+	if cfg.Risk.PerNumberPerMinute > 0 && !g.allowRate("num:min:"+to, time.Minute, cfg.Risk.PerNumberPerMinute) {
+		g.saveBlocked(ctx, from, to, text, "number_rate_minute", meta)
+		return true, "number rate limit exceeded"
+	}
+	if cfg.Risk.PerNumberPerDay > 0 && !g.allowRate("num:day:"+to, 24*time.Hour, cfg.Risk.PerNumberPerDay) {
+		g.saveBlocked(ctx, from, to, text, "number_rate_day", meta)
+		return true, "number daily limit exceeded"
+	}
+	if clientID != "" && cfg.Risk.PerClientPerSecond > 0 && !g.allowRate("client:sec:"+clientID, time.Second, cfg.Risk.PerClientPerSecond) {
+		g.saveBlocked(ctx, from, to, text, "client_rate_second", meta)
+		return true, "client rate limit exceeded"
+	}
+	return false, ""
+}
+
+func (g *Gateway) allowRate(key string, window time.Duration, limit int) bool {
+	now := time.Now()
+	g.riskMu.Lock()
+	defer g.riskMu.Unlock()
+	rec := g.riskCounts[key]
+	if rec.start.IsZero() || now.Sub(rec.start) >= window {
+		g.riskCounts[key] = rateWindow{start: now, count: 1}
+		return true
+	}
+	if rec.count >= limit {
+		return false
+	}
+	rec.count++
+	g.riskCounts[key] = rec
+	return true
+}
+
+func (g *Gateway) saveBlocked(ctx context.Context, from, to, text, reason string, meta map[string]string) {
+	msg := message.New(newID(), message.DirectionMT, from, to, text)
+	msg.State = "blocked"
+	msg.Metadata = map[string]string{"reason": reason}
+	for k, v := range meta {
+		msg.Metadata[k] = v
+	}
+	_ = g.store.SaveMessage(ctx, msg)
 }
 
 func (g *Gateway) Config() config.Config {
@@ -237,7 +412,7 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if rule.AuthHeader != "" && r.Header.Get(rule.AuthHeader) != rule.AuthToken {
+	if rule.AuthHeader != "" && !authutil.ConstantTimeEqual(r.Header.Get(rule.AuthHeader), rule.AuthToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -290,51 +465,7 @@ func (g *Gateway) writeInboundSuccess(w http.ResponseWriter, rule config.HTTPRul
 }
 
 func BuildOutboundRequest(ctx context.Context, endpoint string, rule config.HTTPRuleConfig, msg message.Message) (*http.Request, error) {
-	values := url.Values{}
-	for target, source := range rule.Fields {
-		values.Set(target, messageField(msg, source))
-	}
-
-	method := strings.ToUpper(rule.Method)
-	if method == "" {
-		method = http.MethodPost
-	}
-	contentType := rule.ContentType
-	if contentType == "" {
-		contentType = "application/x-www-form-urlencoded"
-	}
-
-	var body io.Reader
-	requestURL := endpoint
-	if method == http.MethodGet {
-		sep := "?"
-		if strings.Contains(requestURL, "?") {
-			sep = "&"
-		}
-		requestURL += sep + values.Encode()
-	} else if contentType == "application/json" {
-		payload := map[string]string{}
-		for k := range values {
-			payload[k] = values.Get(k)
-		}
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-		body = bytes.NewReader(data)
-	} else {
-		body = strings.NewReader(values.Encode())
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", contentType)
-	for k, v := range rule.Headers {
-		req.Header.Set(k, expandMessage(v, msg))
-	}
-	return req, nil
+	return httprule.BuildOutboundRequest(ctx, endpoint, rule, msg)
 }
 
 func requestValues(r *http.Request) (map[string]string, error) {
@@ -375,34 +506,6 @@ func valueOf(values map[string]string, key, fallback string) string {
 	return fallback
 }
 
-func messageField(msg message.Message, field string) string {
-	switch field {
-	case "id":
-		return msg.ID
-	case "from":
-		return msg.From
-	case "to":
-		return msg.To
-	case "text":
-		return msg.Text
-	case "encoding":
-		return msg.Encoding
-	default:
-		return msg.Metadata[field]
-	}
-}
-
-func expandMessage(template string, msg message.Message) string {
-	replacer := strings.NewReplacer(
-		"{{id}}", msg.ID,
-		"{{from}}", msg.From,
-		"{{to}}", msg.To,
-		"{{text}}", msg.Text,
-		"{{encoding}}", msg.Encoding,
-	)
-	return replacer.Replace(template)
-}
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -411,4 +514,16 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func newID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+func intQuery(r *http.Request, name string, fallback int) int {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

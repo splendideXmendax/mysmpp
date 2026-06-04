@@ -6,7 +6,7 @@
   "smpp": {
     "addr": ":2775",
     "system_id": "mysmpp",
-    "password": "change-me",
+    "password": "CHANGE_ME_BEFORE_DEPLOY",
     "system_type": "gateway",
     "max_sessions": 128,
     "window_size": 16,
@@ -15,11 +15,11 @@
   "esmes": [
     {
       "system_id": "esme1",
-      "password": "secret"
+      "password": "CHANGE_ME_BEFORE_DEPLOY"
     },
     {
       "system_id": "load-tester",
-      "password": "test123"
+      "password": "CHANGE_ME_BEFORE_DEPLOY"
     }
   ],
   "routes": [
@@ -36,7 +36,12 @@
       "protocol": "mock",
       "endpoint": "",
       "rule": "demo-http-json",
-      "enabled": true
+      "enabled": true,
+      "rate_limit": {
+        "tps": 200,
+        "burst": 400,
+        "timeout_ms": 2000
+      }
     }
   ],
   "inbound": [
@@ -46,7 +51,7 @@
       "path": "/callback/provider",
       "content_type": "application/json",
       "auth_header": "X-Token",
-      "auth_token": "change-me",
+      "auth_token": "CHANGE_ME_BEFORE_DEPLOY",
       "fields": {
         "id": "message_id",
         "from": "source",
@@ -74,12 +79,27 @@
       }
     }
   ],
+  "clients": [
+    {
+      "client_id": "demo-client",
+      "token": "CHANGE_ME_BEFORE_DEPLOY",
+      "enabled": true,
+      "allowed_ips": ["127.0.0.1/32", "::1/128"]
+    }
+  ],
+  "risk": {
+    "blocked_to_prefix": [],
+    "blocked_keywords": [],
+    "per_number_per_minute": 5,
+    "per_number_per_day": 20,
+    "per_client_per_second": 100
+  },
   "storage": {
     "driver": "memory",
     "dsn": ""
   },
   "admin": {
     "username": "admin",
-    "password": "change-me"
+    "password": "CHANGE_ME_BEFORE_DEPLOY"
   }
 }
