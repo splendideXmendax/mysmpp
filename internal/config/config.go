@@ -88,6 +88,7 @@ type HTTPRuleConfig struct {
 	Name          string              `json:"name"`
 	Method        string              `json:"method"`
 	Path          string              `json:"path"`
+	Provider      string              `json:"provider"`
 	ContentType   string              `json:"content_type"`
 	AuthHeader    string              `json:"auth_header"`
 	AuthToken     string              `json:"auth_token"`
@@ -261,8 +262,24 @@ func (c Config) Validate() error {
 		if rule.Path == "" || !strings.HasPrefix(rule.Path, "/") {
 			return fmt.Errorf("inbound rule %q path must start with /", rule.Name)
 		}
+		if rule.AuthHeader == "" || rule.AuthToken == "" {
+			return fmt.Errorf("inbound rule %q auth_header and auth_token are required", rule.Name)
+		}
 		if rule.Fields["from"] == "" || rule.Fields["to"] == "" || rule.Fields["text"] == "" {
-			return fmt.Errorf("inbound rule %q must map from, to, and text", rule.Name)
+			if rule.Fields["provider_id"] == "" || rule.Fields["status"] == "" {
+				return fmt.Errorf("inbound rule %q must map from, to, and text", rule.Name)
+			}
+		}
+		if rule.Fields["provider_id"] != "" || rule.Fields["status"] != "" {
+			if rule.Fields["provider_id"] == "" || rule.Fields["status"] == "" {
+				return fmt.Errorf("inbound rule %q must map provider_id and status together", rule.Name)
+			}
+			if rule.Provider == "" {
+				return fmt.Errorf("inbound dlr rule %q provider is required", rule.Name)
+			}
+			if _, ok := names["provider:"+rule.Provider]; !ok {
+				return fmt.Errorf("inbound dlr rule %q references unknown provider %q", rule.Name, rule.Provider)
+			}
 		}
 	}
 	for _, rule := range c.Outbound {

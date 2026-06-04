@@ -5,3 +5,4 @@ dist/
 *.out
 .env
 .env.*
+.gocache/

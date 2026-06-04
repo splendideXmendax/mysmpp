@@ -24,6 +24,14 @@ func DecodeText(body []byte, dataCoding uint8) string {
 	}
 }
 
+func DecodeSubmitText(body []byte, dataCoding uint8) string {
+	decoded := DecodeText(body, dataCoding)
+	if dataCoding == 0x00 && isLikelyUnpackedASCII(body) && isLikelyUnpackedSubmit(body, decoded) {
+		return string(body)
+	}
+	return decoded
+}
+
 func EncodeText(text string, dataCoding uint8) []byte {
 	switch dataCoding {
 	case 0x08:
@@ -99,6 +107,9 @@ func decodeGSM7Packed(body []byte) string {
 		}
 		septets = append(septets, value)
 	}
+	if len(body)%7 == 0 && len(septets) > 0 && septets[len(septets)-1] == 0 {
+		septets = septets[:len(septets)-1]
+	}
 	out := make([]rune, 0, len(septets))
 	for i := 0; i < len(septets); i++ {
 		code := septets[i]
@@ -114,6 +125,84 @@ func decodeGSM7Packed(body []byte) string {
 		}
 	}
 	return string(out)
+}
+
+func isLikelyUnpackedASCII(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	for _, b := range body {
+		if b == '\r' || b == '\n' || b == '\t' {
+			continue
+		}
+		if b < 0x20 || b > 0x7E {
+			return false
+		}
+	}
+	return true
+}
+
+func isMostlyPrintableASCII(text string) bool {
+	if text == "" {
+		return true
+	}
+	total := 0
+	printable := 0
+	for _, r := range text {
+		total++
+		if r == '\r' || r == '\n' || r == '\t' || (r >= 0x20 && r <= 0x7E) {
+			printable++
+		}
+	}
+	return printable*100/total >= 90
+}
+
+func isLikelyUnpackedSubmit(body []byte, packedDecoded string) bool {
+	if !isMostlyPrintableASCII(packedDecoded) {
+		return true
+	}
+	raw := string(body)
+	if !containsASCIIControl(raw) && containsASCIIControl(packedDecoded) {
+		return true
+	}
+	return textScore(raw) > textScore(packedDecoded)+20
+}
+
+func containsASCIIControl(text string) bool {
+	for _, r := range text {
+		if r == '\r' || r == '\n' || r == '\t' {
+			return true
+		}
+	}
+	return false
+}
+
+func textScore(text string) int {
+	if text == "" {
+		return 0
+	}
+	score := 0
+	for _, r := range text {
+		switch {
+		case r >= 'a' && r <= 'z':
+			score += 4
+		case r >= 'A' && r <= 'Z':
+			score += 3
+		case r >= '0' && r <= '9':
+			score += 2
+		case r == ' ':
+			score += 4
+		case r == '.' || r == ',' || r == '!' || r == '?' || r == '-' || r == '_' || r == ':' || r == ';' || r == '\'' || r == '"':
+			score += 1
+		case r == '\r' || r == '\n' || r == '\t':
+			score -= 8
+		case r >= 0x20 && r <= 0x7E:
+			score -= 1
+		default:
+			score -= 4
+		}
+	}
+	return score * 100 / len([]rune(text))
 }
 
 func encodeGSM7Packed(text string) []byte {

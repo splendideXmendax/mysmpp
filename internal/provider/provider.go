@@ -18,6 +18,7 @@ type OutboundMessage struct {
 }
 
 type DLR struct {
+	Provider   string
 	ProviderID string
 	State      string
 	ErrorCode  int

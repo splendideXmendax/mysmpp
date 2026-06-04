@@ -90,7 +90,7 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 			concat = &parsed
 		}
 	}
-	text := message.DecodeText(body, dataCoding)
+	text := message.DecodeSubmitText(body, dataCoding)
 	return SubmitSM{
 		SequenceID:           pdu.SequenceID,
 		From:                 from,

@@ -3,7 +3,9 @@ package httpgw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -34,11 +36,13 @@ type Gateway struct {
 	mux        *http.ServeMux
 	riskMu     sync.Mutex
 	riskCounts map[string]rateWindow
+	riskSweep  time.Time
 }
 
 type rateWindow struct {
-	start time.Time
-	count int
+	start     time.Time
+	expiresAt time.Time
+	count     int
 }
 
 func New(cfg config.Config, st store.Store) *Gateway {
@@ -133,6 +137,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			CallbackRule string            `json:"callback_rule"`
 			Meta         map[string]string `json:"meta"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -325,9 +330,17 @@ func (g *Gateway) allowRate(key string, window time.Duration, limit int) bool {
 	now := time.Now()
 	g.riskMu.Lock()
 	defer g.riskMu.Unlock()
+	if g.riskSweep.IsZero() || now.Sub(g.riskSweep) >= time.Minute {
+		for key, rec := range g.riskCounts {
+			if !rec.expiresAt.IsZero() && now.After(rec.expiresAt) {
+				delete(g.riskCounts, key)
+			}
+		}
+		g.riskSweep = now
+	}
 	rec := g.riskCounts[key]
 	if rec.start.IsZero() || now.Sub(rec.start) >= window {
-		g.riskCounts[key] = rateWindow{start: now, count: 1}
+		g.riskCounts[key] = rateWindow{start: now, expiresAt: now.Add(window), count: 1}
 		return true
 	}
 	if rec.count >= limit {
@@ -359,14 +372,20 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	var providers map[string]provider.Provider
+	if g.registry != nil {
+		providers = provider.BuildProviders(g.ctx, cfg)
+	}
+	routes := cfg.Routes
+	providerCfgs := cfg.Providers
 	g.mu.Lock()
 	g.cfg = cfg
 	g.mu.Unlock()
 	if g.registry != nil {
-		g.registry.Replace(provider.BuildProviders(g.ctx, cfg))
+		g.registry.Replace(providers)
 	}
 	if g.dispatcher != nil {
-		g.dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+		g.dispatcher.ReloadRoutes(routes, providerCfgs)
 	}
 	return nil
 }
@@ -377,6 +396,7 @@ func (g *Gateway) configAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, g.Config())
 	case http.MethodPut, http.MethodPost:
 		var cfg config.Config
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -412,11 +432,16 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if rule.AuthHeader != "" && !authutil.ConstantTimeEqual(r.Header.Get(rule.AuthHeader), rule.AuthToken) {
+	if rule.AuthHeader == "" || rule.AuthToken == "" {
+		http.Error(w, "inbound rule auth is required", http.StatusUnauthorized)
+		return
+	}
+	if !authutil.ConstantTimeEqual(r.Header.Get(rule.AuthHeader), rule.AuthToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	values, err := requestValues(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -424,12 +449,21 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 	}
 	if g.dispatcher != nil && rule.Fields["provider_id"] != "" && rule.Fields["status"] != "" {
 		errCode, _ := strconv.Atoi(valueOf(values, rule.Fields["error_code"], "0"))
-		g.dispatcher.OnDLR(provider.DLR{
+		err := g.dispatcher.HandleDLR(r.Context(), provider.DLR{
+			Provider:   rule.Provider,
 			ProviderID: valueOf(values, rule.Fields["provider_id"], ""),
 			State:      valueOf(values, rule.Fields["status"], ""),
 			ErrorCode:  errCode,
 			DoneAt:     time.Now().UTC(),
 		})
+		if err != nil {
+			status := http.StatusForbidden
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
 		g.writeInboundSuccess(w, rule)
 		return
 	}
@@ -477,7 +511,7 @@ func requestValues(r *http.Request) (map[string]string, error) {
 	}
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
 			return nil, fmt.Errorf("invalid json")
 		}
 		for k, v := range payload {
@@ -513,7 +547,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func newID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return fmt.Sprintf("g%d", time.Now().UnixNano())
 }
 
 func intQuery(r *http.Request, name string, fallback int) int {

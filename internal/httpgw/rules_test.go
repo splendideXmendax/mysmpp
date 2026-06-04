@@ -270,9 +270,12 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 		Enabled: true,
 	}}
 	cfg.Inbound = []config.HTTPRuleConfig{{
-		Name:   "dlr",
-		Method: "POST",
-		Path:   "/callback/dlr",
+		Name:       "dlr",
+		Method:     "POST",
+		Path:       "/callback/dlr",
+		Provider:   "mock-a",
+		AuthHeader: "X-Token",
+		AuthToken:  "secret",
 		Fields: map[string]string{
 			"provider_id": "providerId",
 			"status":      "state",
@@ -316,6 +319,7 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	body := strings.NewReader(`{"providerId":"` + msg.ProviderID + `","state":"DELIVRD","err":"0"}`)
 	req := httptest.NewRequest(http.MethodPost, "/callback/dlr", body)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Token", "secret")
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
@@ -334,16 +338,74 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	}
 }
 
+func TestDynamicInboundRuleRejectsDLRProviderMismatch(t *testing.T) {
+	cfg := config.Default()
+	cfg.Inbound = []config.HTTPRuleConfig{{
+		Name:       "dlr",
+		Method:     "POST",
+		Path:       "/callback/dlr",
+		Provider:   "mock-b",
+		AuthHeader: "X-Token",
+		AuthToken:  "secret",
+		Fields: map[string]string{
+			"provider_id": "providerId",
+			"status":      "state",
+		},
+	}}
+	st := store.NewMemory()
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	msg.Provider = "mock-a"
+	msg.ProviderID = "p1"
+	msg.State = "sent"
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePending(context.Background(), store.Pending{
+		ProviderID: "p1",
+		GatewayID:  "g1",
+		Provider:   "mock-a",
+		SourceKind: dispatch.SourceHTTPAPI.String(),
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := dispatch.New(nil, nil, nil, time.Minute, st)
+	defer dispatcher.Close()
+	gateway := NewWithDispatcher(cfg, st, dispatcher)
+
+	req := httptest.NewRequest(http.MethodPost, "/callback/dlr", strings.NewReader(`{"providerId":"p1","state":"DELIVRD"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Token", "secret")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if dispatcher.PendingSize() != 1 {
+		t.Fatalf("provider mismatch should keep pending record, got %d", dispatcher.PendingSize())
+	}
+	got, ok, err := st.GetMessage(context.Background(), "g1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got.State != "sent" {
+		t.Fatalf("provider mismatch should not update message state: ok=%v msg=%+v", ok, got)
+	}
+}
+
 func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	cfg := config.Default()
 	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
 	st := store.NewMemory()
 	gateway := New(cfg, st)
 	cfg.Inbound = []config.HTTPRuleConfig{{
-		Name:   "new-callback",
-		Method: "POST",
-		Path:   "/callback/new",
-		Fields: map[string]string{"from": "src", "to": "dst", "text": "msg"},
+		Name:       "new-callback",
+		Method:     "POST",
+		Path:       "/callback/new",
+		AuthHeader: "X-Token",
+		AuthToken:  "secret",
+		Fields:     map[string]string{"from": "src", "to": "dst", "text": "msg"},
 	}}
 
 	payload, err := json.Marshal(cfg)
@@ -361,6 +423,7 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodPost, "/callback/new", strings.NewReader(`src=10010&dst=13800138000&msg=ok`))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Token", "secret")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

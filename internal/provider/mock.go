@@ -91,6 +91,7 @@ func (m *MockProvider) scheduleDLR(providerID string) {
 		return
 	}
 	cb(DLR{
+		Provider:   m.name,
 		ProviderID: providerID,
 		State:      state,
 		ErrorCode:  errCode,

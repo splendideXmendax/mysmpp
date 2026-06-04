@@ -95,6 +95,8 @@ type MemoryStore struct {
 	outbox      map[int64]OutboxItem
 	nextOutbox  int64
 	idempotency map[idempotencyKey]idempotencyRecord
+	lastSweep   time.Time
+	maxMessages int
 }
 
 type idempotencyKey struct {
@@ -113,6 +115,7 @@ func NewMemory() *MemoryStore {
 		pending:     map[string]Pending{},
 		outbox:      map[int64]OutboxItem{},
 		idempotency: map[idempotencyKey]idempotencyRecord{},
+		maxMessages: 10000,
 	}
 }
 
@@ -126,6 +129,7 @@ func (s *MemoryStore) SaveMessage(_ context.Context, msg message.Message) error 
 	}
 	s.messageByID[msg.ID] = len(s.messages)
 	s.messages = append(s.messages, msg)
+	s.trimMessagesLocked()
 	return nil
 }
 
@@ -201,14 +205,21 @@ func (s *MemoryStore) ListMessagesPage(_ context.Context, opts ListOptions) ([]m
 func (s *MemoryStore) SavePending(_ context.Context, p Pending) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(time.Now().UTC())
 	s.pending[p.ProviderID] = p
 	return nil
 }
 
 func (s *MemoryStore) GetPending(_ context.Context, providerID string) (Pending, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(now)
 	p, ok := s.pending[providerID]
+	if ok && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+		delete(s.pending, providerID)
+		return Pending{}, false, nil
+	}
 	return p, ok, nil
 }
 
@@ -233,8 +244,9 @@ func (s *MemoryStore) SweepExpiredPending(_ context.Context, before time.Time) (
 }
 
 func (s *MemoryStore) PendingSize(_ context.Context) (int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(time.Now().UTC())
 	return len(s.pending), nil
 }
 
@@ -345,6 +357,7 @@ func (s *MemoryStore) CheckIdempotency(_ context.Context, clientID, key string) 
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(now)
 	k := idempotencyKey{clientID: clientID, key: key}
 	rec, ok := s.idempotency[k]
 	if !ok {
@@ -366,11 +379,38 @@ func (s *MemoryStore) SaveIdempotency(_ context.Context, clientID, key, gatewayI
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(time.Now().UTC())
 	s.idempotency[idempotencyKey{clientID: clientID, key: key}] = idempotencyRecord{
 		gatewayID: gatewayID,
 		expiresAt: time.Now().UTC().Add(ttl),
 	}
 	return nil
+}
+
+func (s *MemoryStore) sweepLocked(now time.Time) {
+	for id, p := range s.pending {
+		if !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+			delete(s.pending, id)
+		}
+	}
+	for key, rec := range s.idempotency {
+		if !rec.expiresAt.IsZero() && rec.expiresAt.Before(now) {
+			delete(s.idempotency, key)
+		}
+	}
+	s.lastSweep = now
+}
+
+func (s *MemoryStore) trimMessagesLocked() {
+	if s.maxMessages <= 0 || len(s.messages) <= s.maxMessages {
+		return
+	}
+	drop := len(s.messages) - s.maxMessages
+	s.messages = append([]message.Message(nil), s.messages[drop:]...)
+	s.messageByID = make(map[string]int, len(s.messages))
+	for i, msg := range s.messages {
+		s.messageByID[msg.ID] = i
+	}
 }
 
 func cloneMessage(msg message.Message) message.Message {

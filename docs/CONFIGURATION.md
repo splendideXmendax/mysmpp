@@ -150,7 +150,7 @@ go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
 - `method`：允许的 HTTP 方法，默认 `POST`。
 - `path`：回调路径，必须以 `/` 开头。
 - `content_type`：预期请求类型；当前解析支持 JSON、query、form。
-- `auth_header` / `auth_token`：简单 header token 鉴权。
+- `auth_header` / `auth_token`：简单 header token 鉴权。所有入站规则都必须配置，回调校验使用常量时间比较。
 - `fields`：内部字段到外部请求字段的映射。
 - `success_status` / `success_body`：处理成功后返回给对方的响应。
 
@@ -162,6 +162,24 @@ go run ./cmd/testesme -addr 127.0.0.1:2775 -u esme1 -p secret -text ping
   "from": "src",
   "to": "dst",
   "text": "content"
+}
+```
+
+供应商 DLR 回调规则使用 `provider_id` 和 `status` 映射，并且必须把 `provider` 设置为对应供应商名称。网关会同时校验 token 和 pending 记录里的 provider，避免一个回调入口伪造其他供应商的状态。
+
+```json
+{
+  "name": "provider-a-dlr",
+  "method": "POST",
+  "path": "/callback/provider-a/dlr",
+  "provider": "provider-a",
+  "auth_header": "X-Token",
+  "auth_token": "change-me",
+  "fields": {
+    "provider_id": "message_id",
+    "status": "status",
+    "error_code": "error"
+  }
 }
 ```
 

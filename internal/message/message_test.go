@@ -73,3 +73,29 @@ func TestGSM7CodecRoundTrip(t *testing.T) {
 		t.Fatalf("expected %q, got %q", text, got)
 	}
 }
+
+func TestGSM7DecodeDropsSeptetPadding(t *testing.T) {
+	text := "ABCDEFG"
+	encoded := EncodeText(text, 0x00)
+	if len(encoded) != 7 {
+		t.Fatalf("expected 7 packed bytes, got %d", len(encoded))
+	}
+	if got := DecodeText(encoded, 0x00); got != text {
+		t.Fatalf("expected %q without padding @, got %q", text, got)
+	}
+}
+
+func TestDecodeSubmitTextAcceptsUnpackedASCIIForDefaultCoding(t *testing.T) {
+	body := []byte("hello ascii")
+	if got := DecodeSubmitText(body, 0x00); got != string(body) {
+		t.Fatalf("expected unpacked ascii %q, got %q", body, got)
+	}
+}
+
+func TestDecodeSubmitTextKeepsPackedGSM7ForDefaultCoding(t *testing.T) {
+	text := "hello @{}[]\\~^|€"
+	body := EncodeText(text, 0x00)
+	if got := DecodeSubmitText(body, 0x00); got != text {
+		t.Fatalf("expected packed gsm7 %q, got %q", text, got)
+	}
+}

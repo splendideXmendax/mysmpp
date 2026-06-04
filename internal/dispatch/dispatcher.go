@@ -168,36 +168,49 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 }
 
 func (d *Dispatcher) OnDLR(dlr provider.DLR) {
-	rec, ok, err := d.store.GetPending(context.Background(), dlr.ProviderID)
+	if err := d.HandleDLR(context.Background(), dlr); err != nil {
+		d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
+	}
+}
+
+func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rec, ok, err := d.store.GetPending(ctx, dlr.ProviderID)
 	if err != nil {
 		d.logger.Warn("get dlr mapping failed", "provider_id", dlr.ProviderID, "err", err)
-		return
+		return err
 	}
 	if !ok {
 		d.logger.Warn("dlr mapping not found", "provider_id", dlr.ProviderID)
-		return
+		return store.ErrNotFound
+	}
+	if dlr.Provider != "" && rec.Provider != "" && dlr.Provider != rec.Provider {
+		return fmt.Errorf("dlr provider mismatch: got %q want %q", dlr.Provider, rec.Provider)
 	}
 	if dlr.DoneAt.IsZero() {
 		dlr.DoneAt = time.Now().UTC()
 	}
-	if err := d.store.UpdateMessageState(context.Background(), rec.GatewayID, dlr.State, dlr.ErrorCode); err != nil {
+	if err := d.store.UpdateMessageState(ctx, rec.GatewayID, dlr.State, dlr.ErrorCode); err != nil {
 		d.logger.Warn("update dlr state failed", "gateway_id", rec.GatewayID, "err", err)
 	}
 	if rec.SourceKind == SourceSMPP.String() && rec.RegisteredDelivery&0x03 == 0 {
-		_ = d.store.DeletePending(context.Background(), dlr.ProviderID)
-		return
+		_ = d.store.DeletePending(ctx, dlr.ProviderID)
+		return nil
 	}
 	switch rec.SourceKind {
 	case SourceSMPP.String():
 		if err := d.pushSMPPDLR(rec, dlr); err != nil {
 			d.logger.Warn("send deliver_sm failed", "gateway_id", rec.GatewayID, "err", err)
-			return
+			return err
 		}
-		_ = d.store.DeletePending(context.Background(), dlr.ProviderID)
+		_ = d.store.DeletePending(ctx, dlr.ProviderID)
 	case SourceHTTPAPI.String():
 		d.logger.Info("dlr for http source", "gateway_id", rec.GatewayID, "state", dlr.State)
-		_ = d.store.DeletePending(context.Background(), dlr.ProviderID)
+		_ = d.store.DeletePending(ctx, dlr.ProviderID)
 	}
+	return nil
 }
 
 func (d *Dispatcher) PendingSize() int {
