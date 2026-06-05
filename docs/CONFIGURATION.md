@@ -1,60 +1,27 @@
-# mysmpp 配置设计
+# mysmpp 配置详解
 
-这份文档说明 `mysmpp` 的配置模型。整体思路是把短信网关拆成四层：下游接入、统一消息模型、路由决策、上游投递。
+本文说明 `mysmpp` 的 JSON 配置结构、默认值、生产建议和常见规则写法。
 
-## 角色定义
+## 配置文件选择
 
-- 下游：客户系统、业务系统、SMPP 客户端、HTTP 调用方。它们把短信交给网关，或者接收网关回调。
-- 上游：运营商、短信供应商、聚合通道。网关把短信投递给它们，也会接收它们的上行短信或状态报告。
-- 路由：根据号码、客户、短信类型、优先级等条件决定走哪个上游。
-- 规则：把不同 HTTP 接口的字段名、鉴权方式、请求格式转换到统一消息模型。
-
-## 配置页面
-
-推荐使用新的服务端渲染管理后台：
-
-```text
-http://127.0.0.1:19087/admin/
-```
-
-它使用 `admin.username` / `admin.password` 登录，session cookie 为 `HttpOnly`、`SameSite=Strict`，所有 POST 表单都带 CSRF token。后台当前提供概览、线路 CRUD、`providers` / `esmes` / `clients` / `inbound` / `outbound` / `risk` / `smpp` 分区 JSON 编辑，以及完整原始 JSON 编辑。保存时会先执行完整配置校验并更新运行时配置，再原子写回启动参数 `-config` 指定的配置文件。
-
-旧配置页面仍保留：
-
-```text
-http://127.0.0.1:19087/ui/config
-```
-
-配置页面使用以下 API：
-
-```text
-GET /v1/config
-PUT /v1/config
-```
-
-旧页面走 `/v1/config`，在 `cmd/mysmpp` 正常启动时也会写回启动参数 `-config` 指定的配置文件。生产使用仍建议优先使用 `/admin/`，旧页面只作为应急入口。
-
-## 配置文件
-
-仓库里的配置文件默认都使用冷门端口，拉代码后可以直接编译启动：
-
-| 文件 | 用途 | HTTP | SMPP | 是否可直接启动 |
+| 文件 | 场景 | HTTP | SMPP | 存储 |
 |---|---|---:|---:|---|
-| `configs/example.json` | 本机开发示例 | `127.0.0.1:19087` | `127.0.0.1:29175` | 是 |
-| `configs/dev.json` | 本机开发备用配置 | `127.0.0.1:19087` | `127.0.0.1:29175` | 是 |
-| `configs/docker.json` | Docker/Compose 默认配置 | `0.0.0.0:19087` | `0.0.0.0:29175` | 是 |
-| `configs/production.example.json` | 生产模板 | `:19087` | `:29175` | 否，必须替换占位符 |
+| `configs/example.json` | 本机开发 | `127.0.0.1:19087` | `127.0.0.1:29175` | memory |
+| `configs/dev.json` | 本机开发备用 | `127.0.0.1:19087` | `127.0.0.1:29175` | memory |
+| `configs/docker.json` | Docker 首次启动种子 | `0.0.0.0:19087` | `0.0.0.0:29175` | file |
+| `configs/production.example.json` | 生产模板 | `:19087` | `:29175` | postgres |
 
-开发默认账号：
+启动时指定配置:
 
-- 管理后台：`admin` / `mysmpp-admin-19087`
-- SMPP ESME：`dev-esme` / `mysmpp-esme-29175`
+```bash
+./mysmpp -config configs/example.json
+```
 
-这些开发凭据只写在 `configs/example.json`、`configs/dev.json` 和 `configs/docker.json` 中；`internal/config.Default()` 不内置任何 admin、ESME 或 provider 凭据。`cmd/mysmpp` 的 `-config` 默认值是 `configs/example.json`，所以在仓库根目录执行 `go run ./cmd/mysmpp` 就能直接启动。
+不指定时，默认读取:
 
-Docker 快速启动、账号密码、短信路由、上游供应商和 DLR 回调的完整可复制示例见 [QUICKSTART_DOCKER.md](QUICKSTART_DOCKER.md)。
-
-生产模板中的 `CHANGE_ME_BEFORE_DEPLOY` 会被配置校验拒绝，目的是防止忘记替换凭据后上线。
+```text
+configs/example.json
+```
 
 ## 完整结构
 
@@ -62,12 +29,17 @@ Docker 快速启动、账号密码、短信路由、上游供应商和 DLR 回�
 {
   "server": {},
   "smpp": {},
+  "dispatcher": {},
   "esmes": [],
   "routes": [],
   "providers": [],
   "inbound": [],
   "outbound": [],
-  "storage": {}
+  "clients": [],
+  "trusted_proxies": [],
+  "risk": {},
+  "storage": {},
+  "admin": {}
 }
 ```
 
@@ -80,8 +52,14 @@ Docker 快速启动、账号密码、短信路由、上游供应商和 DLR 回�
 }
 ```
 
-- `http_addr`：HTTP API 和配置页面监听地址。
-- `shutdown_timeout`：收到退出信号后的优雅关闭等待时间。
+字段:
+
+| 字段 | 说明 | 默认值 |
+|---|---|---|
+| `http_addr` | HTTP API 和管理后台监听地址 | `127.0.0.1:19087` |
+| `shutdown_timeout` | 收到退出信号后的优雅关闭等待时间 | `10s` |
+
+Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到容器内服务。
 
 ## smpp
 
@@ -92,230 +70,588 @@ Docker 快速启动、账号密码、短信路由、上游供应商和 DLR 回�
   "password": "mysmpp-smpp-29175",
   "system_type": "gateway",
   "max_sessions": 128,
+  "max_sessions_per_system_id": 4,
   "window_size": 16,
   "enquire_period": "30s"
 }
 ```
 
-- `addr`：SMPP TCP 监听地址。
-- `system_id`：网关在 bind 响应里返回给 ESME 的 system_id。
-- `password`：兼容旧配置的单 ESME bind 密码；新配置建议使用 `esmes`。
-- `system_type`：保留字段，后续可用于区分客户类型。
-- `max_sessions`：最大会话数，当前已配置化，后续会在会话管理中强制执行。
-- `window_size`：SMPP 并发窗口，后续用于 submit/deliver 流控。
-- `enquire_period`：链路保活周期，后续用于主动 `enquire_link`。
+字段:
+
+| 字段 | 说明 | 默认值 |
+|---|---|---|
+| `addr` | SMPP TCP 监听地址 | `127.0.0.1:29175` |
+| `system_id` | 网关在 bind response 中返回的 system_id | `mysmpp` |
+| `password` | 兼容旧配置的 SMPP 密码字段，建议使用 `esmes` | 空 |
+| `system_type` | SMPP system_type | `gateway` |
+| `max_sessions` | 最大 SMPP 会话数 | `128` |
+| `max_sessions_per_system_id` | 同一个 ESME system_id 最大会话数 | `4` |
+| `window_size` | 单会话并发 submit 窗口，满时返回 throttled | `16` |
+| `enquire_period` | enquire_link 周期；空闲超过 2 倍周期会关闭会话 | `30s` |
+
+未完成 bind 的连接会在 30 秒后关闭，避免半开连接占用会话。
+
+## dispatcher
+
+```json
+{
+  "workers": 10,
+  "per_worker_concurrency": 10,
+  "claim_limit": 20,
+  "poll_interval_ms": 20,
+  "pending_ttl": "30m",
+  "max_attempts": 5
+}
+```
+
+字段:
+
+| 字段 | 说明 | 默认值 |
+|---|---|---:|
+| `workers` | outbox claim worker 数量 | `10` |
+| `per_worker_concurrency` | 每个 worker 同时调用上游的并发数 | `10` |
+| `claim_limit` | 每次最多 claim 的 outbox 数量 | `20` |
+| `poll_interval_ms` | worker 轮询间隔 | `20` |
+| `pending_ttl` | provider_id 到 gateway_id 的 DLR 映射保留时间 | `30m` |
+| `max_attempts` | 上游发送失败最大尝试次数 | `5` |
+
+总上游并发:
+
+```text
+workers * per_worker_concurrency
+```
+
+估算公式:
+
+```text
+目标 TPS * 上游平均 RTT 秒数 * 安全系数 1.5-2
+```
+
+例子:
+
+| 上游平均 RTT | 推荐并发 | 示例 |
+|---:|---:|---|
+| 100ms | 50 | `workers=10`, `per_worker_concurrency=5` |
+| 200ms | 100 | `workers=10`, `per_worker_concurrency=10` |
+| 500ms | 250 | `workers=10`, `per_worker_concurrency=25` |
 
 ## esmes
 
-`esmes` 描述允许连接到网关的下游 SMPP 客户端账号。SMPP 客户端 bind 时提交的 `system_id` 和 `password` 会先匹配这个数组；如果没有命中，会再兼容旧配置里的 `smpp.system_id` / `smpp.password`。
+`esmes` 是允许 bind 到网关的 SMPP 客户端账号。
 
 ```json
 [
   {
     "system_id": "dev-esme",
     "password": "mysmpp-esme-29175"
-  },
-  {
-    "system_id": "load-tester",
-    "password": "test123"
   }
 ]
 ```
 
-字段说明：
+字段:
 
-- `system_id`：下游 ESME 的 bind 用户名，必须唯一。
-- `password`：下游 ESME 的 bind 密码。
+| 字段 | 说明 |
+|---|---|
+| `system_id` | ESME bind 用户名，必须唯一 |
+| `password` | ESME bind 密码 |
 
-当前版本的 DLR mapping 会记录 ESME 所在 session。mock provider 返回 DLR 后，网关根据 mapping 找回原 session，并用 `deliver_sm` 把回执推回该连接。
+生产环境不要使用示例密码。配置校验会拒绝 `CHANGE_ME_BEFORE_DEPLOY` 占位符。
 
-## SMPP 中转与 DLR
+## routes
 
-当前 SMPP 中转 MVP 的链路如下：
+`routes` 决定短信走哪个上游。
+
+```json
+[
+  {
+    "name": "china-mobile",
+    "prefix": ["134", "135", "136", "137", "138", "139"],
+    "provider": "provider-a",
+    "priority": 100
+  },
+  {
+    "name": "default",
+    "prefix": [],
+    "provider": "provider-b",
+    "priority": 1
+  }
+]
+```
+
+匹配规则:
+
+1. 只使用 enabled provider 对应的 route。
+2. `priority` 越大越优先。
+3. 同优先级下，号码前缀越长越优先。
+4. `prefix: []` 是默认兜底路由。
+
+字段:
+
+| 字段 | 说明 |
+|---|---|
+| `name` | 路由名 |
+| `prefix` | 号码前缀列表；空数组表示默认路由 |
+| `provider` | 上游 provider 名称 |
+| `priority` | 优先级 |
+
+## providers
+
+`providers` 描述上游通道。
+
+```json
+[
+  {
+    "name": "provider-a",
+    "protocol": "http",
+    "endpoint": "https://sms.example.com/send",
+    "rule": "http-json-a",
+    "enabled": true,
+    "http_timeout_ms": 3000,
+    "rate_limit": {
+      "tps": 50,
+      "burst": 100,
+      "timeout_ms": 2000
+    }
+  }
+]
+```
+
+字段:
+
+| 字段 | 说明 |
+|---|---|
+| `name` | provider 唯一名称 |
+| `protocol` | `mock`、`http` 或 `https` |
+| `endpoint` | HTTP 上游地址 |
+| `rule` | 引用 `outbound[].name` |
+| `system_id` / `password` | 预留给需要账号密码的上游 |
+| `enabled` | 是否启用 |
+| `http_timeout_ms` | 真实 HTTP 请求超时，默认 3000ms |
+| `rate_limit.tps` | 每秒令牌数；小于等于 0 表示不启用 provider 限速 |
+| `rate_limit.burst` | 突发令牌桶大小；默认等于 tps |
+| `rate_limit.timeout_ms` | 等待令牌的最长时间，默认 2000ms |
+
+注意:
+
+- `http_timeout_ms` 是上游 HTTP client 超时。
+- `rate_limit.timeout_ms` 是等令牌的超时。
+- 两者不是同一个东西。
+
+## outbound
+
+`outbound` 描述调用 HTTP 上游时如何渲染请求。
+
+```json
+[
+  {
+    "name": "http-json-a",
+    "method": "POST",
+    "content_type": "application/json",
+    "fields": {
+      "mobile": "to",
+      "content": "text",
+      "sender": "from",
+      "msgId": "id",
+      "encoding": "encoding"
+    },
+    "headers": {
+      "Authorization": "Bearer replace-with-token",
+      "X-Request-ID": "{{id}}"
+    },
+    "response": {
+      "id_path": "data.0.messageId",
+      "id_regex": ""
+    }
+  }
+]
+```
+
+`fields` 左边是上游字段名，右边是网关内部字段名。
+
+可用内部字段:
+
+| 内部字段 | 说明 |
+|---|---|
+| `id` | gateway_id |
+| `from` | 主叫、签名号、源地址 |
+| `to` | 被叫号码 |
+| `text` | 短信内容 |
+| `encoding` | `gsm7` 或 `ucs2` |
+
+请求格式:
+
+| 配置 | 行为 |
+|---|---|
+| `method=GET` | 参数放到 query string |
+| `content_type=application/json` | 参数 JSON 序列化 |
+| 其他 content type | 默认 form urlencoded |
+
+响应 provider_id 提取:
+
+```json
+"response": {
+  "id_path": "data.0.messageId"
+}
+```
+
+或者:
+
+```json
+"response": {
+  "id_regex": "MsgID:\\s+([A-Za-z0-9_-]+)"
+}
+```
+
+如果没有命中 `id_path` 或 `id_regex`，网关不会把整个响应体猜成 provider_id，而是 fallback 到 gateway_id。
+
+## inbound
+
+`inbound` 描述外部系统调用网关的 HTTP 入站规则。常见用途:
+
+- 上游 provider 回调 DLR。
+- 上游 provider 推送 MO。
+- 下游客户用自定义 HTTP 格式提交消息。
+
+### 普通入站消息
+
+```json
+[
+  {
+    "name": "partner-mo",
+    "method": "POST",
+    "path": "/callback/partner/mo",
+    "content_type": "application/json",
+    "auth_header": "X-Token",
+    "auth_token": "replace-with-token",
+    "fields": {
+      "id": "msg_id",
+      "from": "src",
+      "to": "dst",
+      "text": "content"
+    },
+    "success_status": 200,
+    "success_body": "{\"ok\":true}"
+  }
+]
+```
+
+### Provider DLR 回调
+
+```json
+[
+  {
+    "name": "provider-a-dlr",
+    "method": "POST",
+    "path": "/callback/provider-a/dlr",
+    "provider": "provider-a",
+    "content_type": "application/json",
+    "auth_header": "X-Callback-Token",
+    "auth_token": "replace-with-callback-token",
+    "fields": {
+      "provider_id": "message_id",
+      "status": "status",
+      "error_code": "error_code"
+    },
+    "success_status": 200,
+    "success_body": "{\"ok\":true}"
+  }
+]
+```
+
+DLR 规则要求:
+
+- 必须有 `provider`。
+- 必须映射 `provider_id` 和 `status`。
+- 回调会校验 token。
+- 回调里的 provider 必须和 pending 记录里的 provider 一致。
+
+## clients
+
+`clients` 控制 HTTP `/v1/messages` 的客户端鉴权。
+
+```json
+[
+  {
+    "client_id": "demo-client",
+    "token": "replace-with-token",
+    "enabled": true,
+    "allowed_ips": ["127.0.0.1/32", "::1/128"]
+  }
+]
+```
+
+字段:
+
+| 字段 | 说明 |
+|---|---|
+| `client_id` | HTTP 客户端 ID |
+| `token` | 请求头 `X-Token` |
+| `enabled` | 是否启用 |
+| `allowed_ips` | 允许访问的客户端 IP/CIDR；为空表示不限制 |
+
+请求示例:
+
+```bash
+curl -X POST http://127.0.0.1:19087/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'X-Client-ID: demo-client' \
+  -H 'X-Token: replace-with-token' \
+  -d '{"from":"10690000","to":"13800138000","text":"hello"}'
+```
+
+如果 `clients` 为空，开发模式下允许不带 token。
+
+## trusted_proxies
+
+反向代理后如果还要使用 `clients[].allowed_ips`，需要配置受信代理:
+
+```json
+["127.0.0.1/32", "::1/128", "10.0.0.0/8"]
+```
+
+只有请求直连来源命中 `trusted_proxies` 时，网关才会读取:
+
+- `X-Forwarded-For`
+- `X-Real-IP`
+
+`X-Forwarded-For` 会从右往左找第一个非受信代理 IP，避免客户端随便伪造第一个 IP 绕过白名单。
+
+## risk
+
+```json
+{
+  "blocked_to_prefix": [],
+  "blocked_keywords": [],
+  "per_number_per_minute": 5,
+  "per_number_per_day": 20,
+  "per_client_per_second": 100
+}
+```
+
+字段:
+
+| 字段 | 说明 |
+|---|---|
+| `blocked_to_prefix` | 禁止发送的号码前缀 |
+| `blocked_keywords` | 内容关键词黑名单，大小写不敏感 |
+| `per_number_per_minute` | 单号码每分钟上限 |
+| `per_number_per_day` | 单号码每天上限 |
+| `per_client_per_second` | 单 HTTP 客户端每秒上限 |
+
+限制:
+
+- 当前风控是进程内 map。
+- 多实例部署时，每个实例独立计数。
+- 生产多副本需要改 Redis 或 Postgres 计数。
+
+## storage
+
+```json
+{
+  "driver": "postgres",
+  "dsn": "postgres://mysmpp:password@127.0.0.1:5432/mysmpp?sslmode=disable&pool_max_conns=50&pool_min_conns=10"
+}
+```
+
+driver:
+
+| driver | 说明 | 适用场景 |
+|---|---|---|
+| `memory` | 内存存储，重启丢失 | 本机开发 |
+| `file` / `json` | JSON 文件快照 | 单容器联调 |
+| `postgres` / `pg` | Postgres 持久化 | 生产 |
+
+file 模式:
+
+- 如果 `dsn` 为空，会自动使用配置文件同目录的 `store.json`。
+- Docker 中默认写到 `/app/data/store.json`。
+
+Postgres 模式:
+
+1. 创建数据库和用户。
+2. 执行 `migrations/001_init.up.sql`。
+3. 配置 `storage.driver=postgres` 和 DSN。
+4. 确保连接池足够，例如 `pool_max_conns=50`。
+
+## admin
+
+```json
+{
+  "username": "admin",
+  "password": "replace-with-password"
+}
+```
+
+用于登录:
 
 ```text
-ESME submit_sm -> Session -> Dispatcher -> Mock Provider -> Dispatcher -> deliver_sm DLR -> ESME
+/admin/
+/v1/config
+/ui/config
 ```
 
-`submit_sm_resp` 中返回的 message_id 形如 `g0000000001`。如果 ESME 在 `registered_delivery` 中请求回执，mock provider 会在几秒后生成 `DELIVRD` 状态，网关构造 DLR：
+安全行为:
 
-- `esm_class=0x04`，表示 SMSC Delivery Receipt。
-- `short_message` 包含 SMPP receipt text，例如 `id:g0000000001 ... stat:DELIVRD ...`。
-- TLV 包含 `receipted_message_id` 和 `message_state`。
-- DLR 的 `source_addr` / `destination_addr` 会相对原 submit_sm 反向。
+- 用户名和密码常量时间比较。
+- 登录失败按 IP 限流，15 分钟内最多 5 次。
+- session cookie 使用 `HttpOnly` 和 `SameSite=Strict`。
+- 非 GET 表单带 CSRF token。
 
-本地验证：
-
-```powershell
-go run ./cmd/mysmpp
-go run ./cmd/testesme -text ping
-```
-
-## 下游入站 HTTP：inbound
-
-`inbound` 描述“外部系统调用网关”的规则，适合接收上行短信、状态回调，或者客户通过自定义 HTTP 接口提交短信。
+## 完整生产配置骨架
 
 ```json
 {
-  "name": "partner-callback",
-  "method": "POST",
-  "path": "/callback/partner",
-  "content_type": "application/json",
-  "auth_header": "X-Token",
-  "auth_token": "change-me",
-  "fields": {
-    "id": "msg_id",
-    "from": "src",
-    "to": "dst",
-    "text": "content"
+  "server": {
+    "http_addr": "0.0.0.0:19087",
+    "shutdown_timeout": "30s"
   },
-  "success_status": 200,
-  "success_body": "{\"status\":\"ok\"}"
-}
-```
-
-字段说明：
-
-- `name`：规则名，也会记录到消息来源字段，方便排查。
-- `method`：允许的 HTTP 方法，默认 `POST`。
-- `path`：回调路径，必须以 `/` 开头。
-- `content_type`：预期请求类型；当前解析支持 JSON、query、form。
-- `auth_header` / `auth_token`：简单 header token 鉴权。所有入站规则都必须配置，回调校验使用常量时间比较。
-- `fields`：内部字段到外部请求字段的映射。
-- `success_status` / `success_body`：处理成功后返回给对方的响应。
-
-`fields` 左边是网关内部字段，右边是外部请求字段：
-
-```json
-{
-  "id": "msg_id",
-  "from": "src",
-  "to": "dst",
-  "text": "content"
-}
-```
-
-供应商 DLR 回调规则使用 `provider_id` 和 `status` 映射，并且必须把 `provider` 设置为对应供应商名称。网关会同时校验 token 和 pending 记录里的 provider，避免一个回调入口伪造其他供应商的状态。
-
-```json
-{
-  "name": "provider-a-dlr",
-  "method": "POST",
-  "path": "/callback/provider-a/dlr",
-  "provider": "provider-a",
-  "auth_header": "X-Token",
-  "auth_token": "change-me",
-  "fields": {
-    "provider_id": "message_id",
-    "status": "status",
-    "error_code": "error"
+  "smpp": {
+    "addr": "0.0.0.0:29175",
+    "system_id": "mysmpp-prod",
+    "password": "replace-with-smpp-password",
+    "system_type": "gateway",
+    "max_sessions": 256,
+    "max_sessions_per_system_id": 8,
+    "window_size": 100,
+    "enquire_period": "30s"
+  },
+  "dispatcher": {
+    "workers": 10,
+    "per_worker_concurrency": 10,
+    "claim_limit": 20,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 5
+  },
+  "esmes": [
+    {
+      "system_id": "customer-a",
+      "password": "replace-with-esme-password"
+    }
+  ],
+  "routes": [
+    {
+      "name": "default",
+      "prefix": [],
+      "provider": "provider-a",
+      "priority": 1
+    }
+  ],
+  "providers": [
+    {
+      "name": "provider-a",
+      "protocol": "http",
+      "endpoint": "https://sms-provider.example.com/send",
+      "rule": "provider-a-json",
+      "enabled": true,
+      "http_timeout_ms": 3000,
+      "rate_limit": {
+        "tps": 300,
+        "burst": 600,
+        "timeout_ms": 2000
+      }
+    }
+  ],
+  "inbound": [
+    {
+      "name": "provider-a-dlr",
+      "method": "POST",
+      "path": "/callback/provider-a/dlr",
+      "provider": "provider-a",
+      "content_type": "application/json",
+      "auth_header": "X-Callback-Token",
+      "auth_token": "replace-with-callback-token",
+      "fields": {
+        "provider_id": "message_id",
+        "status": "status",
+        "error_code": "error_code"
+      },
+      "success_status": 200,
+      "success_body": "{\"ok\":true}"
+    }
+  ],
+  "outbound": [
+    {
+      "name": "provider-a-json",
+      "method": "POST",
+      "content_type": "application/json",
+      "fields": {
+        "mobile": "to",
+        "content": "text",
+        "sender": "from",
+        "requestId": "id"
+      },
+      "headers": {
+        "Authorization": "Bearer replace-with-provider-token",
+        "X-Request-ID": "{{id}}"
+      },
+      "response": {
+        "id_path": "data.0.messageId"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "client_id": "api-client-a",
+      "token": "replace-with-client-token",
+      "enabled": true,
+      "allowed_ips": []
+    }
+  ],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
+  "risk": {
+    "blocked_to_prefix": [],
+    "blocked_keywords": [],
+    "per_number_per_minute": 5,
+    "per_number_per_day": 20,
+    "per_client_per_second": 500
+  },
+  "storage": {
+    "driver": "postgres",
+    "dsn": "postgres://mysmpp:password@127.0.0.1:5432/mysmpp?sslmode=disable&pool_max_conns=50&pool_min_conns=10"
+  },
+  "admin": {
+    "username": "admin",
+    "password": "replace-with-admin-password"
   }
 }
 ```
 
-## 上游供应商：providers
+## 修改配置的方式
 
-`providers` 描述“短信要发给谁”。供应商配置只记录连接信息，并引用一条 `outbound` 规则。
+### 方式一: 管理后台
 
-```json
-{
-  "name": "provider-a",
-  "protocol": "http",
-  "endpoint": "https://sms-a.example.com/send",
-  "rule": "http-form-a",
-  "enabled": true
-}
+```text
+http://127.0.0.1:19087/admin/
 ```
 
-- `name`：供应商唯一名称。
-- `protocol`：当前建议使用 `http` 或 `smpp`，第一版以 HTTP 规则渲染为主。
-- `endpoint`：HTTP URL，或后续 SMPP 上游连接地址。
-- `rule`：引用 `outbound[].name`。
-- `system_id` / `password`：上游账号。
-- `enabled`：是否启用。
+保存后会:
 
-## 路由规则：routes
+1. 校验完整配置。
+2. 热更新 provider 和路由。
+3. 原子写回 `-config` 指定的文件。
 
-`routes` 描述“哪些短信走哪个上游”。当前实现按手机号前缀和优先级匹配。
+### 方式二: 直接编辑 JSON
 
-```json
-{
-  "name": "china-mobile",
-  "prefix": ["134", "135", "136", "137", "138", "139"],
-  "provider": "provider-a",
-  "priority": 100
-}
+编辑后重启服务:
+
+```bash
+docker compose restart mysmpp
 ```
 
-匹配规则：
+或者:
 
-1. 按 `priority` 从大到小排序。
-2. `prefix` 为空代表默认路由。
-3. 号码 `to` 命中某个前缀后使用对应 `provider`。
-
-建议：
-
-- 给精确号段更高优先级。
-- 保留一条 `prefix: []` 的默认路由。
-- 后续可增加 `customer_id`、`country`、`message_type`、`price_level` 等条件。
-
-## 上游出站 HTTP：outbound
-
-`outbound` 描述“发给供应商时如何组织 HTTP 请求”。
-
-```json
-{
-  "name": "http-json-b",
-  "method": "POST",
-  "content_type": "application/json",
-  "fields": {
-    "messageId": "id",
-    "sender": "from",
-    "receiver": "to",
-    "body": "text",
-    "coding": "encoding"
-  },
-  "headers": {
-    "X-Request-ID": "{{id}}"
-  }
-}
+```bash
+./mysmpp -config /path/to/config.json
 ```
 
-这里 `fields` 左边是供应商参数名，右边是网关内部字段：
+## 常见校验失败
 
-- `id`：网关消息 ID。
-- `from`：主叫、签名号或短信端口。
-- `to`：被叫手机号。
-- `text`：短信内容。
-- `encoding`：`gsm7` 或 `ucs2`。
-- 其他值会尝试从 `message.Metadata` 读取。
-
-请求格式：
-
-- `method=GET`：字段进入 query string。
-- `content_type=application/json`：字段序列化成 JSON。
-- 其他情况：默认按 `application/x-www-form-urlencoded` 发送。
-
-## 长短信策略
-
-统一消息进入网关后会拆成 `segments`：
-
-- GSM-7：单条 160 字符，长短信每段 153 字符。
-- UCS-2：单条 70 字符，长短信每段 67 字符。
-- 每段包含 `Part`、`Total`、`Reference`、`UDH`。
-
-出站适配器后续可以根据供应商要求选择：
-
-- 供应商自动拆分：只发完整 `text`。
-- 供应商要求 UDH：逐段发送并带 `UDH`。
-- 供应商要求自定义长短信字段：把 `Reference`、`Part`、`Total` 映射到供应商参数。
-
-当前 outbound 规则先覆盖完整 `text` 模式，逐段投递会在 dispatcher 阶段加入。
-
-## 推荐生产配置方向
-
-1. 继续完善 `clients` 配置，把每个下游客户的 SMPP/HTTP 凭证、限速、签名策略和路由策略独立出来。
-2. 为上游通道增加健康状态、失败熔断、备用通道和价格策略。
-3. 路由条件扩展到国家码、号段、客户、内容类型、模板、价格优先级。
-4. 持久化消息、分段、回执和重试记录。
-5. 配置页面增加保存到文件、导入导出、规则测试器和变更审计。
+| 报错 | 原因 | 处理 |
+|---|---|---|
+| `admin credentials must be changed before deploy` | 仍在使用占位符 | 替换 `admin.password` |
+| `smpp password must be changed before deploy` | `smpp.password` 是占位符 | 替换或清理 |
+| `client token must be changed before deploy` | HTTP client token 是占位符 | 替换 |
+| `storage.dsn is required for postgres` | Postgres 未配置 DSN | 填写 `storage.dsn` |
+| `route references unknown provider` | route 指向不存在的 provider | 修正 provider 名 |
+| `at least one provider must be enabled` | 所有 provider 都禁用 | 启用一个 provider |

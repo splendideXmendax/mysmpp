@@ -1,41 +1,118 @@
-# mysmpp 管理后台
+# 管理后台说明
 
-`/admin/` 是按 `mysmpp改造方案.md` 落地的服务端渲染后台。它不使用 Vue、React 或其他前端框架，只依赖 Go 标准库的 `net/http`、`html/template` 和普通 HTML 表单。
-
-## 入口
+`mysmpp` 的管理后台入口:
 
 ```text
 http://127.0.0.1:19087/admin/
 ```
 
-登录凭据来自配置：
+服务器部署时:
+
+```text
+http://服务器IP:19087/admin/
+```
+
+## 登录账号
+
+账号来自配置:
 
 ```json
-"admin": {
-  "username": "admin",
-  "password": "mysmpp-admin-19087"
+{
+  "admin": {
+    "username": "admin",
+    "password": "replace-with-password"
+  }
 }
 ```
 
-默认开发启动时，程序读取 `configs/example.json`，所以默认登录是 `admin` / `mysmpp-admin-19087`。如果使用其他配置文件，以该文件里的 `admin.username` / `admin.password` 为准。
+本机开发配置:
 
-## 已实现页面
+```text
+admin / mysmpp-admin-19087
+```
 
-- 概览：显示 routes、providers、ESMEs、inbound、outbound、clients 数量。
-- 线路：支持新建、编辑、删除 routes。
-- 上游供应商、下游 ESME、HTTP 客户端、入站规则、出站规则、风控、SMPP：按分区 JSON 表单编辑。
-- 原始 JSON：编辑完整配置。
+Docker 首次启动会随机生成密码，查看:
 
-保存动作都会先执行完整配置校验和运行时热更新，再通过临时文件 + rename 原子写回 `-config` 指定的配置文件。默认开发启动时会写回 `configs/example.json`。
+```bash
+docker cp mysmpp:/app/data/credentials.txt ./credentials.txt
+cat ./credentials.txt
+```
+
+## 页面功能
+
+后台当前提供:
+
+- 仪表盘: 显示 routes、providers、ESMEs、clients、inbound、outbound 等数量。
+- 线路管理: 新建、编辑、删除 `routes`。
+- 上游 provider: JSON 编辑 `providers`。
+- 下游 ESME: JSON 编辑 `esmes`。
+- HTTP 客户端: JSON 编辑 `clients`。
+- 入站规则: JSON 编辑 `inbound`。
+- 出站规则: JSON 编辑 `outbound`。
+- 风控: JSON 编辑 `risk`。
+- SMPP: JSON 编辑 `smpp`。
+- 原始 JSON: 一次性编辑完整配置。
+
+保存时会:
+
+1. 校验完整配置。
+2. 热更新运行时 provider 和 route。
+3. 原子写回启动参数 `-config` 指定的配置文件。
+
+Docker 默认写回:
+
+```text
+/app/data/config.json
+```
 
 ## 安全行为
 
-- Session token 使用 32 字节随机数，保存在内存中。
-- Cookie 设置 `HttpOnly`、`SameSite=Strict`，HTTPS 下自动带 `Secure`。
-- 所有非 GET 表单都校验 CSRF token。
-- 登录失败按 IP 限制为 15 分钟 5 次。
-- 登录错误统一显示“用户名或密码错误”。
+- 管理后台必须登录，没有本地绕过。
+- 用户名和密码使用常量时间比较。
+- 登录失败按 IP 限流: 15 分钟内最多 5 次。
+- session token 为随机 32 字节。
+- Cookie 使用 `HttpOnly` 和 `SameSite=Strict`。
+- HTTPS 请求下 Cookie 会自动带 `Secure`。
+- 所有非 GET 表单都有 CSRF token。
+- `CHANGE_ME_BEFORE_DEPLOY` 占位符会被配置校验拒绝。
 
-## 与旧页面关系
+## `/ui/config` 和 `/v1/config`
 
-旧 `/ui/config` 仍保留为应急入口，但它只更新运行时配置，不会写回配置文件。日常配置修改建议使用 `/admin/`。
+旧入口仍保留:
+
+```text
+/ui/config
+/v1/config
+```
+
+它们也需要 admin Basic Auth。日常建议使用 `/admin/`，因为后台页面更完整，也更适合人工维护。
+
+## 常见问题
+
+### 忘记密码
+
+Docker:
+
+```bash
+docker cp mysmpp:/app/data/config.json ./config.json
+```
+
+编辑 `admin.password` 后复制回去:
+
+```bash
+docker cp ./config.json mysmpp:/app/data/config.json
+docker compose restart mysmpp
+```
+
+本机运行则直接改 `-config` 指定的 JSON 文件。
+
+### 保存失败
+
+后台保存会先做完整校验。常见原因:
+
+- provider 名重复。
+- route 指向不存在的 provider。
+- provider 全部 disabled。
+- inbound rule 缺少 `auth_header` 或 `auth_token`。
+- DLR inbound rule 缺少 `provider_id` / `status` 成对映射。
+- 生产模板里还有 `CHANGE_ME_BEFORE_DEPLOY`。

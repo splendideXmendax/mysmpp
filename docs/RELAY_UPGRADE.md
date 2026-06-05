@@ -1,102 +1,143 @@
-# mysmpp Relay Upgrade Notes
+# 中继能力和优化记录
 
-This document records the parts of `mysmpp改造方案.md` implemented in this pass and the deployment notes for the new relay path.
+这份文档记录当前 `mysmpp` 已落地的中继能力、安全改造和性能优化，方便后续维护者理解项目状态。
 
-## Implemented
+## 当前中继链路
 
-- SMPP bind authentication now reads the current runtime config, so `/v1/config` changes take effect without restarting.
-- Admin Basic Auth no longer allows loopback bypass. Admin username and password are always required.
-- A server-rendered `/admin/` management console is available without a frontend framework. It uses in-memory sessions, HttpOnly SameSite cookies, CSRF-protected forms, login throttling, and atomic config persistence.
-- Secret placeholders named `CHANGE_ME_BEFORE_DEPLOY` are rejected during config validation.
-- SMPP `readLoop` no longer polls with a one-second read deadline.
-- SMPP `window_size` now throttles concurrent `submit_sm` requests with `ESME_RTHROTTLED`.
-- HTTP inbound rule tokens and admin credentials use constant-time string comparison.
-- Inbound HTTP rules now require `auth_header` and `auth_token`; unauthenticated callback rules are rejected by config validation and at runtime.
-- Inbound DLR rules must declare `provider`, and dispatcher DLR handling rejects callbacks whose provider does not match the pending correlation record.
-- HTTP provider response parsing now uses `outbound[].response.id_path` and `id_regex`, while still accepting the old `__response_*` fields for compatibility.
-- Messages are queued first and sent by dispatcher workers from an outbox.
-- DLR correlation is stored in the shared Store pending map and updates message state on callback.
-- Memory Store now implements messages, pending, outbox, idempotency, and queue depth APIs, with opportunistic cleanup for expired pending/idempotency records and a message retention cap.
-- HTTP `/v1/messages` validates payloads, supports `client_msg_id` idempotency, optional `clients` token auth, IP allow lists, simple block lists, and simple rate limits.
-- HTTP request body sizes are capped for message submission, config updates, and dynamic inbound callbacks.
-- SMPP `submit_sm` decoding handles GSM-7 septet padding and accepts common unpacked ASCII payloads when `data_coding=0`.
-- Providers can be wrapped with per-provider `rate_limit` settings.
-- `/healthz` returns queue and pending checks.
-- PostgreSQL schema migrations are provided under `migrations/`.
+HTTP:
 
-## Management Console
-
-The newer management UI lives under `/admin/` and intentionally keeps the frontend small: standard HTML forms, one embedded CSS file, and no JavaScript framework. It currently includes:
-
-- Login/logout backed by `admin.username` and `admin.password`.
-- Dashboard counts for routes, providers, ESMEs, inbound/outbound rules, and clients.
-- Routes CRUD with Post-Redirect-Get.
-- JSON form pages for providers, ESMEs, inbound rules, outbound rules, risk, SMPP, and the full raw config.
-- CSRF validation on every POST and atomic writeback to the `-config` file when one is provided.
-
-The old `/ui/config` page is still available as an emergency runtime-only editor.
-
-## Queue Flow
-
-`/v1/messages` and SMPP `submit_sm` both call `Dispatcher.Submit`.
-
-1. Dispatcher matches the route.
-2. Dispatcher writes a `queued` message to Store.
-3. Dispatcher enqueues an outbox item.
-4. Worker goroutines claim pending outbox rows/items.
-5. Worker sends to the selected provider.
-6. Worker updates the message to `sent`, stores pending DLR correlation, and acks the outbox item.
-7. Provider DLR callback updates the message state, deletes pending correlation, and pushes `deliver_sm` for SMPP sources when required.
-
-The current production-ready persistent schema is in SQL. The runtime implementation in this pass keeps Memory Store as the active driver, so the next deployment step is implementing the PostgreSQL Store against this Store interface.
-
-## Config Additions
-
-HTTP clients:
-
-```json
-"clients": [
-  {
-    "client_id": "demo-client",
-    "token": "CHANGE_ME_BEFORE_DEPLOY",
-    "enabled": true,
-    "allowed_ips": ["127.0.0.1/32", "::1/128"]
-  }
-]
+```text
+HTTP /v1/messages
+  -> Dispatcher.Submit
+  -> Store.messages queued
+  -> Store.outbox pending
+  -> dispatcher worker claim
+  -> provider.Send
+  -> message sent + pending DLR
+  -> provider DLR inbound callback
+  -> message final state
 ```
 
-Risk controls:
+SMPP:
+
+```text
+ESME submit_sm
+  -> Session
+  -> Dispatcher.Submit
+  -> outbox worker
+  -> provider.Send
+  -> pending DLR
+  -> provider/mock DLR
+  -> deliver_sm DLR pushed to original ESME session
+```
+
+## 已实现项
+
+- SMPP bind 鉴权读取运行时配置，后台修改后无需重启即可影响新连接。
+- 管理后台不允许本地绕过，必须使用 `admin.username` / `admin.password`。
+- `/admin/` 服务端渲染后台已可用，不依赖 Vue/React。
+- 后台 session、CSRF、登录失败限流、配置原子写回已实现。
+- `CHANGE_ME_BEFORE_DEPLOY` 占位符会被配置校验拒绝。
+- SMPP read loop 不再使用一秒轮询 deadline。
+- SMPP `window_size` 会限制并发 `submit_sm`，超限返回 `ESME_RTHROTTLED`。
+- SMPP 未 bind 连接 30 秒超时。
+- 入站 HTTP token、admin 凭据、client token 都使用常量时间比较。
+- 入站规则必须配置 `auth_header` 和 `auth_token`。
+- DLR 入站规则必须配置 `provider`，并校验 pending 记录里的 provider。
+- HTTP provider 支持 `response.id_path` 和 `response.id_regex` 提取 provider_id。
+- `id_path` 支持数组路径，例如 `data.0.messageId`。
+- provider_id 未命中时 fallback 到 gateway_id，不再把整个响应体猜成 ID。
+- `/v1/messages` 支持 payload 校验、幂等、client token、IP 白名单、基础风控。
+- `/v1/messages` GET/POST 都需要 client 鉴权，避免消息列表裸露。
+- `trusted_proxies` 支持安全读取 `X-Forwarded-For`。
+- Dispatcher 使用 outbox worker + 单 worker 有界并发。
+- Dispatcher 参数可配置: worker 数、单 worker 并发、claim limit、poll interval、pending TTL、max attempts。
+- Postgres Store 已实现 messages、pending、outbox、idempotency。
+- Postgres outbox 使用 `FOR UPDATE SKIP LOCKED` 并发队列模式。
+- `/healthz` 返回 storage、pending、outbox 检查。
+- Dockerfile 已复制 `go.mod go.sum`，保留依赖校验。
+
+## 配置新增项
+
+Dispatcher:
 
 ```json
-"risk": {
-  "blocked_to_prefix": [],
-  "blocked_keywords": [],
-  "per_number_per_minute": 5,
-  "per_number_per_day": 20,
-  "per_client_per_second": 100
+{
+  "dispatcher": {
+    "workers": 10,
+    "per_worker_concurrency": 10,
+    "claim_limit": 20,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 5
+  }
+}
+```
+
+HTTP provider timeout:
+
+```json
+{
+  "providers": [
+    {
+      "name": "provider-a",
+      "protocol": "http",
+      "endpoint": "https://sms.example.com/send",
+      "rule": "provider-a-json",
+      "enabled": true,
+      "http_timeout_ms": 3000
+    }
+  ]
+}
+```
+
+Client 鉴权:
+
+```json
+{
+  "clients": [
+    {
+      "client_id": "demo-client",
+      "token": "replace-with-token",
+      "enabled": true,
+      "allowed_ips": ["127.0.0.1/32", "::1/128"]
+    }
+  ]
+}
+```
+
+可信代理:
+
+```json
+{
+  "trusted_proxies": ["127.0.0.1/32", "::1/128", "10.0.0.0/8"]
 }
 ```
 
 Provider rate limit:
 
 ```json
-"rate_limit": {
-  "tps": 200,
-  "burst": 400,
-  "timeout_ms": 2000
+{
+  "rate_limit": {
+    "tps": 200,
+    "burst": 400,
+    "timeout_ms": 2000
+  }
 }
 ```
 
 HTTP response parsing:
 
 ```json
-"response": {
-  "id_path": "data.message_id",
-  "id_regex": "MsgID:\\s+([A-Za-z0-9_-]+)"
+{
+  "response": {
+    "id_path": "data.0.messageId",
+    "id_regex": "MsgID:\\s+([A-Za-z0-9_-]+)"
+  }
 }
 ```
 
-Inbound DLR callback rules:
+DLR inbound:
 
 ```json
 {
@@ -105,7 +146,7 @@ Inbound DLR callback rules:
   "path": "/callback/provider-a/dlr",
   "provider": "provider-a",
   "auth_header": "X-Token",
-  "auth_token": "CHANGE_ME_BEFORE_DEPLOY",
+  "auth_token": "replace-with-token",
   "fields": {
     "provider_id": "message_id",
     "status": "status",
@@ -114,20 +155,61 @@ Inbound DLR callback rules:
 }
 ```
 
-## Required Before Production
+## 300 TPS 单节点建议
 
-- For production, copy `configs/production.example.json` and replace every `CHANGE_ME_BEFORE_DEPLOY` value before starting the service. The default `configs/example.json` is a runnable local development config on cold ports.
-- Keep each provider DLR callback on a distinct authenticated inbound rule, and set `provider` to the exact configured provider name.
-- Move `storage.driver` to `postgres` after implementing the PostgreSQL Store and applying `migrations/001_init.up.sql`.
-- Put the service behind TLS termination if exposed outside a trusted network.
-- Add alerts on `/healthz` when `outbox_depth` grows beyond the operational threshold.
+基础配置:
 
-## Verification
+```json
+{
+  "dispatcher": {
+    "workers": 10,
+    "per_worker_concurrency": 10,
+    "claim_limit": 20,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 5
+  },
+  "storage": {
+    "driver": "postgres",
+    "dsn": "postgres://mysmpp:password@127.0.0.1:5432/mysmpp?sslmode=disable&pool_max_conns=50&pool_min_conns=10"
+  }
+}
+```
 
-Run:
+并发估算:
 
-```powershell
+```text
+目标 TPS * 上游平均 RTT 秒数 * 安全系数
+```
+
+如果 RTT 为 200ms:
+
+```text
+300 * 0.2 * 1.5 = 90
+```
+
+所以 `10 * 10 = 100` 并发可以作为起点。
+
+## 已知边界
+
+- 长短信拆分当前是消息元数据，HTTP 上游发送仍是完整文本。
+- 风控是单进程内存计数，多副本部署会放大限制。
+- gateway_id 是进程内递增，生产多实例需要存储层统一分配。
+- pending 清理是惰性清理，尚无独立维护任务。
+- Metrics 和审计日志还未落地。
+- MO 推送到下游 SMPP/HTTP 还未完整实现。
+
+## 验证命令
+
+```bash
 go test ./...
 ```
 
-Current focused coverage includes config validation, dispatcher queueing, worker dispatch, pending DLR completion and provider mismatch rejection, HTTP request rendering, SMPP session behavior, SMPP throttling primitives, GSM-7/default-coding decoding edge cases, Memory Store cleanup, and HTTP gateway submission behavior.
+重点覆盖:
+
+- 配置默认值和校验。
+- Dispatcher submit、outbox、DLR。
+- HTTP submit、GET 鉴权、IP 白名单、入站 DLR。
+- HTTP provider request rendering、timeout、provider_id 提取。
+- SMPP bind、submit、enquire、DLR、TLV。
+- Memory/Postgres Store 行为。
