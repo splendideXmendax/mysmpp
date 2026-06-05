@@ -3,10 +3,12 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const PlaceholderSecret = "CHANGE_ME_BEFORE_DEPLOY"
@@ -18,17 +20,19 @@ const (
 )
 
 type Config struct {
-	Server    ServerConfig     `json:"server"`
-	SMPP      SMPPConfig       `json:"smpp"`
-	ESMEs     []ESMECred       `json:"esmes"`
-	Routes    []RouteConfig    `json:"routes"`
-	Providers []ProviderConfig `json:"providers"`
-	Inbound   []HTTPRuleConfig `json:"inbound"`
-	Outbound  []HTTPRuleConfig `json:"outbound"`
-	Clients   []ClientAuth     `json:"clients"`
-	Risk      RiskConfig       `json:"risk"`
-	Storage   StorageConfig    `json:"storage"`
-	Admin     AdminConfig      `json:"admin"`
+	Server         ServerConfig     `json:"server"`
+	SMPP           SMPPConfig       `json:"smpp"`
+	Dispatcher     DispatcherConfig `json:"dispatcher"`
+	ESMEs          []ESMECred       `json:"esmes"`
+	Routes         []RouteConfig    `json:"routes"`
+	Providers      []ProviderConfig `json:"providers"`
+	Inbound        []HTTPRuleConfig `json:"inbound"`
+	Outbound       []HTTPRuleConfig `json:"outbound"`
+	Clients        []ClientAuth     `json:"clients"`
+	TrustedProxies []string         `json:"trusted_proxies"`
+	Risk           RiskConfig       `json:"risk"`
+	Storage        StorageConfig    `json:"storage"`
+	Admin          AdminConfig      `json:"admin"`
 }
 
 type ServerConfig struct {
@@ -45,6 +49,15 @@ type SMPPConfig struct {
 	MaxSessionsPerSystemID int    `json:"max_sessions_per_system_id"`
 	WindowSize             int    `json:"window_size"`
 	EnquirePeriod          string `json:"enquire_period"`
+}
+
+type DispatcherConfig struct {
+	Workers              int    `json:"workers"`
+	PerWorkerConcurrency int    `json:"per_worker_concurrency"`
+	ClaimLimit           int    `json:"claim_limit"`
+	PollIntervalMS       int    `json:"poll_interval_ms"`
+	PendingTTL           string `json:"pending_ttl"`
+	MaxAttempts          int    `json:"max_attempts"`
 }
 
 type ESMECred struct {
@@ -133,6 +146,14 @@ func Default() Config {
 			WindowSize:             16,
 			EnquirePeriod:          "30s",
 		},
+		Dispatcher: DispatcherConfig{
+			Workers:              10,
+			PerWorkerConcurrency: 10,
+			ClaimLimit:           20,
+			PollIntervalMS:       20,
+			PendingTTL:           "30m",
+			MaxAttempts:          5,
+		},
 		Storage: StorageConfig{Driver: "memory"},
 	}
 }
@@ -155,6 +176,24 @@ func (c *Config) Normalize() {
 	}
 	if c.SMPP.WindowSize == 0 {
 		c.SMPP.WindowSize = 16
+	}
+	if c.Dispatcher.Workers == 0 {
+		c.Dispatcher.Workers = 10
+	}
+	if c.Dispatcher.PerWorkerConcurrency == 0 {
+		c.Dispatcher.PerWorkerConcurrency = 10
+	}
+	if c.Dispatcher.ClaimLimit == 0 {
+		c.Dispatcher.ClaimLimit = 20
+	}
+	if c.Dispatcher.PollIntervalMS == 0 {
+		c.Dispatcher.PollIntervalMS = 20
+	}
+	if c.Dispatcher.PendingTTL == "" {
+		c.Dispatcher.PendingTTL = "30m"
+	}
+	if c.Dispatcher.MaxAttempts == 0 {
+		c.Dispatcher.MaxAttempts = 5
 	}
 	if c.Risk.PerNumberPerMinute == 0 {
 		c.Risk.PerNumberPerMinute = 5
@@ -201,6 +240,21 @@ func (c Config) Validate() error {
 	}
 	if isPlaceholder(c.SMPP.Password) {
 		return fmt.Errorf("smpp password must be changed before deploy")
+	}
+	if c.Dispatcher.Workers < 0 || c.Dispatcher.PerWorkerConcurrency < 0 || c.Dispatcher.ClaimLimit < 0 ||
+		c.Dispatcher.PollIntervalMS < 0 || c.Dispatcher.MaxAttempts < 0 {
+		return fmt.Errorf("dispatcher values must be non-negative")
+	}
+	if _, err := time.ParseDuration(c.Dispatcher.PendingTTL); c.Dispatcher.PendingTTL != "" && err != nil {
+		return fmt.Errorf("dispatcher.pending_ttl is invalid: %w", err)
+	}
+	for _, proxy := range c.TrustedProxies {
+		if _, err := netip.ParsePrefix(proxy); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(proxy); err != nil {
+			return fmt.Errorf("trusted_proxies contains invalid ip or cidr %q", proxy)
+		}
 	}
 	names := map[string]string{}
 	enabledProviders := map[string]bool{}

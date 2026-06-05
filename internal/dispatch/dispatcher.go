@@ -31,6 +31,9 @@ type Dispatcher struct {
 	pendingTTL    time.Duration
 	workers       int
 	claimLimit    int
+	perWorkerConc int
+	pollInterval  time.Duration
+	maxAttempts   int
 	workerCtx     context.Context
 	cancelWorkers context.CancelFunc
 	wg            sync.WaitGroup
@@ -39,7 +42,7 @@ type Dispatcher struct {
 	smppSrv SMPPServer
 }
 
-func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, ttl time.Duration, stores ...store.Store) *Dispatcher {
+func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config.DispatcherConfig, stores ...store.Store) *Dispatcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,7 +56,9 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, ttl time.D
 	if st == nil {
 		st = store.NewMemory()
 	}
-	if ttl <= 0 {
+	cfg = normalizeDispatcherConfig(cfg)
+	ttl, err := time.ParseDuration(cfg.PendingTTL)
+	if err != nil || ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -63,14 +68,39 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, ttl time.D
 		smppSrv:       srv,
 		store:         st,
 		pendingTTL:    ttl,
-		workers:       4,
-		claimLimit:    10,
+		workers:       cfg.Workers,
+		claimLimit:    cfg.ClaimLimit,
+		perWorkerConc: cfg.PerWorkerConcurrency,
+		pollInterval:  time.Duration(cfg.PollIntervalMS) * time.Millisecond,
+		maxAttempts:   cfg.MaxAttempts,
 		workerCtx:     ctx,
 		cancelWorkers: cancel,
 	}
 	reg.SetDLRHandler(d.OnDLR)
-	d.StartWorkers(4)
+	d.StartWorkers(d.workers)
 	return d
+}
+
+func normalizeDispatcherConfig(cfg config.DispatcherConfig) config.DispatcherConfig {
+	if cfg.Workers <= 0 {
+		cfg.Workers = 10
+	}
+	if cfg.PerWorkerConcurrency <= 0 {
+		cfg.PerWorkerConcurrency = 10
+	}
+	if cfg.ClaimLimit <= 0 {
+		cfg.ClaimLimit = 20
+	}
+	if cfg.PollIntervalMS <= 0 {
+		cfg.PollIntervalMS = 20
+	}
+	if cfg.PendingTTL == "" {
+		cfg.PendingTTL = "30m"
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 5
+	}
+	return cfg
 }
 
 func (d *Dispatcher) SetSMPPServer(srv SMPPServer) {
@@ -154,7 +184,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		GatewayID:   gatewayID,
 		Provider:    route.Provider,
 		Payload:     payload,
-		MaxAttempts: 5,
+		MaxAttempts: d.maxAttempts,
 	}); err != nil {
 		return Receipt{}, err
 	}
@@ -239,20 +269,40 @@ func (d *Dispatcher) StartWorkers(n int) {
 }
 
 func (d *Dispatcher) workerLoop(ctx context.Context, workerID string) {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(d.pollInterval)
 	defer ticker.Stop()
+	sem := make(chan struct{}, d.perWorkerConc)
+	var inFlight sync.WaitGroup
 	for {
 		select {
 		case <-ctx.Done():
+			inFlight.Wait()
 			return
 		case <-ticker.C:
-			items, err := d.store.ClaimOutbox(ctx, workerID, d.claimLimit)
+			limit := d.claimLimit
+			if available := cap(sem) - len(sem); available <= 0 {
+				continue
+			} else if available < limit {
+				limit = available
+			}
+			items, err := d.store.ClaimOutbox(ctx, workerID, limit)
 			if err != nil {
 				d.logger.Warn("claim outbox failed", "worker", workerID, "err", err)
 				continue
 			}
 			for _, item := range items {
-				d.processOutbox(ctx, item)
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					inFlight.Wait()
+					return
+				}
+				inFlight.Add(1)
+				go func(item store.OutboxItem) {
+					defer inFlight.Done()
+					defer func() { <-sem }()
+					d.processOutbox(ctx, item)
+				}(item)
 			}
 		}
 	}

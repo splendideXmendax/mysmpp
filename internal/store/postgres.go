@@ -261,11 +261,13 @@ func (s *PostgresStore) ClaimOutbox(ctx context.Context, workerID string, limit 
 	rows, err := s.pool.Query(ctx, `
 UPDATE outbox SET state = 'claimed', claimed_by = $1, claimed_at = NOW(), attempt = attempt + 1
 WHERE id IN (
-	SELECT id FROM outbox
-	WHERE state = 'pending' AND next_retry_at <= NOW()
-	ORDER BY next_retry_at, id
-	LIMIT $2
-	FOR UPDATE SKIP LOCKED
+	SELECT id FROM (
+		SELECT id FROM outbox
+		WHERE state = 'pending' AND next_retry_at <= NOW()
+		ORDER BY next_retry_at, id
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED
+	) claimable
 )
 RETURNING id, gateway_id, provider, payload, state, COALESCE(claimed_by, ''), claimed_at,
 	next_retry_at, attempt, max_attempts, COALESCE(last_error, ''), created_at`, workerID, limit)

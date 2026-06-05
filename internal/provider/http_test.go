@@ -27,6 +27,7 @@ func TestHTTPProviderSendsRenderedRequest(t *testing.T) {
 	}, config.HTTPRuleConfig{
 		Method:      "POST",
 		ContentType: "application/json",
+		Response:    config.ResponseParseConfig{IDPath: "messageId"},
 		Fields: map[string]string{
 			"messageId": "id",
 			"mobile":    "to",

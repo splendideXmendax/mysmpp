@@ -65,6 +65,19 @@ func TestNormalizeOutboundDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeDispatcherDefaults(t *testing.T) {
+	cfg := Config{}
+	cfg.Normalize()
+	if cfg.Dispatcher.Workers != 10 ||
+		cfg.Dispatcher.PerWorkerConcurrency != 10 ||
+		cfg.Dispatcher.ClaimLimit != 20 ||
+		cfg.Dispatcher.PollIntervalMS != 20 ||
+		cfg.Dispatcher.PendingTTL != "30m" ||
+		cfg.Dispatcher.MaxAttempts != 5 {
+		t.Fatalf("unexpected dispatcher defaults: %+v", cfg.Dispatcher)
+	}
+}
+
 func TestLoadExampleConfig(t *testing.T) {
 	cfg, err := Load("../../configs/example.json")
 	if err != nil {

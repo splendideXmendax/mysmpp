@@ -12,6 +12,14 @@
     "window_size": 16,
     "enquire_period": "30s"
   },
+  "dispatcher": {
+    "workers": 10,
+    "per_worker_concurrency": 10,
+    "claim_limit": 20,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 5
+  },
   "esmes": [
     {
       "system_id": "esme1",
@@ -116,16 +124,17 @@
       "allowed_ips": ["127.0.0.1/32", "::1/128"]
     }
   ],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
   "risk": {
     "blocked_to_prefix": [],
     "blocked_keywords": [],
     "per_number_per_minute": 5,
     "per_number_per_day": 20,
-    "per_client_per_second": 100
+    "per_client_per_second": 500
   },
   "storage": {
-    "driver": "memory",
-    "dsn": ""
+    "driver": "postgres",
+    "dsn": "postgres://mysmpp:CHANGE_ME_BEFORE_DEPLOY@127.0.0.1:5432/mysmpp?sslmode=disable&pool_max_conns=50&pool_min_conns=10"
   },
   "admin": {
     "username": "admin",

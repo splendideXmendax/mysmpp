@@ -13,6 +13,14 @@
     "window_size": 16,
     "enquire_period": "30s"
   },
+  "dispatcher": {
+    "workers": 10,
+    "per_worker_concurrency": 10,
+    "claim_limit": 20,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 5
+  },
   "esmes": [
     {
       "system_id": "dev-esme",
@@ -37,6 +45,7 @@
   "inbound": [],
   "outbound": [],
   "clients": [],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
   "risk": {
     "blocked_to_prefix": [],
     "blocked_keywords": [],

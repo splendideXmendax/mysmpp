@@ -20,6 +20,8 @@ const (
 	BindTRX
 )
 
+const bindTimeout = 30 * time.Second
+
 func (m BindMode) CanSubmit() bool  { return m == BindTX || m == BindTRX }
 func (m BindMode) CanReceive() bool { return m == BindRX || m == BindTRX }
 
@@ -125,6 +127,7 @@ func (s *Session) Serve(ctx context.Context) {
 	if s.cfg.EnquirePeriod > 0 {
 		go s.enquireLoop(ctx)
 	}
+	_ = s.conn.SetReadDeadline(time.Now().Add(bindTimeout))
 	s.readLoop(ctx)
 }
 
@@ -259,6 +262,7 @@ func (s *Session) handleBind(pdu PDU) {
 	if status == statusOK {
 		s.bindMode.Store(int32(mode))
 		s.systemID.Store(systemID)
+		_ = s.conn.SetReadDeadline(time.Time{})
 		s.logger.Info("bind ok", "system_id", systemID, "mode", mode)
 	} else {
 		s.logger.Warn("bind rejected", "system_id", systemID, "status", status)

@@ -89,7 +89,7 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
 	st := store.NewMemory()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), st)
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
@@ -113,6 +113,32 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].Direction != message.DirectionMT || messages[0].Provider != "mock-a" {
 		t.Fatalf("dispatcher submit should store MT message: %+v", messages)
+	}
+}
+
+func TestMessagesGETRequiresConfiguredClient(t *testing.T) {
+	cfg := config.Default()
+	cfg.Clients = []config.ClientAuth{{
+		ClientID: "client-a",
+		Token:    "token-a",
+		Enabled:  true,
+	}}
+	gateway := New(cfg, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without client credentials, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	req.Header.Set("X-Client-ID", "client-a")
+	req.Header.Set("X-Token", "token-a")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with client credentials, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -187,7 +213,7 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
 	st := store.NewMemory()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), st)
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 	gateway := NewWithDispatcher(cfg, st, dispatcher)
@@ -315,7 +341,7 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	reg.Replace(map[string]provider.Provider{"mock-a": mock})
 	defer reg.CloseAll()
 	st := store.NewMemory()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute, st)
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), st)
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
@@ -395,7 +421,7 @@ func TestDynamicInboundRuleRejectsDLRProviderMismatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := dispatch.New(nil, nil, nil, time.Minute, st)
+	dispatcher := dispatch.New(nil, nil, nil, testDispatcherConfig(), st)
 	defer dispatcher.Close()
 	gateway := NewWithDispatcher(cfg, st, dispatcher)
 
@@ -504,7 +530,7 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	reg := provider.NewRegistry()
 	reg.Replace(provider.BuildProviders(context.Background(), cfg))
 	defer reg.CloseAll()
-	dispatcher := dispatch.New(nil, reg, nil, time.Minute, store.NewMemory())
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), store.NewMemory())
 	defer dispatcher.Close()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 
@@ -615,6 +641,30 @@ func waitForPending(t *testing.T, d *dispatch.Dispatcher, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("pending size did not reach %d, got %d", want, d.PendingSize())
+}
+
+func TestRequestIPAllowedUsesTrustedProxyXForwardedFor(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	req.RemoteAddr = "10.0.0.10:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.10")
+
+	if !requestIPAllowed(req, []string{"203.0.113.5/32"}, []string{"10.0.0.0/8"}) {
+		t.Fatal("expected forwarded client ip to match allowed list")
+	}
+	if requestIPAllowed(req, []string{"203.0.113.5/32"}, nil) {
+		t.Fatal("untrusted proxy must not be allowed to spoof forwarded client ip")
+	}
+}
+
+func testDispatcherConfig() config.DispatcherConfig {
+	return config.DispatcherConfig{
+		Workers:              1,
+		PerWorkerConcurrency: 1,
+		ClaimLimit:           10,
+		PollIntervalMS:       10,
+		PendingTTL:           "1m",
+		MaxAttempts:          5,
+	}
 }
 
 func TestBuildOutboundRequestJSON(t *testing.T) {

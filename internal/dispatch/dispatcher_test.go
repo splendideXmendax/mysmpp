@@ -33,7 +33,7 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	defer reg.CloseAll()
 
 	st := store.NewMemory()
-	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, time.Minute, st)
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
 	defer d.Close()
 	d.ReloadRoutes([]config.RouteConfig{{
 		Name:     "mobile",
@@ -66,7 +66,7 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 
 func TestDispatcherIgnoresDisabledProviderRoutes(t *testing.T) {
 	reg := provider.NewRegistry()
-	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, time.Minute)
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig())
 	defer d.Close()
 	d.ReloadRoutes([]config.RouteConfig{{
 		Name:     "disabled",
@@ -81,6 +81,17 @@ func TestDispatcherIgnoresDisabledProviderRoutes(t *testing.T) {
 	_, err := d.Submit(context.Background(), Envelope{From: "1069", To: "13800138000", Text: "hello"})
 	if err == nil {
 		t.Fatal("expected no route error")
+	}
+}
+
+func testDispatcherConfig() config.DispatcherConfig {
+	return config.DispatcherConfig{
+		Workers:              1,
+		PerWorkerConcurrency: 1,
+		ClaimLimit:           10,
+		PollIntervalMS:       10,
+		PendingTTL:           "1m",
+		MaxAttempts:          5,
 	}
 }
 

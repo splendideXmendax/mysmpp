@@ -50,7 +50,7 @@ func main() {
 	}
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
-	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute, st)
+	dispatcher := dispatch.New(logger, registry, nil, cfg.Dispatcher, st)
 	defer dispatcher.Close()
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)

@@ -36,7 +36,7 @@ func NewHTTPProvider(p config.ProviderConfig, rule config.HTTPRuleConfig) *HTTPP
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		providerIDField: firstNonEmpty(rule.Response.IDPath, firstNonEmpty(rule.Fields["__response_id_path"], firstNonEmpty(rule.Fields["__response_id"], "messageId"))),
+		providerIDField: firstNonEmpty(rule.Response.IDPath, firstNonEmpty(rule.Fields["__response_id_path"], rule.Fields["__response_id"])),
 		providerIDRegex: firstNonEmpty(rule.Response.IDRegex, rule.Fields["__response_id_regex"]),
 	}
 }
@@ -105,13 +105,10 @@ func extractProviderID(body []byte, contentType, field, pattern string) string {
 	if value == "" {
 		return ""
 	}
-	if strings.Contains(contentType, "application/json") || strings.HasPrefix(value, "{") {
+	if (strings.Contains(contentType, "application/json") || strings.HasPrefix(value, "{")) && field != "" {
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err == nil {
 			if raw, ok := valueAtPath(payload, field); ok {
-				return strings.TrimSpace(fmt.Sprint(raw))
-			}
-			if raw, ok := payload["id"]; ok {
 				return strings.TrimSpace(fmt.Sprint(raw))
 			}
 		}
@@ -130,10 +127,7 @@ func extractProviderID(body []byte, contentType, field, pattern string) string {
 		}
 		return ""
 	}
-	if field != "" && field != "messageId" {
-		return ""
-	}
-	return value
+	return ""
 }
 
 func valueAtPath(payload map[string]any, path string) (any, bool) {

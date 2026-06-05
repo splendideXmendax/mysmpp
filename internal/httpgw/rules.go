@@ -40,6 +40,8 @@ type Gateway struct {
 	riskSweep  time.Time
 }
 
+type clientIDContextKey struct{}
+
 type rateWindow struct {
 	start     time.Time
 	expiresAt time.Time
@@ -80,7 +82,7 @@ func (g *Gateway) Mount(pattern string, handler http.Handler) {
 
 func (g *Gateway) routes() {
 	g.mux.HandleFunc("/healthz", g.health)
-	g.mux.HandleFunc("/v1/messages", g.messages)
+	g.mux.HandleFunc("/v1/messages", g.requireAPIAuth(g.messages))
 	g.mux.HandleFunc("/v1/config", g.requireAdmin(g.configAPI))
 	g.mux.HandleFunc("/ui/config", g.requireAdmin(g.configPage))
 	g.mux.HandleFunc("/", g.dynamicInbound)
@@ -136,6 +138,17 @@ func (g *Gateway) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (g *Gateway) requireAPIAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clientID, ok := g.authorizeClient(w, r)
+		if !ok {
+			return
+		}
+		ctx := context.WithValue(r.Context(), clientIDContextKey{}, clientID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -163,10 +176,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		clientID, ok := g.authorizeClient(w, r)
-		if !ok {
-			return
-		}
+		clientID := clientIDFromRequest(r)
 		if err := validateSubmitRequest(req.From, req.To, req.Text, req.ClientMsgID, req.CallbackURL, req.Meta); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -235,7 +245,7 @@ func (g *Gateway) authorizeClient(w http.ResponseWriter, r *http.Request) (strin
 		if !authutil.ConstantTimeEqual(client.Token, token) {
 			break
 		}
-		if len(client.AllowedIPs) > 0 && !requestIPAllowed(r, client.AllowedIPs) {
+		if len(client.AllowedIPs) > 0 && !requestIPAllowed(r, client.AllowedIPs, cfg.TrustedProxies) {
 			http.Error(w, "client ip is not allowed", http.StatusForbidden)
 			return "", false
 		}
@@ -245,11 +255,15 @@ func (g *Gateway) authorizeClient(w http.ResponseWriter, r *http.Request) (strin
 	return "", false
 }
 
-func requestIPAllowed(r *http.Request, allowed []string) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+func clientIDFromRequest(r *http.Request) string {
+	if clientID, ok := r.Context().Value(clientIDContextKey{}).(string); ok {
+		return clientID
 	}
+	return r.Header.Get("X-Client-ID")
+}
+
+func requestIPAllowed(r *http.Request, allowed, trustedProxies []string) bool {
+	host := clientIP(r, trustedProxies)
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
 		return false
@@ -266,6 +280,71 @@ func requestIPAllowed(r *http.Request, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+func clientIP(r *http.Request, trustedProxies []string) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	direct, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	prefixes := parseTrustedProxyPrefixes(trustedProxies)
+	if len(prefixes) == 0 || !addrInPrefixes(direct, prefixes) {
+		return host
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
+		return host
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		addr, err := netip.ParseAddr(candidate)
+		if err != nil {
+			continue
+		}
+		if !addrInPrefixes(addr, prefixes) {
+			return candidate
+		}
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func parseTrustedProxyPrefixes(values []string) []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			prefixes = append(prefixes, prefix)
+			continue
+		}
+		if addr, err := netip.ParseAddr(value); err == nil {
+			prefixes = append(prefixes, addrPrefix(addr))
+		}
+	}
+	return prefixes
+}
+
+func addrInPrefixes(addr netip.Addr, prefixes []netip.Prefix) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func addrPrefix(addr netip.Addr) netip.Prefix {
+	bits := 128
+	if addr.Is4() {
+		bits = 32
+	}
+	return netip.PrefixFrom(addr, bits)
 }
 
 func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta map[string]string) error {
