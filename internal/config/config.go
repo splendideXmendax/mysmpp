@@ -88,14 +88,15 @@ type RouteConfig struct {
 }
 
 type ProviderConfig struct {
-	Name      string            `json:"name"`
-	Protocol  string            `json:"protocol"`
-	Endpoint  string            `json:"endpoint"`
-	Rule      string            `json:"rule"`
-	SystemID  string            `json:"system_id"`
-	Password  string            `json:"password"`
-	Enabled   bool              `json:"enabled"`
-	RateLimit ProviderRateLimit `json:"rate_limit"`
+	Name          string            `json:"name"`
+	Protocol      string            `json:"protocol"`
+	Endpoint      string            `json:"endpoint"`
+	Rule          string            `json:"rule"`
+	SystemID      string            `json:"system_id"`
+	Password      string            `json:"password"`
+	Enabled       bool              `json:"enabled"`
+	HTTPTimeoutMS int               `json:"http_timeout_ms"`
+	RateLimit     ProviderRateLimit `json:"rate_limit"`
 }
 
 type ProviderRateLimit struct {
@@ -268,6 +269,9 @@ func (c Config) Validate() error {
 		names["provider:"+provider.Name] = provider.Name
 		if provider.Enabled {
 			enabledProviders[provider.Name] = true
+		}
+		if provider.HTTPTimeoutMS < 0 {
+			return fmt.Errorf("provider %q http_timeout_ms must be non-negative", provider.Name)
 		}
 		if provider.RateLimit.TPS < 0 || provider.RateLimit.Burst < 0 || provider.RateLimit.TimeoutMS < 0 {
 			return fmt.Errorf("provider %q rate_limit values must be non-negative", provider.Name)

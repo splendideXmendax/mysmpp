@@ -39,6 +39,7 @@
     {
       "name": "dev-mock",
       "protocol": "mock",
+      "http_timeout_ms": 3000,
       "enabled": true
     }
   ],

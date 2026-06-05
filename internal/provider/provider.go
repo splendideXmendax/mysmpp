@@ -27,6 +27,8 @@ type DLR struct {
 
 type DLRCallback func(DLR)
 
+// Provider sends MT messages to an upstream. Providers that do not receive DLRs
+// directly, such as HTTP adapters using inbound callback rules, may ignore OnDLR.
 type Provider interface {
 	Send(OutboundMessage) (providerID string, err error)
 	OnDLR(DLRCallback)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
 )
@@ -49,6 +50,55 @@ func TestHTTPProviderSendsRenderedRequest(t *testing.T) {
 	}
 	if gotBody == "" || gotBody == "{}" {
 		t.Fatalf("body not rendered: %q", gotBody)
+	}
+}
+
+func TestHTTPProviderExtractsProviderIDFromArrayPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"messageId":"up-1"}]}`))
+	}))
+	defer server.Close()
+
+	p := NewHTTPProvider(config.ProviderConfig{
+		Name:     "http-a",
+		Endpoint: server.URL,
+	}, config.HTTPRuleConfig{
+		Method:   "POST",
+		Response: config.ResponseParseConfig{IDPath: "data.0.messageId"},
+		Fields:   map[string]string{"mobile": "to", "msg": "text"},
+	})
+	defer p.Close()
+
+	id, err := p.Send(OutboundMessage{GatewayID: "g1", DestAddr: "13800138000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "up-1" {
+		t.Fatalf("unexpected provider id %q", id)
+	}
+}
+
+func TestHTTPProviderUsesConfiguredTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"messageId":"up-1"}`))
+	}))
+	defer server.Close()
+
+	p := NewHTTPProvider(config.ProviderConfig{
+		Name:          "http-a",
+		Endpoint:      server.URL,
+		HTTPTimeoutMS: 10,
+	}, config.HTTPRuleConfig{
+		Method:   "POST",
+		Response: config.ResponseParseConfig{IDPath: "messageId"},
+		Fields:   map[string]string{"mobile": "to", "msg": "text"},
+	})
+	defer p.Close()
+
+	if _, err := p.Send(OutboundMessage{GatewayID: "g1", DestAddr: "13800138000", Text: "hello"}); err == nil {
+		t.Fatal("expected configured timeout")
 	}
 }
 

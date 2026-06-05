@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,14 +26,19 @@ type HTTPProvider struct {
 }
 
 func NewHTTPProvider(p config.ProviderConfig, rule config.HTTPRuleConfig) *HTTPProvider {
+	timeout := time.Duration(p.HTTPTimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
 	return &HTTPProvider{
 		name:     p.Name,
 		endpoint: p.Endpoint,
 		rule:     rule,
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 32,
+				MaxIdleConns:        256,
+				MaxIdleConnsPerHost: 128,
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
@@ -136,12 +142,20 @@ func valueAtPath(payload map[string]any, path string) (any, bool) {
 	}
 	var current any = payload
 	for _, part := range strings.Split(path, ".") {
-		obj, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		current, ok = obj[part]
-		if !ok {
+		switch obj := current.(type) {
+		case map[string]any:
+			next, ok := obj[part]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		case []any:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(obj) {
+				return nil, false
+			}
+			current = obj[idx]
+		default:
 			return nil, false
 		}
 	}

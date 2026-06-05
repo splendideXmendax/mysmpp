@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -41,6 +42,8 @@ type Gateway struct {
 }
 
 type clientIDContextKey struct{}
+
+var fallbackIDSeq atomic.Uint64
 
 type rateWindow struct {
 	start     time.Time
@@ -653,7 +656,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func newID() string {
-	return fmt.Sprintf("g%d", time.Now().UnixNano())
+	return fmt.Sprintf("g%010d", fallbackIDSeq.Add(1))
 }
 
 func intQuery(r *http.Request, name string, fallback int) int {
