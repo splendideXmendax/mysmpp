@@ -118,6 +118,28 @@ func TestLoadDockerConfig(t *testing.T) {
 	}
 }
 
+func TestValidatePostgresStorageRequiresDSN(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Storage.Driver = "postgres"
+	cfg.Storage.DSN = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected postgres storage without dsn to fail")
+	}
+
+	cfg.Storage.DSN = "postgres://mysmpp:secret@localhost/mysmpp"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected postgres storage with dsn to validate: %v", err)
+	}
+}
+
+func TestValidateRejectsUnknownStorageDriver(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Storage.Driver = "sqlite"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unknown storage driver to fail")
+	}
+}
+
 func TestLoadStartupSeedsAndGeneratesSecrets(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

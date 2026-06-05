@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -13,6 +14,8 @@ func NewFromConfig(cfg config.Config) (Store, error) {
 		return NewMemory(), nil
 	case "file", "json":
 		return NewFile(cfg.Storage.DSN)
+	case "postgres", "pg":
+		return NewPostgres(context.Background(), cfg.Storage.DSN)
 	default:
 		return nil, fmt.Errorf("unsupported storage.driver %q", cfg.Storage.Driver)
 	}

@@ -116,6 +116,7 @@ func (s *Session) Serve(ctx context.Context) {
 	go func() {
 		select {
 		case <-ctx.Done():
+			_ = s.conn.SetReadDeadline(time.Now())
 			s.Close()
 		case <-s.closed:
 		}

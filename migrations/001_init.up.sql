@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS pending (
     from_addr       VARCHAR(32),
     to_addr         VARCHAR(32),
     text            TEXT,
+    data_coding     SMALLINT DEFAULT 0,
+    registered_delivery SMALLINT DEFAULT 0,
+    provider        VARCHAR(64),
+    route           VARCHAR(64),
     received_at     TIMESTAMPTZ  NOT NULL,
     expires_at      TIMESTAMPTZ  NOT NULL
 );

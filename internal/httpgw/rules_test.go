@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +141,31 @@ func TestMessageSubmitRequiresConfiguredClient(t *testing.T) {
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 with client credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessageSubmitRejectsInvalidClientMsgID(t *testing.T) {
+	gateway := New(config.Default(), store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"bad id"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for client_msg_id with spaces, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHealthReportsStorageErrors(t *testing.T) {
+	gateway := New(config.Default(), failingStore{err: errors.New("storage down")})
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"unhealthy"`) || !strings.Contains(rec.Body.String(), "storage down") {
+		t.Fatalf("health did not expose storage failure: %s", rec.Body.String())
 	}
 }
 
@@ -614,4 +640,50 @@ func TestBuildOutboundRequestJSON(t *testing.T) {
 	if !strings.Contains(string(body), `"mobile":"13800138000"`) {
 		t.Fatalf("unexpected body %s", body)
 	}
+}
+
+type failingStore struct {
+	err error
+}
+
+func (s failingStore) Ping(context.Context) error { return s.err }
+func (s failingStore) SaveMessage(context.Context, message.Message) error {
+	return s.err
+}
+func (s failingStore) GetMessage(context.Context, string) (message.Message, bool, error) {
+	return message.Message{}, false, s.err
+}
+func (s failingStore) UpdateMessageSent(context.Context, string, string) error { return s.err }
+func (s failingStore) UpdateMessageState(context.Context, string, string, int) error {
+	return s.err
+}
+func (s failingStore) ListMessages(context.Context) ([]message.Message, error) { return nil, s.err }
+func (s failingStore) ListMessagesPage(context.Context, store.ListOptions) ([]message.Message, error) {
+	return nil, s.err
+}
+func (s failingStore) SavePending(context.Context, store.Pending) error { return s.err }
+func (s failingStore) GetPending(context.Context, string) (store.Pending, bool, error) {
+	return store.Pending{}, false, s.err
+}
+func (s failingStore) DeletePending(context.Context, string) error { return s.err }
+func (s failingStore) SweepExpiredPending(context.Context, time.Time) (int, error) {
+	return 0, s.err
+}
+func (s failingStore) PendingSize(context.Context) (int, error) { return 0, s.err }
+func (s failingStore) EnqueueOutbox(context.Context, store.OutboxItem) (int64, error) {
+	return 0, s.err
+}
+func (s failingStore) ClaimOutbox(context.Context, string, int) ([]store.OutboxItem, error) {
+	return nil, s.err
+}
+func (s failingStore) AckOutbox(context.Context, int64) error { return s.err }
+func (s failingStore) FailOutbox(context.Context, int64, string, time.Time) error {
+	return s.err
+}
+func (s failingStore) OutboxDepth(context.Context, string) (int, error) { return 0, s.err }
+func (s failingStore) CheckIdempotency(context.Context, string, string) (string, bool, error) {
+	return "", false, s.err
+}
+func (s failingStore) SaveIdempotency(context.Context, string, string, string, time.Duration) error {
+	return s.err
 }

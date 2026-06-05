@@ -11,6 +11,7 @@ import (
 )
 
 type Store interface {
+	Ping(context.Context) error
 	SaveMessage(context.Context, message.Message) error
 	GetMessage(context.Context, string) (message.Message, bool, error)
 	UpdateMessageSent(context.Context, string, string) error
@@ -117,6 +118,10 @@ func NewMemory() *MemoryStore {
 		idempotency: map[idempotencyKey]idempotencyRecord{},
 		maxMessages: 10000,
 	}
+}
+
+func (s *MemoryStore) Ping(context.Context) error {
+	return nil
 }
 
 func (s *MemoryStore) SaveMessage(_ context.Context, msg message.Message) error {

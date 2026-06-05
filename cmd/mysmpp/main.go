@@ -45,6 +45,9 @@ func main() {
 		logger.Error("init store failed", "err", err)
 		os.Exit(1)
 	}
+	if closer, ok := st.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
 	dispatcher := dispatch.New(logger, registry, nil, 30*time.Minute, st)

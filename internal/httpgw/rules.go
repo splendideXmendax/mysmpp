@@ -87,16 +87,30 @@ func (g *Gateway) routes() {
 }
 
 func (g *Gateway) health(w http.ResponseWriter, _ *http.Request) {
-	pending, _ := g.store.PendingSize(context.Background())
-	outbox, _ := g.store.OutboxDepth(context.Background(), "pending")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	storage := "ok"
+	if err := g.store.Ping(ctx); err != nil {
+		storage = err.Error()
+	}
+	pending, pendingErr := g.store.PendingSize(ctx)
+	outbox, outboxErr := g.store.OutboxDepth(ctx, "pending")
 	status := "ok"
-	if outbox > 10000 {
+	if storage != "ok" || pendingErr != nil || outboxErr != nil {
+		status = "unhealthy"
+	} else if outbox > 10000 {
 		status = "degraded"
+	}
+	if pendingErr != nil {
+		pending = -1
+	}
+	if outboxErr != nil {
+		outbox = -1
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": status,
 		"checks": map[string]any{
-			"storage":       "ok",
+			"storage":       storage,
 			"pending_size":  pending,
 			"outbox_depth":  outbox,
 			"smpp_listener": "ok",
@@ -264,7 +278,7 @@ func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta
 	if utf8.RuneCountInString(text) < 1 || utf8.RuneCountInString(text) > 1000 {
 		return fmt.Errorf("text must be 1-1000 characters")
 	}
-	if clientMsgID != "" && (utf8.RuneCountInString(clientMsgID) > 64 || strings.ContainsAny(clientMsgID, " \t\r\n")) {
+	if clientMsgID != "" && (utf8.RuneCountInString(clientMsgID) < 1 || utf8.RuneCountInString(clientMsgID) > 64 || strings.ContainsAny(clientMsgID, " \t\r\n")) {
 		return fmt.Errorf("client_msg_id must be 1-64 non-space characters")
 	}
 	if callbackURL != "" {

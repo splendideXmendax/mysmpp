@@ -184,6 +184,15 @@ func (c *Config) Normalize() {
 }
 
 func (c Config) Validate() error {
+	switch strings.ToLower(c.Storage.Driver) {
+	case "", "memory", "file", "json":
+	case "postgres", "pg":
+		if c.Storage.DSN == "" {
+			return fmt.Errorf("storage.dsn is required for postgres")
+		}
+	default:
+		return fmt.Errorf("unsupported storage.driver %q", c.Storage.Driver)
+	}
 	if c.Admin.Username == "" || c.Admin.Password == "" {
 		return fmt.Errorf("admin username and password are required")
 	}
