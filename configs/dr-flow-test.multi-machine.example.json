@@ -1,0 +1,108 @@
+{
+  "server": {
+    "http_addr": "0.0.0.0:19087",
+    "shutdown_timeout": "10s"
+  },
+  "smpp": {
+    "addr": "0.0.0.0:29175",
+    "system_id": "mysmpp-dr",
+    "password": "mysmpp-smpp-29175",
+    "system_type": "gateway",
+    "max_sessions": 128,
+    "max_sessions_per_system_id": 4,
+    "window_size": 16,
+    "enquire_period": "30s"
+  },
+  "dispatcher": {
+    "workers": 4,
+    "per_worker_concurrency": 4,
+    "claim_limit": 16,
+    "poll_interval_ms": 20,
+    "pending_ttl": "30m",
+    "max_attempts": 3
+  },
+  "esmes": [
+    {
+      "system_id": "dr-esme",
+      "password": "dr-esme-pass"
+    }
+  ],
+  "routes": [
+    {
+      "name": "default",
+      "prefix": [],
+      "provider": "stub-provider",
+      "priority": 1
+    }
+  ],
+  "providers": [
+    {
+      "name": "stub-provider",
+      "protocol": "http",
+      "endpoint": "http://10.0.0.30:18080/send",
+      "rule": "stub-json-send",
+      "enabled": true,
+      "http_timeout_ms": 5000,
+      "rate_limit": {
+        "tps": 50,
+        "burst": 100,
+        "timeout_ms": 2000
+      }
+    }
+  ],
+  "inbound": [
+    {
+      "name": "stub-provider-dlr",
+      "method": "POST",
+      "path": "/callback/stub-provider/dlr",
+      "provider": "stub-provider",
+      "content_type": "application/json",
+      "auth_header": "X-Callback-Token",
+      "auth_token": "CALLBACK_TOKEN",
+      "fields": {
+        "provider_id": "message_id",
+        "status": "status",
+        "error_code": "error_code"
+      },
+      "success_status": 200,
+      "success_body": "{\"ok\":true}"
+    }
+  ],
+  "outbound": [
+    {
+      "name": "stub-json-send",
+      "method": "POST",
+      "content_type": "application/json",
+      "fields": {
+        "request_id": "id",
+        "src": "from",
+        "dst": "to",
+        "content": "text",
+        "encoding": "encoding"
+      },
+      "headers": {
+        "X-Request-ID": "{{id}}"
+      },
+      "response": {
+        "id_path": "message_id"
+      }
+    }
+  ],
+  "clients": [],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
+  "risk": {
+    "blocked_to_prefix": [],
+    "blocked_keywords": [],
+    "per_number_per_minute": 1000,
+    "per_number_per_day": 10000,
+    "per_client_per_second": 500
+  },
+  "storage": {
+    "driver": "memory",
+    "dsn": ""
+  },
+  "admin": {
+    "username": "admin",
+    "password": "mysmpp-admin-19087"
+  }
+}
