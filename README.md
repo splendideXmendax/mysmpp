@@ -159,6 +159,18 @@ Docker 说明见 [docs/DOCKER.md](docs/DOCKER.md) 和 [docs/QUICKSTART_DOCKER.md
 
 管理后台说明见 [docs/ADMIN.md](docs/ADMIN.md)。
 
+API 参考见 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)。
+
+运维 Runbook 见 [docs/RUNBOOK.md](docs/RUNBOOK.md)。
+
+安全加固清单见 [docs/SECURITY_HARDENING.md](docs/SECURITY_HARDENING.md)。
+
+SMPP 支持矩阵见 [docs/SMPP_SUPPORT_MATRIX.md](docs/SMPP_SUPPORT_MATRIX.md)。
+
+数据模型见 [docs/DATA_MODEL.md](docs/DATA_MODEL.md)。
+
+升级与迁移见 [docs/UPGRADE_MIGRATION.md](docs/UPGRADE_MIGRATION.md)。
+
 ## 生产建议
 
 1. 使用 `configs/production.example.json` 复制出自己的配置文件。

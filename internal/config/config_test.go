@@ -140,16 +140,23 @@ func TestLoadDevConfig(t *testing.T) {
 	}
 }
 
-func TestLoadDockerConfig(t *testing.T) {
-	cfg, err := Load("../../configs/docker.json")
-	if err != nil {
-		t.Fatalf("docker config should load: %v", err)
+func TestLoadDockerConfigRejectsAutoGeneratePlaceholders(t *testing.T) {
+	if _, err := Load("../../configs/docker.json"); err == nil {
+		t.Fatal("docker seed config should require startup bootstrap")
 	}
-	if cfg.Server.HTTPAddr != "0.0.0.0:19087" || cfg.SMPP.Addr != "0.0.0.0:29175" {
-		t.Fatalf("unexpected docker ports: http=%q smpp=%q", cfg.Server.HTTPAddr, cfg.SMPP.Addr)
+}
+
+func TestValidateRejectsAutoGeneratePlaceholdersOutsideBootstrap(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Admin.Password = AutoGenerateSecret
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected auto-generate admin password to fail normal validation")
 	}
-	if cfg.Storage.Driver != "file" {
-		t.Fatalf("expected docker config to use file store, got %q", cfg.Storage.Driver)
+
+	cfg = validConfigForTest()
+	cfg.SMPP.Password = AutoGenerateSecret
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected auto-generate smpp password to fail normal validation")
 	}
 }
 

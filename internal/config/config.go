@@ -231,6 +231,10 @@ func (c *Config) Normalize() {
 }
 
 func (c Config) Validate() error {
+	return c.validate(false)
+}
+
+func (c Config) validate(allowAutoGenerate bool) error {
 	switch strings.ToLower(c.Storage.Driver) {
 	case "", "memory", "file", "json":
 	case "postgres", "pg":
@@ -246,16 +250,19 @@ func (c Config) Validate() error {
 	if isPlaceholder(c.Admin.Username) || isPlaceholder(c.Admin.Password) {
 		return fmt.Errorf("admin credentials must be changed before deploy")
 	}
+	if !allowAutoGenerate && (IsAutoGenerate(c.Admin.Password) || IsAutoGenerate(c.SMPP.Password)) {
+		return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
+	}
 	if isPlaceholder(c.SMPP.Password) {
 		return fmt.Errorf("smpp password must be changed before deploy")
 	}
-	if err := validateSMPPString("smpp.system_id", c.SMPP.SystemID, SMPPMaxSystemID); err != nil {
+	if err := validateSMPPString("smpp.system_id", c.SMPP.SystemID, SMPPMaxSystemID, allowAutoGenerate); err != nil {
 		return err
 	}
-	if err := validateSMPPString("smpp.password", c.SMPP.Password, SMPPMaxPassword); err != nil {
+	if err := validateSMPPString("smpp.password", c.SMPP.Password, SMPPMaxPassword, allowAutoGenerate); err != nil {
 		return err
 	}
-	if err := validateSMPPString("smpp.system_type", c.SMPP.SystemType, SMPPMaxSystemType); err != nil {
+	if err := validateSMPPString("smpp.system_type", c.SMPP.SystemType, SMPPMaxSystemType, allowAutoGenerate); err != nil {
 		return err
 	}
 	if c.Server.HTTPAddr != "" && c.SMPP.Addr != "" && c.Server.HTTPAddr == c.SMPP.Addr {
@@ -295,6 +302,9 @@ func (c Config) Validate() error {
 		if provider.RateLimit.TPS < 0 || provider.RateLimit.Burst < 0 || provider.RateLimit.TimeoutMS < 0 {
 			return fmt.Errorf("provider %q rate_limit values must be non-negative", provider.Name)
 		}
+		if !allowAutoGenerate && IsAutoGenerate(provider.Password) {
+			return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
+		}
 	}
 	if len(c.Providers) > 0 && len(enabledProviders) == 0 {
 		return fmt.Errorf("at least one provider must be enabled")
@@ -332,10 +342,13 @@ func (c Config) Validate() error {
 		if isPlaceholder(esme.Password) {
 			return fmt.Errorf("esme %q password must be changed before deploy", esme.SystemID)
 		}
-		if err := validateSMPPString("esme.system_id", esme.SystemID, SMPPMaxSystemID); err != nil {
+		if !allowAutoGenerate && IsAutoGenerate(esme.Password) {
+			return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
+		}
+		if err := validateSMPPString("esme.system_id", esme.SystemID, SMPPMaxSystemID, allowAutoGenerate); err != nil {
 			return err
 		}
-		if err := validateSMPPString("esme.password", esme.Password, SMPPMaxPassword); err != nil {
+		if err := validateSMPPString("esme.password", esme.Password, SMPPMaxPassword, allowAutoGenerate); err != nil {
 			return fmt.Errorf("esme %q %w", esme.SystemID, err)
 		}
 		if _, ok := esmeNames[esme.SystemID]; ok {
@@ -353,6 +366,9 @@ func (c Config) Validate() error {
 		}
 		if isPlaceholder(client.Token) {
 			return fmt.Errorf("client %q token must be changed before deploy", client.ClientID)
+		}
+		if !allowAutoGenerate && IsAutoGenerate(client.Token) {
+			return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
 		}
 		if _, ok := clientNames[client.ClientID]; ok {
 			return fmt.Errorf("duplicate client %q", client.ClientID)
@@ -374,6 +390,9 @@ func (c Config) Validate() error {
 		}
 		if rule.AuthHeader == "" || rule.AuthToken == "" {
 			return fmt.Errorf("inbound rule %q auth_header and auth_token are required", rule.Name)
+		}
+		if !allowAutoGenerate && IsAutoGenerate(rule.AuthToken) {
+			return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
 		}
 		if rule.Fields["from"] == "" || rule.Fields["to"] == "" || rule.Fields["text"] == "" {
 			if rule.Fields["provider_id"] == "" || rule.Fields["status"] == "" {
@@ -403,8 +422,8 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func validateSMPPString(name, value string, max int) error {
-	if value == "" || IsAutoGenerate(value) {
+func validateSMPPString(name, value string, max int, allowAutoGenerate bool) error {
+	if value == "" || (allowAutoGenerate && IsAutoGenerate(value)) {
 		return nil
 	}
 	if len(value) > max {
@@ -476,10 +495,14 @@ func mapsTo(fields map[string]string, internal string) bool {
 }
 
 func Load(path string) (Config, error) {
+	return load(path, false)
+}
+
+func load(path string, allowAutoGenerate bool) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		cfg.Normalize()
-		if err := cfg.Validate(); err != nil {
+		if err := cfg.validate(allowAutoGenerate); err != nil {
 			return cfg, fmt.Errorf("validate config: %w", err)
 		}
 		return cfg, nil
@@ -493,7 +516,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg.Normalize()
 	resolveStoragePath(path, &cfg)
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(allowAutoGenerate); err != nil {
 		return cfg, fmt.Errorf("validate config: %w", err)
 	}
 	return cfg, nil

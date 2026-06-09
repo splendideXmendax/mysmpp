@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,6 +20,7 @@ import (
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
 	"github.com/splendideXmendax/mysmpp/internal/httprule"
 	"github.com/splendideXmendax/mysmpp/internal/message"
+	"github.com/splendideXmendax/mysmpp/internal/netutil"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/router"
 	"github.com/splendideXmendax/mysmpp/internal/store"
@@ -271,88 +270,7 @@ func clientIDFromRequest(r *http.Request) string {
 }
 
 func requestIPAllowed(r *http.Request, allowed, trustedProxies []string) bool {
-	host := clientIP(r, trustedProxies)
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	for _, item := range allowed {
-		if prefix, err := netip.ParsePrefix(item); err == nil {
-			if prefix.Contains(ip) {
-				return true
-			}
-			continue
-		}
-		if allowedIP, err := netip.ParseAddr(item); err == nil && allowedIP == ip {
-			return true
-		}
-	}
-	return false
-}
-
-func clientIP(r *http.Request, trustedProxies []string) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	direct, err := netip.ParseAddr(host)
-	if err != nil {
-		return host
-	}
-	prefixes := parseTrustedProxyPrefixes(trustedProxies)
-	if len(prefixes) == 0 || !addrInPrefixes(direct, prefixes) {
-		return host
-	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-			return realIP
-		}
-		return host
-	}
-	parts := strings.Split(xff, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		candidate := strings.TrimSpace(parts[i])
-		addr, err := netip.ParseAddr(candidate)
-		if err != nil {
-			continue
-		}
-		if !addrInPrefixes(addr, prefixes) {
-			return candidate
-		}
-	}
-	return strings.TrimSpace(parts[0])
-}
-
-func parseTrustedProxyPrefixes(values []string) []netip.Prefix {
-	prefixes := make([]netip.Prefix, 0, len(values))
-	for _, value := range values {
-		if prefix, err := netip.ParsePrefix(value); err == nil {
-			prefixes = append(prefixes, prefix)
-			continue
-		}
-		if addr, err := netip.ParseAddr(value); err == nil {
-			prefixes = append(prefixes, addrPrefix(addr))
-		}
-	}
-	return prefixes
-}
-
-func addrInPrefixes(addr netip.Addr, prefixes []netip.Prefix) bool {
-	for _, prefix := range prefixes {
-		if prefix.Contains(addr) {
-			return true
-		}
-	}
-	return false
-}
-
-func addrPrefix(addr netip.Addr) netip.Prefix {
-	bits := 128
-	if addr.Is4() {
-		bits = 32
-	}
-	return netip.PrefixFrom(addr, bits)
+	return netutil.RequestIPAllowed(r, allowed, trustedProxies)
 }
 
 func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta map[string]string) error {

@@ -51,7 +51,6 @@ func main() {
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
 	dispatcher := dispatch.New(logger, registry, nil, cfg.Dispatcher, st)
-	defer dispatcher.Close()
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx, *configPath)
@@ -125,10 +124,6 @@ func main() {
 		stop()
 	}
 
-	if err := dispatcher.Close(); err != nil {
-		logger.Warn("dispatcher shutdown failed", "err", err)
-	}
-
 	timeout := 10 * time.Second
 	if cfg.Server.ShutdownTimeout != "" {
 		if parsed, err := time.ParseDuration(cfg.Server.ShutdownTimeout); err == nil {
@@ -139,5 +134,8 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown failed", "err", err)
+	}
+	if err := dispatcher.Close(); err != nil {
+		logger.Warn("dispatcher shutdown failed", "err", err)
 	}
 }

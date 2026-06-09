@@ -32,7 +32,7 @@ func LoadStartup(path, seedPath string) (Config, BootstrapResult, error) {
 			result.Seeded = true
 		}
 	}
-	cfg, err := Load(path)
+	cfg, err := load(path, true)
 	if err != nil {
 		return cfg, result, err
 	}
