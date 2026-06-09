@@ -51,10 +51,11 @@ credentials.txt 中的 admin.password
 
 ## 4. HTTP 提交一条短信
 
-Docker 默认配置没有 HTTP client token，可以直接提交:
+Docker 默认配置没有 HTTP client token，此时使用 admin Basic Auth 提交:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:19087/v1/messages \
+  -u admin:'<credentials.txt 中的 admin.password>' \
   -H 'Content-Type: application/json' \
   -d '{"from":"10690000","to":"13800138000","text":"hello docker"}'
 ```
@@ -62,7 +63,7 @@ curl -sS -X POST http://127.0.0.1:19087/v1/messages \
 查询:
 
 ```bash
-curl -sS 'http://127.0.0.1:19087/v1/messages?limit=10&offset=0'
+curl -sS -u admin:'<credentials.txt 中的 admin.password>' 'http://127.0.0.1:19087/v1/messages?limit=10&offset=0'
 ```
 
 如果你在后台配置了 HTTP client，就要加:

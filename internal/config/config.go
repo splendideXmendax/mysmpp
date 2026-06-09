@@ -19,6 +19,13 @@ const (
 	DefaultSMPPAddr = "127.0.0.1:29175"
 )
 
+const (
+	SMPPMaxSystemID   = 15
+	SMPPMaxPassword   = 8
+	SMPPMaxSystemType = 12
+	SMPPMaxAddress    = 20
+)
+
 type Config struct {
 	Server         ServerConfig     `json:"server"`
 	SMPP           SMPPConfig       `json:"smpp"`
@@ -242,6 +249,18 @@ func (c Config) Validate() error {
 	if isPlaceholder(c.SMPP.Password) {
 		return fmt.Errorf("smpp password must be changed before deploy")
 	}
+	if err := validateSMPPString("smpp.system_id", c.SMPP.SystemID, SMPPMaxSystemID); err != nil {
+		return err
+	}
+	if err := validateSMPPString("smpp.password", c.SMPP.Password, SMPPMaxPassword); err != nil {
+		return err
+	}
+	if err := validateSMPPString("smpp.system_type", c.SMPP.SystemType, SMPPMaxSystemType); err != nil {
+		return err
+	}
+	if c.Server.HTTPAddr != "" && c.SMPP.Addr != "" && c.Server.HTTPAddr == c.SMPP.Addr {
+		return fmt.Errorf("server.http_addr and smpp.addr must not be the same")
+	}
 	if c.Dispatcher.Workers < 0 || c.Dispatcher.PerWorkerConcurrency < 0 || c.Dispatcher.ClaimLimit < 0 ||
 		c.Dispatcher.PollIntervalMS < 0 || c.Dispatcher.MaxAttempts < 0 {
 		return fmt.Errorf("dispatcher values must be non-negative")
@@ -284,6 +303,9 @@ func (c Config) Validate() error {
 		if route.Name == "" {
 			return fmt.Errorf("route name is required")
 		}
+		if !validName(route.Name) {
+			return fmt.Errorf("route %q has invalid name", route.Name)
+		}
 		if route.Provider == "" {
 			return fmt.Errorf("route %q provider is required", route.Name)
 		}
@@ -296,6 +318,9 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if err := validateRoutePrefixes(c.Routes); err != nil {
+		return err
+	}
 	esmeNames := map[string]struct{}{}
 	for _, esme := range c.ESMEs {
 		if esme.SystemID == "" {
@@ -306,6 +331,12 @@ func (c Config) Validate() error {
 		}
 		if isPlaceholder(esme.Password) {
 			return fmt.Errorf("esme %q password must be changed before deploy", esme.SystemID)
+		}
+		if err := validateSMPPString("esme.system_id", esme.SystemID, SMPPMaxSystemID); err != nil {
+			return err
+		}
+		if err := validateSMPPString("esme.password", esme.Password, SMPPMaxPassword); err != nil {
+			return fmt.Errorf("esme %q %w", esme.SystemID, err)
 		}
 		if _, ok := esmeNames[esme.SystemID]; ok {
 			return fmt.Errorf("duplicate esme %q", esme.SystemID)
@@ -332,8 +363,14 @@ func (c Config) Validate() error {
 		if rule.Name == "" {
 			return fmt.Errorf("inbound rule name is required")
 		}
+		if !validName(rule.Name) {
+			return fmt.Errorf("inbound rule %q has invalid name", rule.Name)
+		}
 		if rule.Path == "" || !strings.HasPrefix(rule.Path, "/") {
 			return fmt.Errorf("inbound rule %q path must start with /", rule.Name)
+		}
+		if isReservedHTTPPath(rule.Path) {
+			return fmt.Errorf("inbound rule %q path %q conflicts with built-in route", rule.Name, rule.Path)
 		}
 		if rule.AuthHeader == "" || rule.AuthToken == "" {
 			return fmt.Errorf("inbound rule %q auth_header and auth_token are required", rule.Name)
@@ -366,6 +403,16 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func validateSMPPString(name, value string, max int) error {
+	if value == "" || IsAutoGenerate(value) {
+		return nil
+	}
+	if len(value) > max {
+		return fmt.Errorf("%s must be at most %d bytes", name, max)
+	}
+	return nil
+}
+
 func isPlaceholder(value string) bool {
 	return value == PlaceholderSecret
 }
@@ -375,9 +422,48 @@ func IsAutoGenerate(value string) bool {
 }
 
 var prefixPattern = regexp.MustCompile(`^[0-9+*#]*$`)
+var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 func validPrefix(prefix string) bool {
 	return prefixPattern.MatchString(prefix)
+}
+
+func validName(name string) bool {
+	return namePattern.MatchString(name)
+}
+
+func validateRoutePrefixes(routes []RouteConfig) error {
+	type owner struct {
+		route  string
+		prefix string
+	}
+	seen := []owner{}
+	for _, route := range routes {
+		for _, prefix := range route.Prefix {
+			for _, prior := range seen {
+				if prefix == prior.prefix || prefixDominates(prefix, prior.prefix) || prefixDominates(prior.prefix, prefix) {
+					return fmt.Errorf("route %q prefix %q conflicts with route %q prefix %q", route.Name, prefix, prior.route, prior.prefix)
+				}
+			}
+			seen = append(seen, owner{route: route.Name, prefix: prefix})
+		}
+	}
+	return nil
+}
+
+func prefixDominates(a, b string) bool {
+	return a != "" && b != "" && strings.HasPrefix(b, a)
+}
+
+func isReservedHTTPPath(path string) bool {
+	switch {
+	case path == "/healthz", path == "/v1/messages", path == "/v1/config", path == "/ui/config":
+		return true
+	case path == "/admin" || strings.HasPrefix(path, "/admin/"):
+		return true
+	default:
+		return false
+	}
 }
 
 func mapsTo(fields map[string]string, internal string) bool {

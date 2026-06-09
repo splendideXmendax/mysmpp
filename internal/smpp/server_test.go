@@ -203,6 +203,47 @@ func TestServerRejectsWhenMaxSessionsReached(t *testing.T) {
 	}
 }
 
+func TestServerRejectsOverlongBindPassword(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(config.SMPPConfig{
+		Addr:     "127.0.0.1:0",
+		SystemID: "client-a",
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool { return true },
+		nil,
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+
+	conn, err := net.DialTimeout("tcp", waitServerAddr(t, server), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := WritePDU(conn, PDU{CommandID: commandBindTransceiver, SequenceID: 1, Body: bindBody("client-a", "password-too-long")}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ReadPDU(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != statusInvalidPassword {
+		t.Fatalf("expected invalid password status, got %+v", resp)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
 func TestServerRejectsWhenMaxSessionsPerSystemIDReached(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

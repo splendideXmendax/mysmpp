@@ -143,6 +143,10 @@ func (g *Gateway) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 
 func (g *Gateway) requireAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if len(g.Config().Clients) == 0 {
+			g.requireAdmin(next)(w, r)
+			return
+		}
 		clientID, ok := g.authorizeClient(w, r)
 		if !ok {
 			return
@@ -233,7 +237,8 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) authorizeClient(w http.ResponseWriter, r *http.Request) (string, bool) {
 	cfg := g.Config()
 	if len(cfg.Clients) == 0 {
-		return r.Header.Get("X-Client-ID"), true
+		http.Error(w, "client credentials are required", http.StatusUnauthorized)
+		return "", false
 	}
 	clientID := r.Header.Get("X-Client-ID")
 	token := r.Header.Get("X-Token")
@@ -403,27 +408,27 @@ func (g *Gateway) applyRisk(ctx context.Context, clientID, from, to, text string
 	cfg := g.Config()
 	for _, prefix := range cfg.Risk.BlockedToPrefix {
 		if prefix != "" && strings.HasPrefix(to, prefix) {
-			g.saveBlocked(ctx, from, to, text, "blocked_prefix", meta)
+			g.saveBlocked(ctx, clientID, from, to, text, "blocked_prefix", meta)
 			return true, "blocked destination"
 		}
 	}
 	lowerText := strings.ToLower(text)
 	for _, keyword := range cfg.Risk.BlockedKeywords {
 		if keyword != "" && strings.Contains(lowerText, strings.ToLower(keyword)) {
-			g.saveBlocked(ctx, from, to, text, "blocked_keyword", meta)
+			g.saveBlocked(ctx, clientID, from, to, text, "blocked_keyword", meta)
 			return true, "blocked keyword"
 		}
 	}
 	if cfg.Risk.PerNumberPerMinute > 0 && !g.allowRate("num:min:"+to, time.Minute, cfg.Risk.PerNumberPerMinute) {
-		g.saveBlocked(ctx, from, to, text, "number_rate_minute", meta)
+		g.saveBlocked(ctx, clientID, from, to, text, "number_rate_minute", meta)
 		return true, "number rate limit exceeded"
 	}
 	if cfg.Risk.PerNumberPerDay > 0 && !g.allowRate("num:day:"+to, 24*time.Hour, cfg.Risk.PerNumberPerDay) {
-		g.saveBlocked(ctx, from, to, text, "number_rate_day", meta)
+		g.saveBlocked(ctx, clientID, from, to, text, "number_rate_day", meta)
 		return true, "number daily limit exceeded"
 	}
 	if clientID != "" && cfg.Risk.PerClientPerSecond > 0 && !g.allowRate("client:sec:"+clientID, time.Second, cfg.Risk.PerClientPerSecond) {
-		g.saveBlocked(ctx, from, to, text, "client_rate_second", meta)
+		g.saveBlocked(ctx, clientID, from, to, text, "client_rate_second", meta)
 		return true, "client rate limit exceeded"
 	}
 	return false, ""
@@ -454,10 +459,13 @@ func (g *Gateway) allowRate(key string, window time.Duration, limit int) bool {
 	return true
 }
 
-func (g *Gateway) saveBlocked(ctx context.Context, from, to, text, reason string, meta map[string]string) {
+func (g *Gateway) saveBlocked(ctx context.Context, clientID, from, to, text, reason string, meta map[string]string) {
 	msg := message.New(newID(), message.DirectionMT, from, to, text)
 	msg.State = "blocked"
 	msg.Metadata = map[string]string{"reason": reason}
+	if clientID != "" {
+		msg.Metadata["client_id"] = clientID
+	}
 	for k, v := range meta {
 		msg.Metadata[k] = v
 	}

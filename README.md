@@ -59,7 +59,7 @@ go run ./cmd/mysmpp
 - SMPP: `127.0.0.1:29175`
 - 管理后台账号: `admin`
 - 管理后台密码: `mysmpp-admin-19087`
-- 示例 ESME: `dev-esme` / `mysmpp-esme-29175`
+- 示例 ESME: `dev-esme` / `esmepw1`
 
 打开后台:
 
@@ -96,10 +96,11 @@ cat ./credentials.txt
 
 ## HTTP 提交测试
 
-开发配置的 `clients` 为空，可以直接提交:
+开发配置的 `clients` 为空时，`/v1/messages` 使用 admin Basic Auth:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:19087/v1/messages \
+  -u admin:mysmpp-admin-19087 \
   -H 'Content-Type: application/json' \
   -d '{"from":"10690000","to":"13800138000","text":"hello"}'
 ```
@@ -114,7 +115,7 @@ X-Token: <token>
 分页查询消息:
 
 ```bash
-curl 'http://127.0.0.1:19087/v1/messages?limit=20&offset=0'
+curl -u admin:mysmpp-admin-19087 'http://127.0.0.1:19087/v1/messages?limit=20&offset=0'
 ```
 
 ## SMPP DLR 测试

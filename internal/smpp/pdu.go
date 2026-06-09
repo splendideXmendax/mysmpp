@@ -96,6 +96,22 @@ func readCString(body []byte, offset *int) string {
 	return value
 }
 
+func readCStringMax(body []byte, offset *int, max int) (string, error) {
+	start := *offset
+	for *offset < len(body) && body[*offset] != 0x00 {
+		if *offset-start >= max {
+			return "", fmt.Errorf("c-octet string exceeds %d bytes", max)
+		}
+		(*offset)++
+	}
+	if *offset >= len(body) {
+		return "", errors.New("unterminated c-octet string")
+	}
+	value := string(body[start:*offset])
+	(*offset)++
+	return value, nil
+}
+
 func commandName(id uint32) string {
 	switch id {
 	case commandBindReceiver:

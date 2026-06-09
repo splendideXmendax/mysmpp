@@ -6,7 +6,7 @@
   "smpp": {
     "addr": "0.0.0.0:29175",
     "system_id": "mysmpp-dr",
-    "password": "mysmpp-smpp-29175",
+    "password": "smpppw1",
     "system_type": "gateway",
     "max_sessions": 128,
     "max_sessions_per_system_id": 4,
@@ -24,7 +24,7 @@
   "esmes": [
     {
       "system_id": "dr-esme",
-      "password": "dr-esme-pass"
+      "password": "dresme1"
     }
   ],
   "routes": [

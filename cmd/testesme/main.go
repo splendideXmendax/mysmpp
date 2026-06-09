@@ -14,7 +14,7 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:29175", "gateway address")
 	user := flag.String("u", "dev-esme", "system_id")
-	pass := flag.String("p", "mysmpp-esme-29175", "password")
+	pass := flag.String("p", "esmepw1", "password")
 	src := flag.String("src", "10690000", "source address")
 	dst := flag.String("dst", "13800138000", "destination address")
 	text := flag.String("text", "ping", "message text")
@@ -129,11 +129,11 @@ func parseDeliverSM(body []byte) deliverSM {
 func readCString(body []byte, offset *int) string {
 	start := *offset
 	for *offset < len(body) && body[*offset] != 0 {
-		*offset++
+		(*offset)++
 	}
 	value := string(body[start:*offset])
 	if *offset < len(body) {
-		*offset++
+		(*offset)++
 	}
 	return value
 }

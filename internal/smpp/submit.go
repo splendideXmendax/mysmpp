@@ -3,8 +3,11 @@ package smpp
 import (
 	"errors"
 
+	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 )
+
+const smppMaxServiceType = 6
 
 type SubmitSM struct {
 	SequenceID           uint32
@@ -27,17 +30,25 @@ type SubmitSM struct {
 
 func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	offset := 0
-	_ = readCString(pdu.Body, &offset) // service_type
+	if _, err := readCStringMax(pdu.Body, &offset, smppMaxServiceType); err != nil {
+		return SubmitSM{}, err
+	}
 	if offset+2 > len(pdu.Body) {
 		return SubmitSM{}, errors.New("short submit_sm")
 	}
 	offset += 2 // source_addr_ton, source_addr_npi
-	from := readCString(pdu.Body, &offset)
+	from, err := readCStringMax(pdu.Body, &offset, config.SMPPMaxAddress)
+	if err != nil {
+		return SubmitSM{}, err
+	}
 	if offset+2 > len(pdu.Body) {
 		return SubmitSM{}, errors.New("missing destination ton/npi")
 	}
 	offset += 2
-	to := readCString(pdu.Body, &offset)
+	to, err := readCStringMax(pdu.Body, &offset, config.SMPPMaxAddress)
+	if err != nil {
+		return SubmitSM{}, err
+	}
 	if offset+3 > len(pdu.Body) {
 		return SubmitSM{}, errors.New("missing submit_sm fixed fields")
 	}
@@ -47,8 +58,12 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	offset++
 	priorityFlag := pdu.Body[offset]
 	offset++
-	_ = readCString(pdu.Body, &offset)
-	_ = readCString(pdu.Body, &offset)
+	if _, err := readCStringMax(pdu.Body, &offset, 16); err != nil {
+		return SubmitSM{}, err
+	}
+	if _, err := readCStringMax(pdu.Body, &offset, 16); err != nil {
+		return SubmitSM{}, err
+	}
 	if offset+5 > len(pdu.Body) {
 		return SubmitSM{}, errors.New("missing submit_sm delivery fields")
 	}

@@ -17,6 +17,10 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+type sqlExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 	if dsn == "" {
 		return nil, errors.New("postgres storage.dsn is required")
@@ -56,6 +60,10 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 }
 
 func (s *PostgresStore) SaveMessage(ctx context.Context, msg message.Message) error {
+	return saveMessageSQL(ctx, s.pool, msg)
+}
+
+func saveMessageSQL(ctx context.Context, exec sqlExecer, msg message.Message) error {
 	meta, err := json.Marshal(msg.Metadata)
 	if err != nil {
 		return err
@@ -64,7 +72,7 @@ func (s *PostgresStore) SaveMessage(ctx context.Context, msg message.Message) er
 	if segments == 0 {
 		segments = 1
 	}
-	_, err = s.pool.Exec(ctx, `
+	_, err = exec.Exec(ctx, `
 INSERT INTO messages (
 	gateway_id, provider_id, direction, from_addr, to_addr, text, encoding, data_coding,
 	segments, route, provider, source_kind, source_session, state, error_code,
@@ -342,6 +350,55 @@ ON CONFLICT (client_id, key) DO UPDATE SET
 	gateway_id = EXCLUDED.gateway_id,
 	expires_at = EXCLUDED.expires_at`, clientID, key, gatewayID, time.Now().UTC().Add(ttl))
 	return err
+}
+
+func (s *PostgresStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := saveMessageSQL(ctx, tx, msg); err != nil {
+		return 0, err
+	}
+	if item.State == "" {
+		item.State = "pending"
+	}
+	if item.NextRetryAt.IsZero() {
+		item.NextRetryAt = time.Now().UTC()
+	}
+	if item.MaxAttempts <= 0 {
+		item.MaxAttempts = 5
+	}
+	payload, err := json.Marshal(item.Payload)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	if err := tx.QueryRow(ctx, `
+INSERT INTO outbox (gateway_id, provider, payload, state, next_retry_at, max_attempts)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id`, item.GatewayID, item.Provider, payload, item.State, item.NextRetryAt, item.MaxAttempts).Scan(&id); err != nil {
+		return 0, err
+	}
+	if clientID != "" && key != "" {
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO idempotency (client_id, key, gateway_id, expires_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (client_id, key) DO UPDATE SET
+	gateway_id = EXCLUDED.gateway_id,
+	expires_at = EXCLUDED.expires_at`, clientID, key, msg.ID, time.Now().UTC().Add(ttl)); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func scanMessage(row pgx.CollectableRow) (message.Message, error) {

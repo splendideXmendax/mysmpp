@@ -159,11 +159,14 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	msg.SourceKind = env.Source.Kind.String()
 	msg.SourceID = env.Source.SMPPSessionID
 	msg.Metadata = cloneMeta(env.Meta)
+	if env.ClientID != "" {
+		if msg.Metadata == nil {
+			msg.Metadata = map[string]string{}
+		}
+		msg.Metadata["client_id"] = env.ClientID
+	}
 	msg.Segments = message.Split(env.Text, message.SplitOptions{ForceEncoding: encoding})
 	msg.State = "queued"
-	if err := d.store.SaveMessage(ctx, msg); err != nil {
-		return Receipt{}, err
-	}
 	payload := store.OutboxPayload{
 		GatewayID:          gatewayID,
 		Provider:           route.Provider,
@@ -180,18 +183,13 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		SourceSystem:       env.Source.SMPPSystemID,
 		ReceivedAt:         env.ReceivedAt,
 	}
-	if _, err := d.store.EnqueueOutbox(ctx, store.OutboxItem{
+	if _, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
 		GatewayID:   gatewayID,
 		Provider:    route.Provider,
 		Payload:     payload,
 		MaxAttempts: d.maxAttempts,
-	}); err != nil {
+	}, env.ClientID, env.ClientMsgID, 24*time.Hour); err != nil {
 		return Receipt{}, err
-	}
-	if env.ClientID != "" && env.ClientMsgID != "" {
-		if err := d.store.SaveIdempotency(ctx, env.ClientID, env.ClientMsgID, gatewayID, 24*time.Hour); err != nil {
-			return Receipt{}, err
-		}
 	}
 	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", route.Provider, "route", route.Name)
 	return Receipt{GatewayID: gatewayID, Provider: route.Provider, Route: route.Name, State: "queued"}, nil

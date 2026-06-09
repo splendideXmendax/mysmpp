@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/splendideXmendax/mysmpp/internal/config"
 )
 
 type BindMode int32
@@ -21,6 +23,11 @@ const (
 )
 
 const bindTimeout = 30 * time.Second
+
+const (
+	statusInvalidPassword uint32 = 0x0000000E
+	statusInvalidSystemID uint32 = 0x0000000F
+)
 
 func (m BindMode) CanSubmit() bool  { return m == BindTX || m == BindTRX }
 func (m BindMode) CanReceive() bool { return m == BindRX || m == BindTRX }
@@ -237,8 +244,20 @@ func (s *Session) CompleteSubmit() {
 
 func (s *Session) handleBind(pdu PDU) {
 	offset := 0
-	systemID := readCString(pdu.Body, &offset)
-	password := readCString(pdu.Body, &offset)
+	systemID, err := readCStringMax(pdu.Body, &offset, config.SMPPMaxSystemID)
+	if err != nil {
+		s.Send(PDU{CommandID: bindRespID(pdu.CommandID), Status: statusInvalidSystemID, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+		return
+	}
+	password, err := readCStringMax(pdu.Body, &offset, config.SMPPMaxPassword)
+	if err != nil {
+		s.Send(PDU{CommandID: bindRespID(pdu.CommandID), Status: statusInvalidPassword, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+		return
+	}
+	if _, err := readCStringMax(pdu.Body, &offset, config.SMPPMaxSystemType); err != nil {
+		s.Send(PDU{CommandID: bindRespID(pdu.CommandID), Status: statusBindFailed, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+		return
+	}
 
 	status := statusOK
 	if s.currentBind() != BindNone {
@@ -250,14 +269,12 @@ func (s *Session) handleBind(pdu PDU) {
 	}
 
 	mode := BindTRX
-	respID := commandBindTransceiverResp
+	respID := bindRespID(pdu.CommandID)
 	switch pdu.CommandID {
 	case commandBindReceiver:
 		mode = BindRX
-		respID = commandBindReceiverResp
 	case commandBindTransmitter:
 		mode = BindTX
-		respID = commandBindTransmitterResp
 	}
 	if status == statusOK {
 		s.bindMode.Store(int32(mode))
@@ -268,4 +285,15 @@ func (s *Session) handleBind(pdu PDU) {
 		s.logger.Warn("bind rejected", "system_id", systemID, "status", status)
 	}
 	s.Send(PDU{CommandID: respID, Status: status, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+}
+
+func bindRespID(commandID uint32) uint32 {
+	switch commandID {
+	case commandBindReceiver:
+		return commandBindReceiverResp
+	case commandBindTransmitter:
+		return commandBindTransmitterResp
+	default:
+		return commandBindTransceiverResp
+	}
 }

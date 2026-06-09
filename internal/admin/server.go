@@ -84,7 +84,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			s.renderLogin(w, r, "表单无效")
 			return
 		}
-		ip := remoteIP(r)
+		ip := remoteIP(r, s.gateway.Config().TrustedProxies)
 		if !s.limiter.Allow(ip) {
 			s.renderLogin(w, r, "登录失败次数过多，请稍后再试")
 			return

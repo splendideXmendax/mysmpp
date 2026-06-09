@@ -78,6 +78,28 @@ func TestNormalizeDispatcherDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOverlongSMPPCredentials(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.ESMEs = []ESMECred{{SystemID: "client-a", Password: "too-long-password"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected overlong esme password to fail")
+	}
+}
+
+func TestValidateRejectsInboundBuiltInPathConflict(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Inbound = []HTTPRuleConfig{{
+		Name:       "messages",
+		Path:       "/v1/messages",
+		AuthHeader: "X-Token",
+		AuthToken:  "secret",
+		Fields:     map[string]string{"from": "src", "to": "dst", "text": "msg"},
+	}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected inbound rule path conflict to fail")
+	}
+}
+
 func TestLoadExampleConfig(t *testing.T) {
 	cfg, err := Load("../../configs/example.json")
 	if err != nil {

@@ -162,10 +162,11 @@ Docker 首次启动默认会随机生成密码，以 `credentials.txt` 为准。
 
 ## 五、HTTP 提交测试
 
-Docker 默认配置 `clients` 为空，所以可以不带 token 提交:
+Docker 默认配置 `clients` 为空，此时 `/v1/messages` 使用 admin Basic Auth:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:19087/v1/messages \
+  -u admin:'<credentials.txt 中的 admin.password>' \
   -H 'Content-Type: application/json' \
   -d '{"from":"10690000","to":"13800138000","text":"hello from http"}'
 ```
@@ -184,7 +185,7 @@ curl -sS -X POST http://127.0.0.1:19087/v1/messages \
 查询消息:
 
 ```bash
-curl -sS 'http://127.0.0.1:19087/v1/messages?limit=10&offset=0'
+curl -sS -u admin:'<credentials.txt 中的 admin.password>' 'http://127.0.0.1:19087/v1/messages?limit=10&offset=0'
 ```
 
 如果你配置了 HTTP client:

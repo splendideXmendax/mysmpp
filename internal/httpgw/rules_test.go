@@ -21,6 +21,7 @@ import (
 
 func TestMessageSubmitAppliesRoute(t *testing.T) {
 	cfg := config.Default()
+	enableClientAuth(&cfg)
 	cfg.Routes = []config.RouteConfig{{
 		Name:     "mobile",
 		Prefix:   []string{"138"},
@@ -33,6 +34,7 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 	req.Header.Set("Content-Type", "application/json")
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
@@ -59,8 +61,11 @@ func TestMessagesGETUsesPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gateway := New(config.Default(), st)
+	cfg := config.Default()
+	enableClientAuth(&cfg)
+	gateway := New(cfg, st)
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages?limit=1&offset=1", nil)
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -73,6 +78,7 @@ func TestMessagesGETUsesPagination(t *testing.T) {
 
 func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	cfg := config.Default()
+	enableClientAuth(&cfg)
 	cfg.Routes = []config.RouteConfig{{
 		Name:     "default",
 		Provider: "mock-a",
@@ -97,6 +103,7 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 	req.Header.Set("Content-Type", "application/json")
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
@@ -171,10 +178,13 @@ func TestMessageSubmitRequiresConfiguredClient(t *testing.T) {
 }
 
 func TestMessageSubmitRejectsInvalidClientMsgID(t *testing.T) {
-	gateway := New(config.Default(), store.NewMemory())
+	cfg := config.Default()
+	enableClientAuth(&cfg)
+	gateway := New(cfg, store.NewMemory())
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"bad id"}`))
 	req.Header.Set("Content-Type", "application/json")
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -197,6 +207,7 @@ func TestHealthReportsStorageErrors(t *testing.T) {
 
 func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	cfg := config.Default()
+	enableClientAuth(&cfg)
 	cfg.Routes = []config.RouteConfig{{
 		Name:     "default",
 		Provider: "mock-a",
@@ -221,7 +232,7 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	body := `{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"m-1"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-ID", "client-a")
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -234,7 +245,7 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Client-ID", "client-a")
+	addClientAuth(req)
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -258,12 +269,14 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 
 func TestMessageSubmitRiskBlockedKeywordStoresBlockedMessage(t *testing.T) {
 	cfg := config.Default()
+	enableClientAuth(&cfg)
 	cfg.Risk.BlockedKeywords = []string{"spam"}
 	st := store.NewMemory()
 	gateway := New(cfg, st)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"buy spam now"}`))
 	req.Header.Set("Content-Type", "application/json")
+	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
@@ -273,7 +286,7 @@ func TestMessageSubmitRiskBlockedKeywordStoresBlockedMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].State != "blocked" || messages[0].Metadata["reason"] != "blocked_keyword" {
+	if len(messages) != 1 || messages[0].State != "blocked" || messages[0].Metadata["reason"] != "blocked_keyword" || messages[0].Metadata["client_id"] != "client-a" {
 		t.Fatalf("expected blocked message record, got %+v", messages)
 	}
 }
@@ -561,6 +574,7 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth("admin", "secret")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -656,6 +670,40 @@ func TestRequestIPAllowedUsesTrustedProxyXForwardedFor(t *testing.T) {
 	}
 }
 
+func TestMessagesRequireAdminWhenNoClientsConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
+	gateway := New(cfg, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without admin credentials, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	req.SetBasicAuth("admin", "secret")
+	rec = httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with admin credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func enableClientAuth(cfg *config.Config) {
+	cfg.Clients = []config.ClientAuth{{
+		ClientID: "client-a",
+		Token:    "token-a",
+		Enabled:  true,
+	}}
+}
+
+func addClientAuth(req *http.Request) {
+	req.Header.Set("X-Client-ID", "client-a")
+	req.Header.Set("X-Token", "token-a")
+}
+
 func testDispatcherConfig() config.DispatcherConfig {
 	return config.DispatcherConfig{
 		Workers:              1,
@@ -736,4 +784,7 @@ func (s failingStore) CheckIdempotency(context.Context, string, string) (string,
 }
 func (s failingStore) SaveIdempotency(context.Context, string, string, string, time.Duration) error {
 	return s.err
+}
+func (s failingStore) SubmitAtomic(context.Context, message.Message, store.OutboxItem, string, string, time.Duration) (int64, error) {
+	return 0, s.err
 }

@@ -30,6 +30,7 @@ type Store interface {
 	OutboxDepth(context.Context, string) (int, error)
 	CheckIdempotency(context.Context, string, string) (string, bool, error)
 	SaveIdempotency(context.Context, string, string, string, time.Duration) error
+	SubmitAtomic(context.Context, message.Message, OutboxItem, string, string, time.Duration) (int64, error)
 }
 
 type ListOptions struct {
@@ -390,6 +391,50 @@ func (s *MemoryStore) SaveIdempotency(_ context.Context, clientID, key, gatewayI
 		expiresAt: time.Now().UTC().Add(ttl),
 	}
 	return nil
+}
+
+func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, error) {
+	now := time.Now().UTC()
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(now)
+
+	msg = cloneMessage(msg)
+	if idx, ok := s.messageByID[msg.ID]; ok {
+		s.messages[idx] = msg
+	} else {
+		s.messageByID[msg.ID] = len(s.messages)
+		s.messages = append(s.messages, msg)
+		s.trimMessagesLocked()
+	}
+
+	s.nextOutbox++
+	item.ID = s.nextOutbox
+	if item.State == "" {
+		item.State = "pending"
+	}
+	if item.NextRetryAt.IsZero() {
+		item.NextRetryAt = now
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	if item.MaxAttempts <= 0 {
+		item.MaxAttempts = 5
+	}
+	item.Payload.Meta = cloneMap(item.Payload.Meta)
+	s.outbox[item.ID] = item
+
+	if clientID != "" && key != "" {
+		s.idempotency[idempotencyKey{clientID: clientID, key: key}] = idempotencyRecord{
+			gatewayID: msg.ID,
+			expiresAt: now.Add(ttl),
+		}
+	}
+	return item.ID, nil
 }
 
 func (s *MemoryStore) sweepLocked(now time.Time) {

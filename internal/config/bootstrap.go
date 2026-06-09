@@ -64,13 +64,13 @@ func generateStartupSecrets(cfg *Config) map[string]string {
 		out["admin.password"] = cfg.Admin.Password
 	}
 	if IsAutoGenerate(cfg.SMPP.Password) {
-		cfg.SMPP.Password = randomSecret()
+		cfg.SMPP.Password = randomSMPPSecret()
 		out["smpp.system_id"] = cfg.SMPP.SystemID
 		out["smpp.password"] = cfg.SMPP.Password
 	}
 	for i := range cfg.ESMEs {
 		if IsAutoGenerate(cfg.ESMEs[i].Password) {
-			cfg.ESMEs[i].Password = randomSecret()
+			cfg.ESMEs[i].Password = randomSMPPSecret()
 			key := fmt.Sprintf("esmes.%s.password", cfg.ESMEs[i].SystemID)
 			out[key] = cfg.ESMEs[i].Password
 		}
@@ -103,6 +103,14 @@ func randomSecret() string {
 	var b [24]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return fmt.Sprintf("mysmpp-%d", time.Now().UnixNano())
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func randomSMPPSecret() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano())[:SMPPMaxPassword]
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }

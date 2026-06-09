@@ -67,7 +67,7 @@ Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到
 {
   "addr": "127.0.0.1:29175",
   "system_id": "mysmpp-dev",
-  "password": "mysmpp-smpp-29175",
+  "password": "smpppw1",
   "system_type": "gateway",
   "max_sessions": 128,
   "max_sessions_per_system_id": 4,
@@ -143,7 +143,7 @@ workers * per_worker_concurrency
 [
   {
     "system_id": "dev-esme",
-    "password": "mysmpp-esme-29175"
+    "password": "esmepw1"
   }
 ]
 ```
@@ -399,7 +399,7 @@ curl -X POST http://127.0.0.1:19087/v1/messages \
   -d '{"from":"10690000","to":"13800138000","text":"hello"}'
 ```
 
-如果 `clients` 为空，开发模式下允许不带 token。
+如果 `clients` 为空，`/v1/messages` 会退回到 admin Basic Auth，而不是允许匿名提交或查询。
 
 ## trusted_proxies
 

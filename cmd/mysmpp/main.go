@@ -125,6 +125,10 @@ func main() {
 		stop()
 	}
 
+	if err := dispatcher.Close(); err != nil {
+		logger.Warn("dispatcher shutdown failed", "err", err)
+	}
+
 	timeout := 10 * time.Second
 	if cfg.Server.ShutdownTimeout != "" {
 		if parsed, err := time.ParseDuration(cfg.Server.ShutdownTimeout); err == nil {

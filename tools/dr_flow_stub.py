@@ -13,6 +13,7 @@ Only Python standard library is used.
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import json
 import socket
@@ -252,6 +253,9 @@ def run_http_submit(args: argparse.Namespace) -> None:
         headers["X-Client-ID"] = args.client_id
     if args.token:
         headers["X-Token"] = args.token
+    if args.admin_user or args.admin_password:
+        raw = f"{args.admin_user}:{args.admin_password}".encode("utf-8")
+        headers["Authorization"] = "Basic " + base64.b64encode(raw).decode("ascii")
     submitted = []
     for i in range(args.count):
         client_msg_id = f"{args.client_msg_prefix}-{int(time.time())}-{i + 1}" if args.client_msg_prefix else ""
@@ -351,6 +355,8 @@ def main() -> None:
     h.add_argument("--gateway-messages-url", required=True, help="e.g. http://GW:19087/v1/messages")
     h.add_argument("--client-id", default="")
     h.add_argument("--token", default="")
+    h.add_argument("--admin-user", default="")
+    h.add_argument("--admin-password", default="")
     h.add_argument("--src", default="10690000")
     h.add_argument("--dst", default="13800138000")
     h.add_argument("--text", default="hello http dr")
@@ -365,7 +371,7 @@ def main() -> None:
     s.add_argument("--host", required=True)
     s.add_argument("--port", type=int, default=29175)
     s.add_argument("--system-id", default="dev-esme")
-    s.add_argument("--password", default="mysmpp-esme-29175")
+    s.add_argument("--password", default="esmepw1")
     s.add_argument("--src", default="10690000")
     s.add_argument("--dst", default="13800138000")
     s.add_argument("--text", default="hello smpp dr")
