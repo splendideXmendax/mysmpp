@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -17,11 +18,12 @@ type connection struct {
 	id       int
 	cfg      Config
 	win      *window
-	out      chan smpp.PDU
 	closed   chan struct{}
 	closeMu  sync.Once
 	connMu   sync.Mutex
 	conn     net.Conn
+	outMu    sync.RWMutex
+	out      chan smpp.PDU
 	onDLR    func(DLR)
 	seq      atomic.Uint32
 	bound    atomic.Bool
@@ -38,7 +40,6 @@ func newConnection(id int, cfg Config, onDLR func(DLR)) *connection {
 		id:     id,
 		cfg:    cfg,
 		win:    newWindow(cfg.SMPP.WindowSize),
-		out:    make(chan smpp.PDU, 128),
 		closed: make(chan struct{}),
 		onDLR:  onDLR,
 	}
@@ -117,10 +118,18 @@ func (c *connection) connectAndServe(ctx context.Context) error {
 	c.state.Store("bound")
 	c.lastIn.Store(time.Now().UnixNano())
 
+	attemptDone := make(chan struct{})
+	out := make(chan smpp.PDU, 128)
+	c.setOut(out)
+	defer func() {
+		close(attemptDone)
+		c.clearOut(out)
+	}()
+
 	errCh := make(chan error, 2)
-	go c.writeLoop(conn, errCh)
-	go c.readLoop(conn, errCh)
-	go c.enquireLoop(ctx)
+	go c.writeLoop(conn, out, attemptDone, errCh)
+	go c.readLoop(conn, attemptDone, errCh)
+	go c.enquireLoop(ctx, attemptDone)
 
 	select {
 	case err := <-errCh:
@@ -157,9 +166,6 @@ func (c *connection) bind(conn net.Conn) error {
 }
 
 func bindBody(systemID, password, systemType string) []byte {
-	if systemType == "" {
-		systemType = "gateway"
-	}
 	body := []byte{}
 	body = append(body, smpp.CString(systemID)...)
 	body = append(body, smpp.CString(password)...)
@@ -169,21 +175,23 @@ func bindBody(systemID, password, systemType string) []byte {
 	return body
 }
 
-func (c *connection) writeLoop(conn net.Conn, errCh chan<- error) {
+func (c *connection) writeLoop(conn net.Conn, out <-chan smpp.PDU, done <-chan struct{}, errCh chan<- error) {
 	for {
 		select {
-		case p := <-c.out:
+		case p := <-out:
 			if err := smpp.WritePDU(conn, p); err != nil {
 				errCh <- err
 				return
 			}
+		case <-done:
+			return
 		case <-c.closed:
 			return
 		}
 	}
 }
 
-func (c *connection) readLoop(conn net.Conn, errCh chan<- error) {
+func (c *connection) readLoop(conn net.Conn, done <-chan struct{}, errCh chan<- error) {
 	for {
 		pdu, err := smpp.ReadPDU(conn)
 		if err != nil {
@@ -201,7 +209,13 @@ func (c *connection) readLoop(conn net.Conn, errCh chan<- error) {
 		case smpp.CommandDeliverSM:
 			c.dlrCount.Add(1)
 			c.send(smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID, Body: smpp.CString("")})
-			if dlr, ok := ParseDeliverSM(pdu.Body, c.cfg.SMPP.DLRIDSource, c.cfg.SMPP.MessageIDDLRFormat); ok && c.onDLR != nil {
+			dlr, ok, isReceipt := ParseDeliverSM(pdu.Body, c.cfg.SMPP.DLRIDSource, c.cfg.SMPP.MessageIDDLRFormat)
+			if !isReceipt {
+				slog.Warn("smpp upstream deliver_sm MO ignored", "provider", c.cfg.Name, "connection", c.id)
+				c.setError(errors.New("smpp upstream deliver_sm MO ignored"))
+				continue
+			}
+			if ok && c.onDLR != nil {
 				c.onDLR(dlr)
 			}
 		case smpp.CommandEnquireLink:
@@ -214,10 +228,15 @@ func (c *connection) readLoop(conn net.Conn, errCh chan<- error) {
 		default:
 			c.send(smpp.PDU{CommandID: smpp.CommandGenericNack, Status: smpp.StatusInvalidCmd, SequenceID: pdu.SequenceID})
 		}
+		select {
+		case <-done:
+			return
+		default:
+		}
 	}
 }
 
-func (c *connection) enquireLoop(ctx context.Context) {
+func (c *connection) enquireLoop(ctx context.Context, done <-chan struct{}) {
 	period, _ := time.ParseDuration(c.cfg.SMPP.EnquirePeriod)
 	if period <= 0 {
 		return
@@ -240,6 +259,8 @@ func (c *connection) enquireLoop(ctx context.Context) {
 			c.send(smpp.PDU{CommandID: smpp.CommandEnquireLink, Status: smpp.StatusOK, SequenceID: c.nextSeq()})
 		case <-ctx.Done():
 			return
+		case <-done:
+			return
 		case <-c.closed:
 			return
 		}
@@ -255,7 +276,12 @@ func (c *connection) submit(ctx context.Context, body []byte) (string, error) {
 	}
 	seq := c.nextSeq()
 	waiter := c.win.register(seq)
-	c.send(smpp.PDU{CommandID: smpp.CommandSubmitSM, Status: smpp.StatusOK, SequenceID: seq, Body: body})
+	if !c.send(smpp.PDU{CommandID: smpp.CommandSubmitSM, Status: smpp.StatusOK, SequenceID: seq, Body: body}) {
+		err := errors.New("smpp upstream connection not ready")
+		c.win.fail(seq, err)
+		c.errCount.Add(1)
+		return "", err
+	}
 	timeout := responseTimeout(c.cfg)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -298,11 +324,33 @@ func permanentStatus(status uint32) bool {
 	}
 }
 
-func (c *connection) send(p smpp.PDU) {
-	select {
-	case c.out <- p:
-	case <-c.closed:
+func (c *connection) send(p smpp.PDU) bool {
+	c.outMu.RLock()
+	out := c.out
+	c.outMu.RUnlock()
+	if out == nil {
+		return false
 	}
+	select {
+	case out <- p:
+		return true
+	case <-c.closed:
+		return false
+	}
+}
+
+func (c *connection) setOut(out chan smpp.PDU) {
+	c.outMu.Lock()
+	c.out = out
+	c.outMu.Unlock()
+}
+
+func (c *connection) clearOut(out chan smpp.PDU) {
+	c.outMu.Lock()
+	if c.out == out {
+		c.out = nil
+	}
+	c.outMu.Unlock()
 }
 
 func (c *connection) nextSeq() uint32 {

@@ -16,12 +16,14 @@ func TestSMPPProviderSendAndDLR(t *testing.T) {
 	defer cancel()
 
 	submits := make(chan smpp.SubmitSM, 1)
+	bindOK := make(chan struct{}, 1)
 	upstream := smpp.NewServer(config.SMPPConfig{
 		Addr:          "127.0.0.1:0",
 		SystemID:      "smsc",
 		EnquirePeriod: "30s",
 	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		func(systemID, password string) bool {
+			bindOK <- struct{}{}
 			return systemID == "acct" && password == "secret88"
 		},
 		func(session *smpp.Session, submit smpp.SubmitSM) {
@@ -92,6 +94,11 @@ func TestSMPPProviderSendAndDLR(t *testing.T) {
 		dlrs <- dlr
 	})
 	waitProviderBound(t, provider)
+	select {
+	case <-bindOK:
+	default:
+		t.Fatal("upstream auth was not called")
+	}
 
 	id, err := provider.Send(OutboundMessage{
 		Context:            ctx,

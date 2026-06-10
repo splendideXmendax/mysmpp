@@ -27,10 +27,13 @@ var (
 	}
 )
 
-func ParseDeliverSM(body []byte, idSource, idFormat string) (DLR, bool) {
+func ParseDeliverSM(body []byte, idSource, idFormat string) (DLR, bool, bool) {
 	parsed, tlvs, ok := parseDeliverBody(body)
 	if !ok {
-		return DLR{}, false
+		return DLR{}, false, false
+	}
+	if parsed.esmClass&0x04 == 0 {
+		return DLR{}, false, false
 	}
 	text := parsed.text
 	textID := firstSubmatch(receiptIDRe, text)
@@ -50,7 +53,7 @@ func ParseDeliverSM(body []byte, idSource, idFormat string) (DLR, bool) {
 		}
 	}
 	if id == "" {
-		return DLR{}, false
+		return DLR{}, false, true
 	}
 
 	state := strings.ToUpper(firstSubmatch(receiptStatRe, text))
@@ -67,7 +70,7 @@ func ParseDeliverSM(body []byte, idSource, idFormat string) (DLR, bool) {
 	if doneAt.IsZero() {
 		doneAt = time.Now().UTC()
 	}
-	return DLR{ProviderID: NormalizeID(id, idFormat), State: state, ErrorCode: errCode, DoneAt: doneAt}, true
+	return DLR{ProviderID: NormalizeID(id, idFormat), State: state, ErrorCode: errCode, DoneAt: doneAt}, true, true
 }
 
 type deliverBody struct {
