@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -179,6 +180,76 @@ func TestValidateRejectsUnknownStorageDriver(t *testing.T) {
 	cfg.Storage.Driver = "sqlite"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected unknown storage driver to fail")
+	}
+}
+
+func TestSMPPProviderConfigDefaultsAndValidation(t *testing.T) {
+	payload := []byte(`{
+		"server":{"http_addr":"127.0.0.1:19087","shutdown_timeout":"10s"},
+		"smpp":{"addr":"127.0.0.1:29175","system_id":"mysmpp","password":"smpppw1","system_type":"gateway"},
+		"dispatcher":{"pending_ttl":"48h"},
+		"providers":[{
+			"name":"smsc-a",
+			"protocol":"smpp",
+			"endpoint":"127.0.0.1:2775",
+			"system_id":"acct",
+			"password":"secret88",
+			"enabled":true,
+			"smpp":{}
+		}],
+		"routes":[{"name":"default","prefix":[],"provider":"smsc-a","priority":1}],
+		"admin":{"username":"admin","password":"secret"}
+	}`)
+	var cfg Config
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected smpp provider config to validate: %v", err)
+	}
+	smppCfg := cfg.Providers[0].SMPP
+	if smppCfg.BindMode != "transceiver" ||
+		smppCfg.SourceTON != -1 ||
+		smppCfg.SourceNPI != -1 ||
+		smppCfg.DestTON != 1 ||
+		smppCfg.DestNPI != 1 ||
+		smppCfg.RegisteredDelivery != -1 ||
+		smppCfg.GSM7Packing != "unpacked" ||
+		smppCfg.LongMessage != "udh" {
+		t.Fatalf("unexpected smpp provider defaults: %+v", smppCfg)
+	}
+}
+
+func TestValidateRejectsInvalidSMPPProvider(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Providers = []ProviderConfig{{
+		Name:     "smsc-a",
+		Protocol: "smpp",
+		Endpoint: "127.0.0.1:2775",
+		SystemID: "acct",
+		Password: "too-long-password",
+		Enabled:  true,
+		SMPP:     &SMPPClientConfig{BindMode: "transceiver", Binds: 1, WindowSize: 1, EnquirePeriod: "30s", ResponseTimeoutMS: 5000, ReconnectMin: "1s", ReconnectMax: "60s", SourceTON: -1, SourceNPI: -1, DestTON: 1, DestNPI: 1, RegisteredDelivery: -1, GSM7Packing: "unpacked", LongMessage: "udh", MessageIDRespFormat: "auto", MessageIDDLRFormat: "auto", DLRIDSource: "auto"},
+	}}
+	cfg.Routes = []RouteConfig{{Name: "default", Provider: "smsc-a"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected overlong smpp provider password to fail")
+	}
+
+	cfg = validConfigForTest()
+	cfg.Providers = []ProviderConfig{{
+		Name:     "http-a",
+		Protocol: "http",
+		Endpoint: "https://example.com/send",
+		Rule:     "rule-a",
+		Enabled:  true,
+		SMPP:     &SMPPClientConfig{},
+	}}
+	cfg.Outbound = []HTTPRuleConfig{{Name: "rule-a", Fields: map[string]string{"mobile": "to", "msg": "text"}}}
+	cfg.Routes = []RouteConfig{{Name: "default", Provider: "http-a"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected http provider with smpp section to fail")
 	}
 }
 

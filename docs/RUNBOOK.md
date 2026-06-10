@@ -33,6 +33,13 @@ curl http://127.0.0.1:19087/healthz
 4. 检查 `outbound.response.id_path` 提取出的 provider_id 是否和 DLR `message_id` 一致。
 5. 检查 `pending_ttl` 是否短于 DLR 延迟。
 
+如果上游是 SMPP provider：
+
+1. 检查上游是否真的下发 `deliver_sm` DLR。
+2. 检查 `providers[].smpp.message_id_resp_format` 和 `message_id_dlr_format` 是否匹配上游进制。
+3. 检查 `providers[].smpp.dlr_id_source`，必要时固定为 `tlv` 或 `text`。
+4. 中继场景建议 `dispatcher.pending_ttl=48h`。
+
 ### HTTP 提交返回 401
 
 `clients` 非空时使用：
@@ -49,10 +56,42 @@ curl http://127.0.0.1:19087/healthz
 
 ### SMPP bind failed
 
+下游 ESME bind mysmpp 失败：
+
 1. `--system-id` 必须等于 `esmes[].system_id`。
 2. `--password` 必须等于 `esmes[].password`。
 3. SMPP password 最多 8 字节。
 4. 检查 `max_sessions_per_system_id` 是否已满。
+
+上游 SMPP provider bind SMSC 失败：
+
+1. `providers[].endpoint` 必须是上游 `host:port`。
+2. `providers[].system_id` / `password` 必须等于上游分配值。
+3. `providers[].password` 最多 8 字节，`providers[].smpp.system_type` 最多 12 字节。
+4. 当前只支持 `providers[].smpp.bind_mode=transceiver`。
+
+### SMPP 上游 submit 超时
+
+1. 检查上游是否已 bind 成功。
+2. 检查 `providers[].smpp.window_size` 是否过小。
+3. 检查 `providers[].smpp.response_timeout_ms` 是否小于上游 RTT。
+4. 检查上游是否返回 `submit_sm_resp`。
+5. 默认 `retry_on_timeout=false`，超时会按永久失败处理，避免重复下发。
+
+### SMPP 上游 DLR 找不到 pending
+
+1. 查消息里的 `ProviderID`。
+2. 对比上游 DLR receipt text 的 `id:` 或 `receipted_message_id` TLV。
+3. 如果 submit_sm_resp 是 `0000004F`，DLR 是 `79`，配置：
+
+```json
+{
+  "message_id_resp_format": "hex",
+  "message_id_dlr_format": "dec"
+}
+```
+
+4. 如果上游同时给 TLV 和文本 ID，必要时设置 `dlr_id_source` 为 `tlv` 或 `text`。
 
 ## 重启顺序
 

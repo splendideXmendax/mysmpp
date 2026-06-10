@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -104,12 +105,60 @@ type ProviderConfig struct {
 	Enabled       bool              `json:"enabled"`
 	HTTPTimeoutMS int               `json:"http_timeout_ms"`
 	RateLimit     ProviderRateLimit `json:"rate_limit"`
+	SMPP          *SMPPClientConfig `json:"smpp,omitempty"`
 }
 
 type ProviderRateLimit struct {
 	TPS       int `json:"tps"`
 	Burst     int `json:"burst"`
 	TimeoutMS int `json:"timeout_ms"`
+}
+
+type SMPPClientConfig struct {
+	BindMode            string `json:"bind_mode"`
+	SystemType          string `json:"system_type"`
+	Binds               int    `json:"binds"`
+	WindowSize          int    `json:"window_size"`
+	EnquirePeriod       string `json:"enquire_period"`
+	ResponseTimeoutMS   int    `json:"response_timeout_ms"`
+	ReconnectMin        string `json:"reconnect_min"`
+	ReconnectMax        string `json:"reconnect_max"`
+	SourceTON           int    `json:"source_ton"`
+	SourceNPI           int    `json:"source_npi"`
+	DestTON             int    `json:"dest_ton"`
+	DestNPI             int    `json:"dest_npi"`
+	ServiceType         string `json:"service_type"`
+	ValidityPeriod      string `json:"validity_period"`
+	RegisteredDelivery  int    `json:"registered_delivery"`
+	GSM7Packing         string `json:"gsm7_packing"`
+	LongMessage         string `json:"long_message"`
+	MessageIDRespFormat string `json:"message_id_resp_format"`
+	MessageIDDLRFormat  string `json:"message_id_dlr_format"`
+	DLRIDSource         string `json:"dlr_id_source"`
+	RetryOnTimeout      bool   `json:"retry_on_timeout"`
+	TLS                 bool   `json:"tls"`
+}
+
+func DefaultSMPPClientConfig() SMPPClientConfig {
+	return SMPPClientConfig{
+		BindMode:            "transceiver",
+		Binds:               1,
+		WindowSize:          16,
+		EnquirePeriod:       "30s",
+		ResponseTimeoutMS:   5000,
+		ReconnectMin:        "1s",
+		ReconnectMax:        "60s",
+		SourceTON:           -1,
+		SourceNPI:           -1,
+		DestTON:             1,
+		DestNPI:             1,
+		RegisteredDelivery:  -1,
+		GSM7Packing:         "unpacked",
+		LongMessage:         "udh",
+		MessageIDRespFormat: "auto",
+		MessageIDDLRFormat:  "auto",
+		DLRIDSource:         "auto",
+	}
 }
 
 type HTTPRuleConfig struct {
@@ -228,6 +277,60 @@ func (c *Config) Normalize() {
 			c.Outbound[i].ContentType = "application/x-www-form-urlencoded"
 		}
 	}
+	for i := range c.Providers {
+		if c.Providers[i].SMPP != nil {
+			c.Providers[i].SMPP.Normalize()
+		}
+	}
+}
+
+func (c *SMPPClientConfig) Normalize() {
+	if c.BindMode == "" {
+		c.BindMode = "transceiver"
+	}
+	if c.Binds == 0 {
+		c.Binds = 1
+	}
+	if c.WindowSize == 0 {
+		c.WindowSize = 16
+	}
+	if c.EnquirePeriod == "" {
+		c.EnquirePeriod = "30s"
+	}
+	if c.ResponseTimeoutMS == 0 {
+		c.ResponseTimeoutMS = 5000
+	}
+	if c.ReconnectMin == "" {
+		c.ReconnectMin = "1s"
+	}
+	if c.ReconnectMax == "" {
+		c.ReconnectMax = "60s"
+	}
+	if c.GSM7Packing == "" {
+		c.GSM7Packing = "unpacked"
+	}
+	if c.LongMessage == "" {
+		c.LongMessage = "udh"
+	}
+	if c.MessageIDRespFormat == "" {
+		c.MessageIDRespFormat = "auto"
+	}
+	if c.MessageIDDLRFormat == "" {
+		c.MessageIDDLRFormat = "auto"
+	}
+	if c.DLRIDSource == "" {
+		c.DLRIDSource = "auto"
+	}
+}
+
+func (c *SMPPClientConfig) UnmarshalJSON(data []byte) error {
+	type alias SMPPClientConfig
+	defaults := alias(DefaultSMPPClientConfig())
+	if err := json.Unmarshal(data, &defaults); err != nil {
+		return err
+	}
+	*c = SMPPClientConfig(defaults)
+	return nil
 }
 
 func (c Config) Validate() error {
@@ -304,6 +407,9 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 		if !allowAutoGenerate && IsAutoGenerate(provider.Password) {
 			return fmt.Errorf("auto-generate placeholders are only allowed during startup bootstrap")
+		}
+		if err := validateProviderProtocol(provider, allowAutoGenerate); err != nil {
+			return err
 		}
 	}
 	if len(c.Providers) > 0 && len(enabledProviders) == 0 {
@@ -430,6 +536,133 @@ func validateSMPPString(name, value string, max int, allowAutoGenerate bool) err
 		return fmt.Errorf("%s must be at most %d bytes", name, max)
 	}
 	return nil
+}
+
+func validateProviderProtocol(provider ProviderConfig, allowAutoGenerate bool) error {
+	protocol := strings.ToLower(provider.Protocol)
+	switch protocol {
+	case "", "mock":
+		if provider.SMPP != nil {
+			return fmt.Errorf("provider %q smpp config is only valid when protocol is smpp", provider.Name)
+		}
+	case "http", "https":
+		if provider.SMPP != nil {
+			return fmt.Errorf("provider %q smpp config is only valid when protocol is smpp", provider.Name)
+		}
+		if provider.Rule == "" {
+			return fmt.Errorf("provider %q rule is required for http provider", provider.Name)
+		}
+	case "smpp":
+		if provider.SMPP == nil {
+			return fmt.Errorf("provider %q smpp config is required", provider.Name)
+		}
+		if provider.Endpoint == "" {
+			return fmt.Errorf("provider %q endpoint is required for smpp provider", provider.Name)
+		}
+		host, port, err := net.SplitHostPort(provider.Endpoint)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("provider %q endpoint must be host:port", provider.Name)
+		}
+		if provider.Rule != "" {
+			return fmt.Errorf("provider %q rule must be empty for smpp provider", provider.Name)
+		}
+		if provider.SystemID == "" {
+			return fmt.Errorf("provider %q system_id is required for smpp provider", provider.Name)
+		}
+		if provider.Password == "" {
+			return fmt.Errorf("provider %q password is required for smpp provider", provider.Name)
+		}
+		if isPlaceholder(provider.Password) {
+			return fmt.Errorf("provider %q password must be changed before deploy", provider.Name)
+		}
+		if err := validateSMPPString("provider.system_id", provider.SystemID, SMPPMaxSystemID, allowAutoGenerate); err != nil {
+			return fmt.Errorf("provider %q %w", provider.Name, err)
+		}
+		if err := validateSMPPString("provider.password", provider.Password, SMPPMaxPassword, allowAutoGenerate); err != nil {
+			return fmt.Errorf("provider %q %w", provider.Name, err)
+		}
+		if err := validateSMPPString("provider.smpp.system_type", provider.SMPP.SystemType, SMPPMaxSystemType, allowAutoGenerate); err != nil {
+			return fmt.Errorf("provider %q %w", provider.Name, err)
+		}
+		if err := validateSMPPClientConfig(provider.Name, *provider.SMPP); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("provider %q unsupported protocol %q", provider.Name, provider.Protocol)
+	}
+	return nil
+}
+
+func validateSMPPClientConfig(providerName string, cfg SMPPClientConfig) error {
+	if cfg.BindMode != "transceiver" && cfg.BindMode != "tx_rx" {
+		return fmt.Errorf("provider %q smpp.bind_mode must be transceiver or tx_rx", providerName)
+	}
+	if cfg.BindMode == "tx_rx" {
+		return fmt.Errorf("provider %q smpp.bind_mode tx_rx is not implemented yet", providerName)
+	}
+	if cfg.Binds < 1 {
+		return fmt.Errorf("provider %q smpp.binds must be >= 1", providerName)
+	}
+	if cfg.WindowSize < 1 {
+		return fmt.Errorf("provider %q smpp.window_size must be >= 1", providerName)
+	}
+	if cfg.ResponseTimeoutMS < 1 {
+		return fmt.Errorf("provider %q smpp.response_timeout_ms must be >= 1", providerName)
+	}
+	for field, value := range map[string]string{
+		"enquire_period": cfg.EnquirePeriod,
+		"reconnect_min":  cfg.ReconnectMin,
+		"reconnect_max":  cfg.ReconnectMax,
+	} {
+		if _, err := time.ParseDuration(value); err != nil {
+			return fmt.Errorf("provider %q smpp.%s is invalid: %w", providerName, field, err)
+		}
+	}
+	if !validTONNPI(cfg.SourceTON, true) {
+		return fmt.Errorf("provider %q smpp.source_ton must be -1 or 0..6", providerName)
+	}
+	if !validTONNPI(cfg.SourceNPI, true) {
+		return fmt.Errorf("provider %q smpp.source_npi must be -1 or 0..6", providerName)
+	}
+	if !validTONNPI(cfg.DestTON, false) {
+		return fmt.Errorf("provider %q smpp.dest_ton must be 0..6", providerName)
+	}
+	if !validTONNPI(cfg.DestNPI, false) {
+		return fmt.Errorf("provider %q smpp.dest_npi must be 0..6", providerName)
+	}
+	if cfg.RegisteredDelivery < -1 || cfg.RegisteredDelivery > 1 {
+		return fmt.Errorf("provider %q smpp.registered_delivery must be -1, 0, or 1", providerName)
+	}
+	if cfg.GSM7Packing != "unpacked" && cfg.GSM7Packing != "packed" {
+		return fmt.Errorf("provider %q smpp.gsm7_packing must be unpacked or packed", providerName)
+	}
+	if cfg.LongMessage != "udh" && cfg.LongMessage != "payload" && cfg.LongMessage != "sar" {
+		return fmt.Errorf("provider %q smpp.long_message must be udh, payload, or sar", providerName)
+	}
+	if !validIDFormat(cfg.MessageIDRespFormat) {
+		return fmt.Errorf("provider %q smpp.message_id_resp_format must be auto, dec, or hex", providerName)
+	}
+	if !validIDFormat(cfg.MessageIDDLRFormat) {
+		return fmt.Errorf("provider %q smpp.message_id_dlr_format must be auto, dec, or hex", providerName)
+	}
+	if cfg.DLRIDSource != "auto" && cfg.DLRIDSource != "text" && cfg.DLRIDSource != "tlv" {
+		return fmt.Errorf("provider %q smpp.dlr_id_source must be auto, text, or tlv", providerName)
+	}
+	if cfg.TLS {
+		return fmt.Errorf("provider %q smpp.tls is not implemented yet", providerName)
+	}
+	return nil
+}
+
+func validTONNPI(value int, allowAuto bool) bool {
+	if allowAuto && value == -1 {
+		return true
+	}
+	return value >= 0 && value <= 6
+}
+
+func validIDFormat(value string) bool {
+	return value == "auto" || value == "dec" || value == "hex"
 }
 
 func isPlaceholder(value string) bool {

@@ -52,6 +52,10 @@ DLR 映射表。上游回调只知道 provider_id，mysmpp 用 pending 找回 ga
 | `registered_delivery` | 是否需要回推 DLR |
 | `expires_at` | 过期时间 |
 
+SMPP 上游 provider 的 `provider_id` 来自 `submit_sm_resp` 的 `message_id`，会按 `providers[].smpp.message_id_resp_format` 归一化后保存。上游 `deliver_sm` DLR 进来时，也会按 `message_id_dlr_format` 归一化后用这个字段查 pending。
+
+中继场景建议把 `dispatcher.pending_ttl` 设置为 `48h` 或更长，避免 SMSC 晚到 DLR 找不到映射。
+
 ## idempotency
 
 HTTP client 幂等记录。

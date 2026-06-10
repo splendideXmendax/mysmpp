@@ -221,21 +221,104 @@ workers * per_worker_concurrency
 | 字段 | 说明 |
 |---|---|
 | `name` | provider 唯一名称 |
-| `protocol` | `mock`、`http` 或 `https` |
-| `endpoint` | HTTP 上游地址 |
-| `rule` | 引用 `outbound[].name` |
-| `system_id` / `password` | 预留给需要账号密码的上游 |
+| `protocol` | `mock`、`http`、`https` 或 `smpp` |
+| `endpoint` | HTTP 上游 URL，或 SMPP 上游 `host:port` |
+| `rule` | HTTP 上游引用 `outbound[].name`；SMPP 上游必须为空 |
+| `system_id` / `password` | SMPP 上游 bind 账号和密码；SMPP 密码最多 8 字节 |
 | `enabled` | 是否启用 |
 | `http_timeout_ms` | 真实 HTTP 请求超时，默认 3000ms |
 | `rate_limit.tps` | 每秒令牌数；小于等于 0 表示不启用 provider 限速 |
 | `rate_limit.burst` | 突发令牌桶大小；默认等于 tps |
 | `rate_limit.timeout_ms` | 等待令牌的最长时间，默认 2000ms |
+| `smpp` | SMPP 上游参数，仅 `protocol=smpp` 时允许 |
 
 注意:
 
 - `http_timeout_ms` 是上游 HTTP client 超时。
 - `rate_limit.timeout_ms` 是等令牌的超时。
 - 两者不是同一个东西。
+
+### SMPP 上游示例
+
+`protocol=smpp` 时，mysmpp 会作为 ESME 主动 bind 上游 SMSC，并把 HTTP/SMPP 下游提交转成 `submit_sm` 发给上游。
+
+```json
+{
+  "providers": [
+    {
+      "name": "smsc-a",
+      "protocol": "smpp",
+      "endpoint": "smsc.example.com:2775",
+      "system_id": "acct",
+      "password": "secret88",
+      "enabled": true,
+      "rate_limit": {
+        "tps": 100,
+        "burst": 200,
+        "timeout_ms": 2000
+      },
+      "smpp": {
+        "bind_mode": "transceiver",
+        "system_type": "",
+        "binds": 1,
+        "window_size": 16,
+        "enquire_period": "30s",
+        "response_timeout_ms": 5000,
+        "reconnect_min": "1s",
+        "reconnect_max": "60s",
+        "source_ton": -1,
+        "source_npi": -1,
+        "dest_ton": 1,
+        "dest_npi": 1,
+        "service_type": "",
+        "validity_period": "",
+        "registered_delivery": -1,
+        "gsm7_packing": "unpacked",
+        "long_message": "udh",
+        "message_id_resp_format": "auto",
+        "message_id_dlr_format": "auto",
+        "dlr_id_source": "auto",
+        "retry_on_timeout": false,
+        "tls": false
+      }
+    }
+  ],
+  "routes": [
+    {
+      "name": "default",
+      "prefix": [],
+      "provider": "smsc-a",
+      "priority": 1
+    }
+  ]
+}
+```
+
+SMPP 字段:
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `bind_mode` | `transceiver` | 当前支持 `transceiver`；`tx_rx` 预留但会被校验拒绝 |
+| `system_type` | 空 | bind PDU 的 system_type，最多 12 字节 |
+| `binds` | `1` | 到同一上游的 TCP bind 数 |
+| `window_size` | `16` | 单连接在途 submit_sm 窗口 |
+| `enquire_period` | `30s` | 主动 `enquire_link` 周期 |
+| `response_timeout_ms` | `5000` | 等待 `submit_sm_resp` 的超时 |
+| `reconnect_min` / `reconnect_max` | `1s` / `60s` | 断线重连退避区间 |
+| `source_ton` / `source_npi` | `-1` / `-1` | `-1` 表示按源地址自动判断；可固定为 0..6 |
+| `dest_ton` / `dest_npi` | `1` / `1` | 目的地址 TON/NPI |
+| `service_type` | 空 | submit_sm service_type |
+| `validity_period` | 空 | submit_sm validity_period |
+| `registered_delivery` | `-1` | `-1` 透传下游；`0` 强制关闭；`1` 强制请求 DLR |
+| `gsm7_packing` | `unpacked` | `unpacked` 或 `packed` |
+| `long_message` | `udh` | `udh`、`payload` 或 `sar` |
+| `message_id_resp_format` | `auto` | `submit_sm_resp` message_id 格式:`auto`、`dec`、`hex` |
+| `message_id_dlr_format` | `auto` | DLR receipt message_id 格式:`auto`、`dec`、`hex` |
+| `dlr_id_source` | `auto` | DLR ID 来源:`auto`、`tlv`、`text` |
+| `retry_on_timeout` | `false` | `submit_sm_resp` 超时时是否允许重试；开启可能导致重复下发 |
+| `tls` | `false` | 预留字段，当前未实现，配置为 `true` 会被拒绝 |
+
+建议 SMPP 中继部署把 `dispatcher.pending_ttl` 调到 `48h`，避免上游 DLR 晚到时 pending 映射已过期。
 
 ## outbound
 

@@ -12,6 +12,7 @@
 - HTTP API: `/v1/messages` 提交和分页查询，支持客户端 token 鉴权和 IP 白名单。
 - 路由: 按号码前缀和 priority 选择上游 provider。
 - HTTP 上游规则: 支持 JSON、form、query、header 渲染，支持响应 `id_path` / `id_regex` 提取 provider_id。
+- SMPP 上游 Provider: `protocol=smpp` 时 mysmpp 作为 ESME bind 上游 SMSC，支持 `submit_sm`、`submit_sm_resp` 对账和上游 `deliver_sm` DLR 解析。
 - HTTP 入站规则: 支持 provider DLR 回调、普通入站消息和自定义字段映射。
 - 存储: memory、file、Postgres 三种 driver。Postgres outbox 使用 `FOR UPDATE SKIP LOCKED` 并发 claim。
 - Dispatcher: 可配置 worker、单 worker 并发、claim 数量、轮询间隔、pending TTL、最大重试次数。
@@ -20,11 +21,12 @@
 
 ## 当前边界
 
-- 长短信目前只在消息模型中拆分为 `segments`，HTTP 上游发送路径仍发送完整原文。真实逐段发送还在后续路线里。
+- 长短信在 SMPP 上游可按 UDH/payload/SAR 策略发送；HTTP 上游发送路径仍发送完整原文。
 - 风控计数是进程内 map，多实例部署时限额会放大。
 - gateway_id 是进程内递增计数，单进程内不会碰撞；生产多实例或重启后强唯一建议后续改为存储层分配。
 - pending DLR 清理是惰性清理，没有独立后台归档任务。
 - HTTP provider 的 DLR 通过 `inbound` 回调规则进入，`HTTPProvider.OnDLR` 是有意 no-op。
+- SMPP 上游 Provider 当前支持 transceiver bind；`tx_rx` 分离 bind、SMPP over TLS、MO 路由到下游和分段 DLR 落库聚合仍是后续项。
 - 暴露到公网时请放在 TLS 反向代理后面，不要直接裸奔 HTTP 管理后台。
 
 ## 目录结构
@@ -168,6 +170,8 @@ API 参考见 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)。
 安全加固清单见 [docs/SECURITY_HARDENING.md](docs/SECURITY_HARDENING.md)。
 
 SMPP 支持矩阵见 [docs/SMPP_SUPPORT_MATRIX.md](docs/SMPP_SUPPORT_MATRIX.md)。
+
+SMPP 上游 Provider 与 SMPP-to-SMPP 中继见 [docs/SMPP_UPSTREAM.md](docs/SMPP_UPSTREAM.md)。
 
 数据模型见 [docs/DATA_MODEL.md](docs/DATA_MODEL.md)。
 

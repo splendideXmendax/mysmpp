@@ -289,7 +289,7 @@ Authorization: Bearer YOUR_API_TOKEN
 | 字段 | 含义 | 推荐值 |
 |---|---|---|
 | `name` | 唯一标识,Route 用它引用 | 字母数字下划线 |
-| `protocol` | `http`、`https`、`mock`(测试) | `http` |
+| `protocol` | `http`、`https`、`smpp`、`mock`(测试) | `http` |
 | `endpoint` | 真实供应商 URL | 完整 URL |
 | `rule` | 关联的 outbound 规则名 | 上一步建的 name |
 | `enabled` | 是否启用 | `true` |
@@ -721,11 +721,11 @@ submitted msg_id=g0000000001
 | 字段 | 含义 |
 |---|---|
 | `name` | 通道唯一标识 |
-| `protocol` | `http` / `https` / `mock` |
-| `endpoint` | 上游 URL(`mock` 时可空) |
-| `rule` | 引用 `outbound[].name` |
-| `system_id` | 预留字段。部分上游需要账号时可记录账号名,当前 HTTP provider 不自动使用 |
-| `password` | 预留字段。部分上游需要密码时可记录密钥,当前 HTTP provider 不自动使用 |
+| `protocol` | `http` / `https` / `smpp` / `mock` |
+| `endpoint` | HTTP 上游 URL,或 SMPP 上游 `host:port`。`mock` 时可空 |
+| `rule` | HTTP 上游引用 `outbound[].name`;SMPP 上游必须留空 |
+| `system_id` | SMPP 上游 bind 账号。HTTP provider 不自动使用 |
+| `password` | SMPP 上游 bind 密码,最多 8 字节。HTTP provider 不自动使用 |
 | `enabled` | 禁用某通道设 `false`,路由会跳过 |
 | `http_timeout_ms` | 单次请求超时,默认 3000 |
 | `rate_limit.tps` | 每秒最多发出次数。`0`=不限 |

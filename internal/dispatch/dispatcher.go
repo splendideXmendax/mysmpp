@@ -361,13 +361,22 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err error) {
 	delay := retryDelay(item.Attempt)
 	next := time.Now().UTC().Add(delay)
-	if item.Attempt >= item.MaxAttempts {
+	if item.Attempt >= item.MaxAttempts || isPermanent(err) {
 		next = time.Time{}
 		_ = d.store.UpdateMessageState(ctx, item.GatewayID, "failed", 1)
 	}
 	if ferr := d.store.FailOutbox(ctx, item.ID, err.Error(), next); ferr != nil {
 		d.logger.Warn("fail outbox failed", "outbox_id", item.ID, "err", ferr)
 	}
+}
+
+type permanent interface {
+	Permanent() bool
+}
+
+func isPermanent(err error) bool {
+	var p permanent
+	return errors.As(err, &p) && p.Permanent()
 }
 
 func retryDelay(attempt int) time.Duration {

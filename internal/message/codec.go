@@ -49,6 +49,22 @@ func EncodeText(text string, dataCoding uint8) []byte {
 	}
 }
 
+func EncodeGSM7Unpacked(text string) []byte {
+	out := make([]byte, 0, len(text))
+	for _, r := range text {
+		if code, ok := gsm7DefaultCodes[r]; ok {
+			out = append(out, code)
+			continue
+		}
+		if code, ok := gsm7RuneToExt[r]; ok {
+			out = append(out, 0x1B, code)
+			continue
+		}
+		out = append(out, gsm7DefaultCodes['?'])
+	}
+	return out
+}
+
 var gsm7DefaultRunes = []rune{
 	'@', '£', '$', '¥', 'è', 'é', 'ù', 'ì', 'ò', 'Ç', '\n', 'Ø', 'ø', '\r', 'Å', 'å',
 	'Δ', '_', 'Φ', 'Γ', 'Λ', 'Ω', 'Π', 'Ψ', 'Σ', 'Θ', 'Ξ', 0, 'Æ', 'æ', 'ß', 'É',

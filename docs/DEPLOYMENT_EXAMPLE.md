@@ -386,6 +386,87 @@ curl -sS -X POST http://127.0.0.1:19087/callback/provider-a/dlr \
 - `provider` 必须匹配 pending 记录里的 provider。
 - 否则会返回 403 或 404。
 
+## 八点五、配置真实 SMPP 上游示例
+
+如果上游供应商给的是 SMPP 接入信息，而不是 HTTP API，可以把 provider 配成 `protocol=smpp`。
+
+假设上游给你的参数是：
+
+```text
+Host: smsc.example.com
+Port: 2775
+System ID: acct
+Password: secret88
+Bind mode: transceiver
+Window: 16
+Enquire link: 30s
+```
+
+配置：
+
+```json
+{
+  "dispatcher": {
+    "pending_ttl": "48h"
+  },
+  "providers": [
+    {
+      "name": "smsc-a",
+      "protocol": "smpp",
+      "endpoint": "smsc.example.com:2775",
+      "system_id": "acct",
+      "password": "secret88",
+      "enabled": true,
+      "rate_limit": {
+        "tps": 100,
+        "burst": 200,
+        "timeout_ms": 2000
+      },
+      "smpp": {
+        "bind_mode": "transceiver",
+        "binds": 1,
+        "window_size": 16,
+        "enquire_period": "30s",
+        "response_timeout_ms": 5000,
+        "reconnect_min": "1s",
+        "reconnect_max": "60s",
+        "source_ton": -1,
+        "source_npi": -1,
+        "dest_ton": 1,
+        "dest_npi": 1,
+        "registered_delivery": -1,
+        "gsm7_packing": "unpacked",
+        "long_message": "udh",
+        "message_id_resp_format": "auto",
+        "message_id_dlr_format": "auto",
+        "dlr_id_source": "auto"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "name": "default",
+      "prefix": [],
+      "provider": "smsc-a",
+      "priority": 1
+    }
+  ]
+}
+```
+
+然后继续用第五节 HTTP 提交测试，或第六节 SMPP 下游测试。区别是消息会发到真实 SMPP 上游，而不是 `dev-mock` 或 HTTP provider。
+
+如果 DLR 查不到 pending，优先检查上游 `message_id` 进制。常见组合：
+
+```json
+{
+  "message_id_resp_format": "hex",
+  "message_id_dlr_format": "dec"
+}
+```
+
+完整说明见 [SMPP_UPSTREAM.md](SMPP_UPSTREAM.md)。
+
 ## 九、Postgres 生产部署
 
 安装或准备 Postgres 后创建库和用户:

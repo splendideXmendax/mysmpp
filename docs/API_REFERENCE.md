@@ -15,6 +15,8 @@
 
 自定义 inbound callback 使用各自规则里的 `auth_header` / `auth_token`。
 
+SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `deliver_sm` 进入，并复用 pending 映射更新消息状态。
+
 ## `GET /healthz`
 
 健康检查。
