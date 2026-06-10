@@ -153,6 +153,8 @@ go run ./cmd/testesme -addr 127.0.0.1:29175 -u dev-esme -p '<credentials.txt 中
 
 详细配置见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
 
+部署与配置实战手册见 [docs/DEPLOYMENT_PRACTICAL_GUIDE.md](docs/DEPLOYMENT_PRACTICAL_GUIDE.md)。
+
 完整部署、配置、测试实例见 [docs/DEPLOYMENT_EXAMPLE.md](docs/DEPLOYMENT_EXAMPLE.md)。
 
 Docker 说明见 [docs/DOCKER.md](docs/DOCKER.md) 和 [docs/QUICKSTART_DOCKER.md](docs/QUICKSTART_DOCKER.md)。

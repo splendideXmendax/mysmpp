@@ -489,14 +489,19 @@ ALTER TABLE outbox SET (
 
 ## 十一、简单压测示例
 
-用 `seq + xargs` 跑一个轻量 HTTP 并发测试:
+用 `seq + xargs` 跑一个轻量 HTTP 并发测试。
+
+Docker 默认配置 `clients` 为空时，使用 admin Basic Auth:
 
 ```bash
 seq 1 1000 | xargs -n1 -P100 -I{} curl -sS -o /dev/null -w '%{http_code}\n' \
   -X POST http://127.0.0.1:19087/v1/messages \
+  -u admin:'<credentials.txt 中的 admin.password>' \
   -H 'Content-Type: application/json' \
   -d '{"from":"10690000","to":"13800138000","text":"load test"}'
 ```
+
+如果已配置 `clients`，改用 `X-Client-ID` 和 `X-Token`。
 
 统计健康状态:
 
