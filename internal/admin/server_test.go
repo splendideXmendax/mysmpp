@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,19 @@ import (
 	"testing"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 )
 
 type fakeGateway struct {
 	mu  sync.Mutex
 	cfg config.Config
+}
+
+type fakeStatusGateway struct {
+	*fakeGateway
+	statuses  []smppclient.PoolStatus
+	submitted []dispatch.Envelope
 }
 
 func (g *fakeGateway) Config() config.Config {
@@ -34,6 +43,25 @@ func (g *fakeGateway) UpdateConfig(cfg config.Config) error {
 	g.cfg = cfg
 	g.mu.Unlock()
 	return nil
+}
+
+func (g *fakeStatusGateway) SMPPUpstreamStatuses() []smppclient.PoolStatus {
+	return g.statuses
+}
+
+func (g *fakeStatusGateway) SubmitTestMessage(ctx context.Context, from, to, text string) (dispatch.Receipt, error) {
+	g.submitted = append(g.submitted, dispatch.Envelope{
+		From: from,
+		To:   to,
+		Text: text,
+	})
+	return dispatch.Receipt{
+		GatewayID:  "admin-test-1",
+		ProviderID: "upstream-1",
+		Provider:   "smpp-up",
+		Route:      "default",
+		State:      "submitted",
+	}, nil
 }
 
 func TestAdminLoginAndDashboard(t *testing.T) {
@@ -155,6 +183,69 @@ func TestAdminSectionSavePersistsProviders(t *testing.T) {
 	}
 	if len(persisted.Providers) != 2 || persisted.Providers[1].Name != "mock-b" {
 		t.Fatalf("providers not persisted: %+v", persisted.Providers)
+	}
+}
+
+func TestAdminConnectionsRenderSMPPStatus(t *testing.T) {
+	gateway := &fakeStatusGateway{
+		fakeGateway: newFakeGateway(),
+		statuses: []smppclient.PoolStatus{{
+			Name:     "smpp-up",
+			Endpoint: "127.0.0.1:2775",
+			Connections: []smppclient.ConnectionStatus{{
+				ID:             1,
+				State:          "bound",
+				Bound:          true,
+				InFlight:       2,
+				WindowSize:     16,
+				SubmitOK:       7,
+				SubmitFailed:   1,
+				DeliverSMCount: 3,
+			}},
+		}},
+	}
+	srv := New(gateway, "", nil)
+	defer srv.Close()
+	cookie := loginCookie(t, srv)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/connections", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected connections 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"SMPP upstream connections", "smpp-up", "127.0.0.1:2775", "7 ok", "3"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("connections page missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestAdminConnectionTestSend(t *testing.T) {
+	gateway := &fakeStatusGateway{fakeGateway: newFakeGateway()}
+	srv := New(gateway, "", nil)
+	defer srv.Close()
+	cookie := loginCookie(t, srv)
+	csrf := csrfFromPage(t, srv, cookie, "/admin/connections")
+
+	form := url.Values{
+		"_csrf": {csrf},
+		"from":  {"mysmpp"},
+		"to":    {"13800138000"},
+		"text":  {"admin smoke"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/connections/testsend", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/connections" {
+		t.Fatalf("expected redirect to connections, got %d location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if len(gateway.submitted) != 1 || gateway.submitted[0].To != "13800138000" || gateway.submitted[0].Text != "admin smoke" {
+		t.Fatalf("test submit not called correctly: %+v", gateway.submitted)
 	}
 }
 

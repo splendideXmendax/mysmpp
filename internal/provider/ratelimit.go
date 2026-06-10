@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 )
 
 type RateLimitedProvider struct {
@@ -69,6 +70,14 @@ func (p *RateLimitedProvider) Close() error {
 		return closer.Close()
 	}
 	return nil
+}
+
+func (p *RateLimitedProvider) SMPPStatus() (smppclient.PoolStatus, bool) {
+	reporter, ok := p.inner.(SMPPStatusReporter)
+	if !ok {
+		return smppclient.PoolStatus{}, false
+	}
+	return reporter.SMPPStatus()
 }
 
 func (p *RateLimitedProvider) refill(tps int) {

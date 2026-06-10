@@ -1,0 +1,74 @@
+{{define "content"}}
+<header class="page-header">
+  <div>
+    <h2>SMPP upstream connections</h2>
+    <p class="muted">Runtime status for outbound SMPP providers. Refresh this page to re-read live pool state.</p>
+  </div>
+  <a href="/admin/providers" class="btn">Edit providers</a>
+</header>
+
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+<div class="stats">
+  <div class="stat"><strong>{{len .Statuses}}</strong><span class="muted">SMPP providers</span></div>
+  <div class="stat"><strong>{{.BoundConnections}} / {{.TotalConnections}}</strong><span class="muted">bound connections</span></div>
+</div>
+
+<section class="panel">
+  <h3>Connection status</h3>
+  {{if .Statuses}}
+  <table>
+    <thead>
+      <tr>
+        <th>provider</th>
+        <th>endpoint</th>
+        <th>conn</th>
+        <th>state</th>
+        <th>window</th>
+        <th>last inbound</th>
+        <th>submit</th>
+        <th>DLR</th>
+        <th>last error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Statuses}}
+        {{$provider := .Name}}
+        {{$endpoint := .Endpoint}}
+        {{range .Connections}}
+        <tr>
+          <td class="mono">{{$provider}}</td>
+          <td class="mono">{{$endpoint}}</td>
+          <td>#{{.ID}}</td>
+          <td>{{if .Bound}}<span class="badge ok">bound</span>{{else}}<span class="badge bad">{{.State}}</span>{{end}}</td>
+          <td>{{.InFlight}} / {{.WindowSize}}</td>
+          <td>{{if .LastInbound.IsZero}}<span class="muted">never</span>{{else}}{{.LastInbound}}{{end}}</td>
+          <td><span class="badge ok">{{.SubmitOK}} ok</span> <span class="badge warn">{{.SubmitFailed}} fail</span></td>
+          <td>{{.DeliverSMCount}}</td>
+          <td>{{if .LastError}}<span class="error-text">{{.LastError}}</span>{{else}}<span class="muted">none</span>{{end}}</td>
+        </tr>
+        {{end}}
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">No SMPP upstream provider is running. Add an enabled provider with protocol "smpp".</div>
+  {{end}}
+</section>
+
+<section class="panel">
+  <h3>Test send</h3>
+  {{if .CanSubmit}}
+  <form method="POST" action="/admin/connections/testsend" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <label>from<input name="from" value="mysmpp" maxlength="32" required></label>
+    <label>to<input name="to" value="13800138000" required></label>
+    <label>text<input name="text" value="mysmpp admin test" required></label>
+    <button type="submit" class="btn primary">Send test</button>
+  </form>
+  <p class="muted">The test uses normal routing, dispatcher, provider submit, and DLR mapping. It does not bypass risk or route validation.</p>
+  {{else}}
+  <div class="empty">Test send is unavailable because the admin gateway has no dispatcher.</div>
+  {{end}}
+</section>
+{{end}}

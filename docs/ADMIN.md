@@ -12,6 +12,14 @@ http://127.0.0.1:19087/admin/
 http://服务器IP:19087/admin/
 ```
 
+SMPP 上游连接状态页面：
+
+```text
+http://服务器IP:19087/admin/connections
+```
+
+字段含义和测试发送说明见 [ADMIN_CONNECTIONS.md](ADMIN_CONNECTIONS.md)。
+
 ## 登录账号
 
 账号来自配置:

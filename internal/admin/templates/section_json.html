@@ -4,6 +4,42 @@
   <a href="/admin/raw" class="btn">编辑完整 JSON</a>
 </header>
 {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+{{if eq .Section "providers"}}
+<section class="panel">
+  <div class="panel-header">
+    <h3>SMPP 上游状态</h3>
+    <a href="/admin/connections" class="btn">打开连接页</a>
+  </div>
+  {{if .SMPPStatuses}}
+  <table>
+    <thead>
+      <tr>
+        <th>provider</th>
+        <th>endpoint</th>
+        <th>connections</th>
+        <th>bound</th>
+        <th>in-flight</th>
+        <th>last error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .SMPPStatuses}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td class="mono">{{.Endpoint}}</td>
+        <td>{{len .Connections}}</td>
+        <td>{{range .Connections}}{{if .Bound}}<span class="badge ok">#{{.ID}}</span>{{else}}<span class="badge bad">#{{.ID}}</span>{{end}} {{end}}</td>
+        <td>{{range .Connections}}#{{.ID}} {{.InFlight}}/{{.WindowSize}} {{end}}</td>
+        <td>{{range .Connections}}{{if .LastError}}<span class="error-text">#{{.ID}} {{.LastError}}</span> {{end}}{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">当前没有运行中的 SMPP 上游状态。添加 enabled=true 且 protocol="smpp" 的 provider 后会显示。</div>
+  {{end}}
+</section>
+{{end}}
 <form method="POST" action="/admin/{{.Section}}" class="form" style="max-width: 980px">
   <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
   <div class="field">

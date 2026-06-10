@@ -162,6 +162,7 @@ go run ./cmd/testesme -addr 127.0.0.1:29175 -u dev-esme -p '<credentials.txt 中
 Docker 说明见 [docs/DOCKER.md](docs/DOCKER.md) 和 [docs/QUICKSTART_DOCKER.md](docs/QUICKSTART_DOCKER.md)。
 
 管理后台说明见 [docs/ADMIN.md](docs/ADMIN.md)。
+SMPP 上游连接页面说明见 [docs/ADMIN_CONNECTIONS.md](docs/ADMIN_CONNECTIONS.md)。
 
 API 参考见 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)。
 

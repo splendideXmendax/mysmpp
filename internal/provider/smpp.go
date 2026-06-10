@@ -65,3 +65,7 @@ func (p *SMPPProvider) Close() error {
 func (p *SMPPProvider) Status() smppclient.PoolStatus {
 	return p.pool.Status()
 }
+
+func (p *SMPPProvider) SMPPStatus() (smppclient.PoolStatus, bool) {
+	return p.Status(), true
+}

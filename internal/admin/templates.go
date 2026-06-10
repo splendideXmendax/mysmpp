@@ -27,6 +27,7 @@ var pageTemplates = func() map[string]*template.Template {
 		"routes_list.html",
 		"route_form.html",
 		"section_json.html",
+		"connections.html",
 	}
 	out := map[string]*template.Template{}
 	for _, page := range pages {

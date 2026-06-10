@@ -10,6 +10,7 @@
   <div class="stat"><strong>{{.InboundCount}}</strong><span class="muted">入站规则</span></div>
   <div class="stat"><strong>{{.OutboundCount}}</strong><span class="muted">出站规则</span></div>
   <div class="stat"><strong>{{.ClientCount}}</strong><span class="muted">HTTP 客户端</span></div>
+  <div class="stat"><strong>{{.UpstreamBound}} / {{.UpstreamTotal}}</strong><span class="muted">SMPP 上游连接</span></div>
 </div>
 <p class="muted">配置文件：{{if .ConfigPath}}{{.ConfigPath}}{{else}}未指定，后台只更新运行时配置{{end}}</p>
 {{end}}

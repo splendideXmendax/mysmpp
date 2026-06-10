@@ -13,11 +13,21 @@ import (
 
 	"github.com/splendideXmendax/mysmpp/internal/authutil"
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 )
 
 type Gateway interface {
 	Config() config.Config
 	UpdateConfig(config.Config) error
+}
+
+type smppStatusGateway interface {
+	SMPPUpstreamStatuses() []smppclient.PoolStatus
+}
+
+type testSubmitGateway interface {
+	SubmitTestMessage(context.Context, string, string, string) (dispatch.Receipt, error)
 }
 
 type ctxKey string
@@ -139,6 +149,10 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		s.routeForm(w, r, "", "")
 	case r.Method == http.MethodPost && path == "/routes":
 		s.requireCSRF(s.routeCreate)(w, r)
+	case r.Method == http.MethodGet && path == "/connections":
+		s.connections(w, r, "")
+	case r.Method == http.MethodPost && path == "/connections/testsend":
+		s.requireCSRF(s.connectionTestSend)(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/routes/"):
 		name := strings.TrimPrefix(path, "/routes/")
 		if name == "" || strings.Contains(name, "/") {
@@ -271,17 +285,58 @@ func flashAndRedirect(w http.ResponseWriter, r *http.Request, msg, to string) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	cfg := s.gateway.Config()
+	statuses := s.smppStatuses()
+	totalConnections, boundConnections := smppStatusSummary(statuses)
 	s.render(w, r, "dashboard.html", map[string]any{
-		"Title":         "概览",
-		"Active":        "dashboard",
-		"RouteCount":    len(cfg.Routes),
-		"ProviderCount": len(cfg.Providers),
-		"ESMECount":     len(cfg.ESMEs),
-		"InboundCount":  len(cfg.Inbound),
-		"OutboundCount": len(cfg.Outbound),
-		"ClientCount":   len(cfg.Clients),
-		"ConfigPath":    s.configPath,
+		"Title":            "概览",
+		"Active":           "dashboard",
+		"RouteCount":       len(cfg.Routes),
+		"ProviderCount":    len(cfg.Providers),
+		"ESMECount":        len(cfg.ESMEs),
+		"InboundCount":     len(cfg.Inbound),
+		"OutboundCount":    len(cfg.Outbound),
+		"ClientCount":      len(cfg.Clients),
+		"UpstreamProvider": len(statuses),
+		"UpstreamBound":    boundConnections,
+		"UpstreamTotal":    totalConnections,
+		"ConfigPath":       s.configPath,
 	})
+}
+
+func (s *Server) connections(w http.ResponseWriter, r *http.Request, errMsg string) {
+	statuses := s.smppStatuses()
+	totalConnections, boundConnections := smppStatusSummary(statuses)
+	_, canSubmit := s.gateway.(testSubmitGateway)
+	s.render(w, r, "connections.html", map[string]any{
+		"Title":            "SMPP upstream connections",
+		"Active":           "connections",
+		"Statuses":         statuses,
+		"TotalConnections": totalConnections,
+		"BoundConnections": boundConnections,
+		"CanSubmit":        canSubmit,
+		"Error":            errMsg,
+	})
+}
+
+func (s *Server) connectionTestSend(w http.ResponseWriter, r *http.Request) {
+	submitter, ok := s.gateway.(testSubmitGateway)
+	if !ok {
+		s.connections(w, r, "test send is not available without dispatcher")
+		return
+	}
+	from := strings.TrimSpace(r.FormValue("from"))
+	to := strings.TrimSpace(r.FormValue("to"))
+	text := strings.TrimSpace(r.FormValue("text"))
+	if from == "" || to == "" || text == "" {
+		s.connections(w, r, "from, to, and text are required")
+		return
+	}
+	receipt, err := submitter.SubmitTestMessage(r.Context(), from, to, text)
+	if err != nil {
+		s.connections(w, r, err.Error())
+		return
+	}
+	flashAndRedirect(w, r, "test message submitted: "+receipt.GatewayID, "/admin/connections")
 }
 
 func (s *Server) rawForm(w http.ResponseWriter, r *http.Request, errMsg string) {
@@ -419,7 +474,30 @@ func (s *Server) sectionForm(w http.ResponseWriter, r *http.Request, section, er
 		"SectionTitle": sectionTitle(section),
 		"Config":       body,
 		"Error":        errMsg,
+		"SMPPStatuses": s.smppStatuses(),
 	})
+}
+
+func (s *Server) smppStatuses() []smppclient.PoolStatus {
+	gateway, ok := s.gateway.(smppStatusGateway)
+	if !ok {
+		return nil
+	}
+	return gateway.SMPPUpstreamStatuses()
+}
+
+func smppStatusSummary(statuses []smppclient.PoolStatus) (int, int) {
+	total := 0
+	bound := 0
+	for _, status := range statuses {
+		for _, conn := range status.Connections {
+			total++
+			if conn.Bound {
+				bound++
+			}
+		}
+	}
+	return total, bound
 }
 
 func (s *Server) sectionSave(w http.ResponseWriter, r *http.Request) {

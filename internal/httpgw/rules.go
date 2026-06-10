@@ -23,6 +23,7 @@ import (
 	"github.com/splendideXmendax/mysmpp/internal/netutil"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/router"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
@@ -417,6 +418,37 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 		g.dispatcher.ReloadRoutes(routes, providerCfgs)
 	}
 	return nil
+}
+
+func (g *Gateway) SMPPUpstreamStatuses() []smppclient.PoolStatus {
+	if g.registry == nil {
+		return nil
+	}
+	return g.registry.SMPPStatuses()
+}
+
+func (g *Gateway) SubmitTestMessage(ctx context.Context, from, to, text string) (dispatch.Receipt, error) {
+	if g.dispatcher == nil {
+		return dispatch.Receipt{}, fmt.Errorf("dispatcher is not configured")
+	}
+	if err := validateSubmitRequest(from, to, text, "", "", nil); err != nil {
+		return dispatch.Receipt{}, err
+	}
+	return g.dispatcher.Submit(ctx, dispatch.Envelope{
+		From:               from,
+		To:                 to,
+		Text:               text,
+		ClientID:           "admin",
+		Encoding:           message.DetectEncoding(text),
+		RegisteredDelivery: 1,
+		Source: dispatch.SubmitSource{
+			Kind: dispatch.SourceHTTPAPI,
+		},
+		ReceivedAt: time.Now().UTC(),
+		Meta: map[string]string{
+			"admin_test": "1",
+		},
+	})
 }
 
 func (g *Gateway) configAPI(w http.ResponseWriter, r *http.Request) {
