@@ -23,6 +23,7 @@ const (
 )
 
 const bindTimeout = 30 * time.Second
+const writeTimeout = 30 * time.Second
 
 const (
 	statusInvalidPassword uint32 = 0x0000000E
@@ -142,11 +143,13 @@ func (s *Session) writeLoop() {
 	for {
 		select {
 		case p := <-s.out:
+			_ = s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := WritePDU(s.conn, p); err != nil {
 				s.logger.Warn("write smpp pdu failed", "err", err)
 				s.Close()
 				return
 			}
+			_ = s.conn.SetWriteDeadline(time.Time{})
 		case <-s.closed:
 			return
 		}

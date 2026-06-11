@@ -182,6 +182,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		SourceSession:      env.Source.SMPPSessionID,
 		SourceSystem:       env.Source.SMPPSystemID,
 		ReceivedAt:         env.ReceivedAt,
+		UDH:                append([]byte(nil), env.UDH...),
 	}
 	if _, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
 		GatewayID:   gatewayID,
@@ -323,6 +324,7 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		RegisteredDelivery: payload.RegisteredDelivery,
 		Encoding:           payload.Encoding,
 		Meta:               payload.Meta,
+		UDH:                append([]byte(nil), payload.UDH...),
 	})
 	if err != nil {
 		d.failOutbox(ctx, item, err)

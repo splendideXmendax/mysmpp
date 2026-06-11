@@ -70,6 +70,7 @@ type OutboxPayload struct {
 	SourceSession      string            `json:"source_session"`
 	SourceSystem       string            `json:"source_system"`
 	ReceivedAt         time.Time         `json:"received_at"`
+	UDH                []byte            `json:"udh,omitempty"`
 }
 
 type OutboxItem struct {

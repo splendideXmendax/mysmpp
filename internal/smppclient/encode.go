@@ -28,6 +28,34 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		registeredDelivery = byte(cfg.RegisteredDelivery)
 	}
 
+	if len(msg.UDH) > 0 {
+		payload := encodeText(msg.Text, dataCoding, cfg.GSM7Packing)
+		params := submitBodyParams{
+			Cfg:                cfg,
+			Msg:                msg,
+			DataCoding:         dataCoding,
+			RegisteredDelivery: registeredDelivery,
+			ShortMessage:       payload,
+			SourceTON:          sourceTON(msg.SourceAddr, cfg.SourceTON),
+			SourceNPI:          sourceNPI(msg.SourceAddr, cfg.SourceNPI),
+			DestTON:            byte(cfg.DestTON),
+			DestNPI:            byte(cfg.DestNPI),
+		}
+		if cfg.LongMessage == "sar" {
+			if info, ok := smpp.ParseConcat(msg.UDH); ok {
+				params.TLVs = []tlv{
+					{Tag: smpp.TagSARMsgRefNum, Value: []byte{byte(info.Reference >> 8), byte(info.Reference)}},
+					{Tag: smpp.TagSARTotalSegments, Value: []byte{info.Total}},
+					{Tag: smpp.TagSARSegmentSeqnum, Value: []byte{info.Part}},
+				}
+				return []submitPart{{Body: buildSubmitBody(params)}}
+			}
+		}
+		params.ESMClass = 0x40
+		params.ShortMessage = append(append([]byte(nil), msg.UDH...), payload...)
+		return []submitPart{{Body: buildSubmitBody(params)}}
+	}
+
 	if cfg.LongMessage == "payload" {
 		return []submitPart{{
 			Body: buildSubmitBody(submitBodyParams{

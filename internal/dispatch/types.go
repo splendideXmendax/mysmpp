@@ -40,6 +40,7 @@ type Envelope struct {
 	Source             SubmitSource
 	ReceivedAt         time.Time
 	Meta               map[string]string
+	UDH                []byte
 }
 
 type Receipt struct {

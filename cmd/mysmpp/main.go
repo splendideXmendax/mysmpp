@@ -90,6 +90,7 @@ func main() {
 			Text:               submit.Text,
 			DataCoding:         submit.DataCoding,
 			RegisteredDelivery: submit.RegisteredDelivery,
+			UDH:                submit.UDH,
 			ReceivedAt:         time.Now().UTC(),
 			Source: dispatch.SubmitSource{
 				Kind:          dispatch.SourceSMPP,

@@ -234,6 +234,9 @@ func (c *Config) Normalize() {
 	if c.SMPP.WindowSize == 0 {
 		c.SMPP.WindowSize = 16
 	}
+	if c.SMPP.EnquirePeriod == "" {
+		c.SMPP.EnquirePeriod = "30s"
+	}
 	if c.Dispatcher.Workers == 0 {
 		c.Dispatcher.Workers = 10
 	}

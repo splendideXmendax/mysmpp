@@ -39,6 +39,7 @@ func (p *SMPPProvider) Send(msg OutboundMessage) (string, error) {
 		DataCoding:         msg.DataCoding,
 		RegisteredDelivery: msg.RegisteredDelivery,
 		Encoding:           msg.Encoding,
+		UDH:                append([]byte(nil), msg.UDH...),
 	})
 }
 

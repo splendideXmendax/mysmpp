@@ -62,7 +62,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
-		enquirePeriod, _ := time.ParseDuration(s.cfg.EnquirePeriod)
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetKeepAlive(true)
+			_ = tcp.SetKeepAlivePeriod(defaultEnquirePeriod)
+		}
+		enquirePeriod := effectiveEnquirePeriod(s.cfg.EnquirePeriod)
 		session := NewSession(conn, SessionConfig{
 			ID:            s.nextSessionID(),
 			Logger:        s.logger,
@@ -140,4 +144,14 @@ func (s *Server) unregister(session *Session) {
 
 func (s *Server) nextSessionID() string {
 	return "s" + strconv.FormatUint(s.nextID.Add(1), 10)
+}
+
+const defaultEnquirePeriod = 30 * time.Second
+
+func effectiveEnquirePeriod(raw string) time.Duration {
+	period, err := time.ParseDuration(raw)
+	if err != nil || period <= 0 {
+		return defaultEnquirePeriod
+	}
+	return period
 }

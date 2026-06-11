@@ -15,6 +15,7 @@ type OutboundMessage struct {
 	RegisteredDelivery uint8
 	Encoding           string
 	Meta               map[string]string
+	UDH                []byte
 }
 
 type DLR struct {

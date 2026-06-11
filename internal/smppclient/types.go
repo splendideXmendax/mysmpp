@@ -22,6 +22,7 @@ type Message struct {
 	DataCoding         uint8
 	RegisteredDelivery uint8
 	Encoding           string
+	UDH                []byte
 }
 
 type DLR struct {
