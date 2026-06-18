@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS config_history;
+DROP TABLE IF EXISTS id_alloc;
 DROP TABLE IF EXISTS idempotency;
 DROP TABLE IF EXISTS outbox;
 DROP TABLE IF EXISTS pending;

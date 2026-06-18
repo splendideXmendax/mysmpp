@@ -41,11 +41,16 @@ CREATE TABLE IF NOT EXISTS pending (
     provider        VARCHAR(64),
     route           VARCHAR(64),
     received_at     TIMESTAMPTZ  NOT NULL,
-    expires_at      TIMESTAMPTZ  NOT NULL
+    expires_at      TIMESTAMPTZ  NOT NULL,
+    dlr_ready       BOOLEAN      NOT NULL DEFAULT FALSE,
+    dlr_state       VARCHAR(16),
+    dlr_err         INT,
+    dlr_done_at     TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending(expires_at);
 CREATE INDEX IF NOT EXISTS idx_pending_gw ON pending(gateway_id);
+CREATE INDEX IF NOT EXISTS idx_pending_dlr_ready ON pending(source_system) WHERE dlr_ready = TRUE;
 
 CREATE TABLE IF NOT EXISTS outbox (
     id              BIGSERIAL    PRIMARY KEY,
@@ -73,6 +78,11 @@ CREATE TABLE IF NOT EXISTS idempotency (
 );
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency(expires_at);
+
+CREATE TABLE IF NOT EXISTS id_alloc (
+    name            VARCHAR(64) PRIMARY KEY,
+    value           BIGINT      NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS config_history (
     id          BIGSERIAL PRIMARY KEY,

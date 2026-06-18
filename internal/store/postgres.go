@@ -169,8 +169,9 @@ func (s *PostgresStore) SavePending(ctx context.Context, p Pending) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO pending (
 	provider_id, gateway_id, source_kind, source_session, source_system, from_addr, to_addr,
-	text, data_coding, registered_delivery, provider, route, received_at, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	text, data_coding, registered_delivery, provider, route, received_at, expires_at,
+	dlr_ready, dlr_state, dlr_err, dlr_done_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 ON CONFLICT (provider_id) DO UPDATE SET
 	gateway_id = EXCLUDED.gateway_id,
 	source_kind = EXCLUDED.source_kind,
@@ -184,9 +185,14 @@ ON CONFLICT (provider_id) DO UPDATE SET
 	provider = EXCLUDED.provider,
 	route = EXCLUDED.route,
 	received_at = EXCLUDED.received_at,
-	expires_at = EXCLUDED.expires_at`,
+	expires_at = EXCLUDED.expires_at,
+	dlr_ready = EXCLUDED.dlr_ready,
+	dlr_state = EXCLUDED.dlr_state,
+	dlr_err = EXCLUDED.dlr_err,
+	dlr_done_at = EXCLUDED.dlr_done_at`,
 		p.ProviderID, p.GatewayID, p.SourceKind, nullString(p.SourceSession), nullString(p.SourceSystem), nullString(p.From), nullString(p.To),
 		nullString(p.Text), p.DataCoding, p.RegisteredDelivery, nullString(p.Provider), nullString(p.Route), zeroAsNow(p.ReceivedAt), p.ExpiresAt,
+		p.DLRReady, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt),
 	)
 	return err
 }
@@ -196,7 +202,8 @@ func (s *PostgresStore) GetPending(ctx context.Context, providerID string) (Pend
 	rows, err := s.pool.Query(ctx, `
 SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
-	COALESCE(registered_delivery, 0), COALESCE(provider, ''), COALESCE(route, ''), received_at, expires_at
+	COALESCE(registered_delivery, 0), COALESCE(provider, ''), COALESCE(route, ''), received_at, expires_at,
+	COALESCE(dlr_ready, FALSE), COALESCE(dlr_state, ''), COALESCE(dlr_err, 0), dlr_done_at
 FROM pending WHERE provider_id = $1`, providerID)
 	if err != nil {
 		return Pending{}, false, err
@@ -204,10 +211,14 @@ FROM pending WHERE provider_id = $1`, providerID)
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Pending, error) {
 		var p Pending
 		var dataCoding, registeredDelivery int16
+		var doneAt *time.Time
 		err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.From, &p.To, &p.Text, &dataCoding,
-			&registeredDelivery, &p.Provider, &p.Route, &p.ReceivedAt, &p.ExpiresAt)
+			&registeredDelivery, &p.Provider, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRState, &p.DLRErrorCode, &doneAt)
 		p.DataCoding = uint8(dataCoding)
 		p.RegisteredDelivery = uint8(registeredDelivery)
+		if doneAt != nil {
+			p.DLRDoneAt = *doneAt
+		}
 		return p, err
 	})
 	if err != nil {
@@ -217,6 +228,33 @@ FROM pending WHERE provider_id = $1`, providerID)
 		return Pending{}, false, nil
 	}
 	return items[0], true, nil
+}
+
+func (s *PostgresStore) MarkDLRReady(ctx context.Context, providerID, state string, errCode int, doneAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+UPDATE pending SET dlr_ready = TRUE, dlr_state = $2, dlr_err = $3, dlr_done_at = $4
+WHERE provider_id = $1`, providerID, state, errCode, zeroAsNow(doneAt))
+	return checkRows(tag, err)
+}
+
+func (s *PostgresStore) ListReadyDLR(ctx context.Context, systemID string, limit int) ([]Pending, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	_, _ = s.SweepExpiredPending(ctx, time.Now().UTC())
+	rows, err := s.pool.Query(ctx, `
+SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
+	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
+	COALESCE(registered_delivery, 0), COALESCE(provider, ''), COALESCE(route, ''), received_at, expires_at,
+	COALESCE(dlr_ready, FALSE), COALESCE(dlr_state, ''), COALESCE(dlr_err, 0), dlr_done_at
+FROM pending
+WHERE dlr_ready = TRUE AND ($1 = '' OR source_system = $1)
+ORDER BY received_at ASC, provider_id ASC
+LIMIT $2`, systemID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scanPending)
 }
 
 func (s *PostgresStore) DeletePending(ctx context.Context, providerID string) error {
@@ -238,6 +276,28 @@ func (s *PostgresStore) PendingSize(ctx context.Context) (int, error) {
 	var n int
 	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pending WHERE expires_at >= NOW()`).Scan(&n)
 	return n, err
+}
+
+func (s *PostgresStore) ReserveGatewayIDRange(ctx context.Context, span uint64) (uint64, uint64, error) {
+	if span == 0 {
+		span = 1
+	}
+	if span > 1<<63-1 {
+		return 0, 0, fmt.Errorf("id allocation span too large: %d", span)
+	}
+	var end int64
+	err := s.pool.QueryRow(ctx, `
+INSERT INTO id_alloc (name, value) VALUES ('gateway_id', $1)
+ON CONFLICT (name) DO UPDATE SET value = id_alloc.value + EXCLUDED.value
+RETURNING value`, int64(span)).Scan(&end)
+	if err != nil {
+		return 0, 0, err
+	}
+	if end < 0 {
+		return 0, 0, fmt.Errorf("id allocation high water is negative: %d", end)
+	}
+	endU := uint64(end)
+	return endU - span + 1, endU, nil
 }
 
 func (s *PostgresStore) EnqueueOutbox(ctx context.Context, item OutboxItem) (int64, error) {
@@ -439,6 +499,23 @@ func scanOutbox(row pgx.CollectableRow) (OutboxItem, error) {
 	return item, nil
 }
 
+func scanPending(row pgx.CollectableRow) (Pending, error) {
+	var p Pending
+	var dataCoding, registeredDelivery int16
+	var doneAt *time.Time
+	err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.From, &p.To, &p.Text, &dataCoding,
+		&registeredDelivery, &p.Provider, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRState, &p.DLRErrorCode, &doneAt)
+	if err != nil {
+		return Pending{}, err
+	}
+	p.DataCoding = uint8(dataCoding)
+	p.RegisteredDelivery = uint8(registeredDelivery)
+	if doneAt != nil {
+		p.DLRDoneAt = *doneAt
+	}
+	return p, nil
+}
+
 func checkRows(tag pgconn.CommandTag, err error) error {
 	if err != nil {
 		return err
@@ -488,6 +565,15 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 			return fmt.Errorf("postgres schema is missing; run migrations before startup: %w", err)
 		}
 		return err
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO id_alloc (name, value) VALUES ('gateway_id', 0) ON CONFLICT (name) DO NOTHING`); err != nil {
+		if isUndefinedTable(err) {
+			return fmt.Errorf("postgres id_alloc table is missing; run migrations before startup: %w", err)
+		}
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `SELECT dlr_ready, dlr_state, dlr_err, dlr_done_at FROM pending LIMIT 0`); err != nil {
+		return fmt.Errorf("postgres pending DLR columns are missing; run migrations before startup: %w", err)
 	}
 	return nil
 }

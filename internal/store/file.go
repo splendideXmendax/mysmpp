@@ -20,6 +20,7 @@ type fileSnapshot struct {
 	Pending     map[string]Pending      `json:"pending"`
 	Outbox      map[int64]OutboxItem    `json:"outbox"`
 	NextOutbox  int64                   `json:"next_outbox"`
+	GatewaySeq  uint64                  `json:"gateway_seq"`
 	Idempotency []fileIdempotencyRecord `json:"idempotency"`
 	SavedAt     time.Time               `json:"saved_at"`
 }
@@ -81,6 +82,12 @@ func (s *FileStore) load() error {
 	if snap.NextOutbox > s.nextOutbox {
 		s.nextOutbox = snap.NextOutbox
 	}
+	s.gatewaySeq = snap.GatewaySeq
+	for _, msg := range s.messages {
+		if n, ok := parseGatewaySeq(msg.ID); ok && n > s.gatewaySeq {
+			s.gatewaySeq = n
+		}
+	}
 	s.idempotency = map[idempotencyKey]idempotencyRecord{}
 	for _, rec := range snap.Idempotency {
 		s.idempotency[idempotencyKey{clientID: rec.ClientID, key: rec.Key}] = idempotencyRecord{
@@ -98,6 +105,7 @@ func (s *FileStore) persist() error {
 		Pending:     make(map[string]Pending, len(s.pending)),
 		Outbox:      make(map[int64]OutboxItem, len(s.outbox)),
 		NextOutbox:  s.nextOutbox,
+		GatewaySeq:  s.gatewaySeq,
 		Idempotency: make([]fileIdempotencyRecord, 0, len(s.idempotency)),
 		SavedAt:     time.Now().UTC(),
 	}
@@ -183,6 +191,13 @@ func (s *FileStore) SavePending(ctx context.Context, p Pending) error {
 	return s.persist()
 }
 
+func (s *FileStore) MarkDLRReady(ctx context.Context, providerID, state string, errCode int, doneAt time.Time) error {
+	if err := s.MemoryStore.MarkDLRReady(ctx, providerID, state, errCode, doneAt); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
 func (s *FileStore) DeletePending(ctx context.Context, providerID string) error {
 	if err := s.MemoryStore.DeletePending(ctx, providerID); err != nil {
 		return err
@@ -196,6 +211,14 @@ func (s *FileStore) SweepExpiredPending(ctx context.Context, before time.Time) (
 		return n, err
 	}
 	return n, s.persist()
+}
+
+func (s *FileStore) ReserveGatewayIDRange(ctx context.Context, span uint64) (uint64, uint64, error) {
+	start, end, err := s.MemoryStore.ReserveGatewayIDRange(ctx, span)
+	if err != nil {
+		return 0, 0, err
+	}
+	return start, end, s.persist()
 }
 
 func (s *FileStore) EnqueueOutbox(ctx context.Context, item OutboxItem) (int64, error) {

@@ -111,6 +111,7 @@ func main() {
 	}
 	smppServer := smpp.NewServer(cfg.SMPP, logger, auth, onSubmit)
 	dispatcher.SetSMPPServer(smppServer)
+	smppServer.SetReceiverBoundHandler(dispatcher.FlushDLR)
 	go func() {
 		if err := smppServer.ListenAndServe(ctx); err != nil {
 			errCh <- err

@@ -37,15 +37,16 @@ type SubmitHandler func(*Session, SubmitSM)
 type AuthFunc func(systemID, password string) bool
 
 type SessionConfig struct {
-	ID            string
-	Logger        *slog.Logger
-	OwnSystemID   string
-	Auth          AuthFunc
-	BindAllowed   func(*Session, string) bool
-	OnSubmit      SubmitHandler
-	OnClosed      func(*Session)
-	EnquirePeriod time.Duration
-	WindowSize    int32
+	ID              string
+	Logger          *slog.Logger
+	OwnSystemID     string
+	Auth            AuthFunc
+	BindAllowed     func(*Session, string) bool
+	OnSubmit        SubmitHandler
+	OnClosed        func(*Session)
+	OnReceiverBound func(string)
+	EnquirePeriod   time.Duration
+	WindowSize      int32
 }
 
 type Session struct {
@@ -96,6 +97,10 @@ func (s *Session) SystemID() string {
 
 func (s *Session) currentBind() BindMode {
 	return BindMode(s.bindMode.Load())
+}
+
+func (s *Session) CanReceive() bool {
+	return s.currentBind().CanReceive()
 }
 
 func (s *Session) NextSeq() uint32 {
@@ -288,6 +293,9 @@ func (s *Session) handleBind(pdu PDU) {
 		s.logger.Warn("bind rejected", "system_id", systemID, "status", status)
 	}
 	s.Send(PDU{CommandID: respID, Status: status, SequenceID: pdu.SequenceID, Body: CString(s.cfg.OwnSystemID)})
+	if status == statusOK && mode.CanReceive() && s.cfg.OnReceiverBound != nil {
+		go s.cfg.OnReceiverBound(systemID)
+	}
 }
 
 func bindRespID(commandID uint32) uint32 {

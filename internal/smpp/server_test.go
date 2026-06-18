@@ -304,6 +304,48 @@ func TestServerRejectsWhenMaxSessionsPerSystemIDReached(t *testing.T) {
 	}
 }
 
+func TestServerReceiversBySystemID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(config.SMPPConfig{
+		Addr:        "127.0.0.1:0",
+		SystemID:    "client-a",
+		MaxSessions: 3,
+	}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		func(systemID, password string) bool { return true },
+		nil,
+	)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe(ctx) }()
+	addr := waitServerAddr(t, server)
+
+	tx := bindTestClient(t, addr, commandBindTransmitter)
+	defer tx.Close()
+	rx := bindTestClient(t, addr, commandBindReceiver)
+	defer rx.Close()
+	trx := bindTestClient(t, addr, commandBindTransceiver)
+	defer trx.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if receivers := server.ReceiversBySystemID("client-a"); len(receivers) == 2 {
+			cancel()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("server did not stop")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected two receiving sessions, got %d", len(server.ReceiversBySystemID("client-a")))
+}
+
 func TestServerSendsEnquireLink(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -361,6 +403,25 @@ func waitServerAddr(t *testing.T, server *Server) string {
 	}
 	t.Fatal("server did not start")
 	return ""
+}
+
+func bindTestClient(t *testing.T, addr string, commandID uint32) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePDU(conn, PDU{CommandID: commandID, SequenceID: 1, Body: bindBody("client-a", "secret")}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ReadPDU(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != statusOK {
+		t.Fatalf("unexpected bind response: %+v", resp)
+	}
+	return conn
 }
 
 func bindBody(systemID, password string) []byte {

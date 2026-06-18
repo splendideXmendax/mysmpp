@@ -20,14 +20,18 @@ import (
 
 type SMPPServer interface {
 	Session(id string) (*smpp.Session, bool)
+	ReceiversBySystemID(systemID string) []*smpp.Session
 }
+
+var errNoReceiverOnline = errors.New("no online receiver for smpp dlr")
 
 type Dispatcher struct {
 	logger        *slog.Logger
 	registry      *provider.Registry
 	router        atomic.Pointer[router.Router]
 	store         store.Store
-	seq           atomic.Uint64
+	idAlloc       *idAllocator
+	dlrPick       atomic.Uint64
 	pendingTTL    time.Duration
 	workers       int
 	claimLimit    int
@@ -67,6 +71,7 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		registry:      reg,
 		smppSrv:       srv,
 		store:         st,
+		idAlloc:       newIDAllocator(1000, st.ReserveGatewayIDRange),
 		pendingTTL:    ttl,
 		workers:       cfg.Workers,
 		claimLimit:    cfg.ClaimLimit,
@@ -147,7 +152,10 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 			return receipt, nil
 		}
 	}
-	gatewayID := d.newGatewayID()
+	gatewayID, err := d.newGatewayID(ctx)
+	if err != nil {
+		return Receipt{}, err
+	}
 	encoding := env.Encoding
 	if encoding == "" {
 		encoding = message.DetectEncoding(env.Text)
@@ -231,6 +239,14 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 	switch rec.SourceKind {
 	case SourceSMPP.String():
 		if err := d.pushSMPPDLR(rec, dlr); err != nil {
+			if errors.Is(err, errNoReceiverOnline) {
+				if markErr := d.store.MarkDLRReady(ctx, dlr.ProviderID, dlr.State, dlr.ErrorCode, dlr.DoneAt); markErr != nil {
+					d.logger.Warn("mark dlr pending failed", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "err", markErr)
+					return markErr
+				}
+				d.logger.Info("dlr deferred, no receiver online", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "system_id", rec.SourceSystem)
+				return nil
+			}
 			d.logger.Warn("send deliver_sm failed", "gateway_id", rec.GatewayID, "err", err)
 			return err
 		}
@@ -400,9 +416,21 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 	if srv == nil {
 		return errors.New("dlr has no smpp server")
 	}
-	session, ok := srv.Session(rec.SourceSession)
-	if !ok {
-		return fmt.Errorf("dlr session %q not found", rec.SourceSession)
+	var session *smpp.Session
+	if rec.SourceSystem != "" {
+		receivers := srv.ReceiversBySystemID(rec.SourceSystem)
+		if len(receivers) > 0 {
+			idx := int(d.dlrPick.Add(1)-1) % len(receivers)
+			session = receivers[idx]
+		}
+	}
+	if session == nil && rec.SourceSession != "" {
+		if s, ok := srv.Session(rec.SourceSession); ok && s.CanReceive() {
+			session = s
+		}
+	}
+	if session == nil {
+		return errNoReceiverOnline
 	}
 	pdu := smpp.BuildDLR(smpp.DLRParams{
 		GatewayID:    rec.GatewayID,
@@ -419,8 +447,41 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 	return nil
 }
 
-func (d *Dispatcher) newGatewayID() string {
-	return fmt.Sprintf("g%010d", d.seq.Add(1))
+func (d *Dispatcher) FlushDLR(systemID string) {
+	ctx := context.Background()
+	items, err := d.store.ListReadyDLR(ctx, systemID, 500)
+	if err != nil {
+		d.logger.Warn("list pending dlr failed", "system_id", systemID, "err", err)
+		return
+	}
+	for _, rec := range items {
+		dlr := provider.DLR{
+			Provider:   rec.Provider,
+			ProviderID: rec.ProviderID,
+			State:      rec.DLRState,
+			ErrorCode:  rec.DLRErrorCode,
+			DoneAt:     rec.DLRDoneAt,
+		}
+		if dlr.DoneAt.IsZero() {
+			dlr.DoneAt = time.Now().UTC()
+		}
+		if err := d.pushSMPPDLR(rec, dlr); err != nil {
+			if !errors.Is(err, errNoReceiverOnline) {
+				d.logger.Warn("flush deliver_sm failed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "err", err)
+			}
+			return
+		}
+		_ = d.store.DeletePending(ctx, rec.ProviderID)
+		d.logger.Info("dlr flushed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "system_id", rec.SourceSystem)
+	}
+}
+
+func (d *Dispatcher) newGatewayID(ctx context.Context) (string, error) {
+	n, err := d.idAlloc.Next(ctx)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("g%012d", n), nil
 }
 
 func cloneMeta(in map[string]string) map[string]string {

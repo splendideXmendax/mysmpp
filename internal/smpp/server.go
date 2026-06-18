@@ -14,15 +14,16 @@ import (
 )
 
 type Server struct {
-	mu       sync.RWMutex
-	cfg      config.SMPPConfig
-	logger   *slog.Logger
-	auth     AuthFunc
-	onSubmit SubmitHandler
-	listener net.Listener
-	sessions map[string]*Session
-	wg       sync.WaitGroup
-	nextID   atomic.Uint64
+	mu              sync.RWMutex
+	cfg             config.SMPPConfig
+	logger          *slog.Logger
+	auth            AuthFunc
+	onSubmit        SubmitHandler
+	onReceiverBound func(string)
+	listener        net.Listener
+	sessions        map[string]*Session
+	wg              sync.WaitGroup
+	nextID          atomic.Uint64
 }
 
 func NewServer(cfg config.SMPPConfig, logger *slog.Logger, auth AuthFunc, onSubmit SubmitHandler) *Server {
@@ -68,15 +69,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		enquirePeriod := effectiveEnquirePeriod(s.cfg.EnquirePeriod)
 		session := NewSession(conn, SessionConfig{
-			ID:            s.nextSessionID(),
-			Logger:        s.logger,
-			OwnSystemID:   s.cfg.SystemID,
-			Auth:          s.auth,
-			BindAllowed:   s.bindAllowed,
-			OnSubmit:      s.onSubmit,
-			OnClosed:      s.unregister,
-			EnquirePeriod: enquirePeriod,
-			WindowSize:    int32(s.cfg.WindowSize),
+			ID:              s.nextSessionID(),
+			Logger:          s.logger,
+			OwnSystemID:     s.cfg.SystemID,
+			Auth:            s.auth,
+			BindAllowed:     s.bindAllowed,
+			OnSubmit:        s.onSubmit,
+			OnClosed:        s.unregister,
+			OnReceiverBound: s.notifyReceiverBound,
+			EnquirePeriod:   enquirePeriod,
+			WindowSize:      int32(s.cfg.WindowSize),
 		})
 		if !s.register(session) {
 			s.logger.Warn("max sessions reached", "remote", conn.RemoteAddr(), "limit", s.cfg.MaxSessions)
@@ -105,6 +107,36 @@ func (s *Server) Session(id string) (*Session, bool) {
 	defer s.mu.RUnlock()
 	session, ok := s.sessions[id]
 	return session, ok
+}
+
+func (s *Server) SetReceiverBoundHandler(cb func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onReceiverBound = cb
+}
+
+func (s *Server) receiverBoundHandler() func(string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.onReceiverBound
+}
+
+func (s *Server) notifyReceiverBound(systemID string) {
+	if cb := s.receiverBoundHandler(); cb != nil {
+		cb(systemID)
+	}
+}
+
+func (s *Server) ReceiversBySystemID(systemID string) []*Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Session, 0)
+	for _, session := range s.sessions {
+		if session.SystemID() == systemID && session.currentBind().CanReceive() {
+			out = append(out, session)
+		}
+	}
+	return out
 }
 
 func (s *Server) bindAllowed(candidate *Session, systemID string) bool {

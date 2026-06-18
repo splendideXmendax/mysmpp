@@ -20,9 +20,12 @@ type Store interface {
 	ListMessagesPage(context.Context, ListOptions) ([]message.Message, error)
 	SavePending(context.Context, Pending) error
 	GetPending(context.Context, string) (Pending, bool, error)
+	MarkDLRReady(context.Context, string, string, int, time.Time) error
+	ListReadyDLR(context.Context, string, int) ([]Pending, error)
 	DeletePending(context.Context, string) error
 	SweepExpiredPending(context.Context, time.Time) (int, error)
 	PendingSize(context.Context) (int, error)
+	ReserveGatewayIDRange(context.Context, uint64) (uint64, uint64, error)
 	EnqueueOutbox(context.Context, OutboxItem) (int64, error)
 	ClaimOutbox(context.Context, string, int) ([]OutboxItem, error)
 	AckOutbox(context.Context, int64) error
@@ -53,6 +56,10 @@ type Pending struct {
 	Route              string
 	ReceivedAt         time.Time
 	ExpiresAt          time.Time
+	DLRReady           bool
+	DLRState           string
+	DLRErrorCode       int
+	DLRDoneAt          time.Time
 }
 
 type OutboxPayload struct {
@@ -98,6 +105,7 @@ type MemoryStore struct {
 	outbox      map[int64]OutboxItem
 	nextOutbox  int64
 	idempotency map[idempotencyKey]idempotencyRecord
+	gatewaySeq  uint64
 	lastSweep   time.Time
 	maxMessages int
 }
@@ -217,6 +225,45 @@ func (s *MemoryStore) SavePending(_ context.Context, p Pending) error {
 	return nil
 }
 
+func (s *MemoryStore) MarkDLRReady(_ context.Context, providerID, state string, errCode int, doneAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[providerID]
+	if !ok {
+		return ErrNotFound
+	}
+	p.DLRReady = true
+	p.DLRState = state
+	p.DLRErrorCode = errCode
+	p.DLRDoneAt = doneAt
+	s.pending[providerID] = p
+	return nil
+}
+
+func (s *MemoryStore) ListReadyDLR(_ context.Context, systemID string, limit int) ([]Pending, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(now)
+	out := make([]Pending, 0, limit)
+	for _, p := range s.pending {
+		if !p.DLRReady {
+			continue
+		}
+		if systemID != "" && p.SourceSystem != systemID {
+			continue
+		}
+		out = append(out, p)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) GetPending(_ context.Context, providerID string) (Pending, bool, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -255,6 +302,17 @@ func (s *MemoryStore) PendingSize(_ context.Context) (int, error) {
 	defer s.mu.Unlock()
 	s.sweepLocked(time.Now().UTC())
 	return len(s.pending), nil
+}
+
+func (s *MemoryStore) ReserveGatewayIDRange(_ context.Context, span uint64) (uint64, uint64, error) {
+	if span == 0 {
+		span = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start := s.gatewaySeq + 1
+	s.gatewaySeq += span
+	return start, s.gatewaySeq, nil
 }
 
 func (s *MemoryStore) EnqueueOutbox(_ context.Context, item OutboxItem) (int64, error) {

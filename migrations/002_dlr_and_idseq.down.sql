@@ -1,0 +1,8 @@
+DROP INDEX IF EXISTS idx_pending_dlr_ready;
+
+ALTER TABLE pending DROP COLUMN IF EXISTS dlr_done_at;
+ALTER TABLE pending DROP COLUMN IF EXISTS dlr_err;
+ALTER TABLE pending DROP COLUMN IF EXISTS dlr_state;
+ALTER TABLE pending DROP COLUMN IF EXISTS dlr_ready;
+
+DROP TABLE IF EXISTS id_alloc;

@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 type fakeSMPPServer struct {
-	session *smpp.Session
+	session   *smpp.Session
+	receivers []*smpp.Session
 }
 
 func (s fakeSMPPServer) Session(id string) (*smpp.Session, bool) {
@@ -22,6 +25,10 @@ func (s fakeSMPPServer) Session(id string) (*smpp.Session, bool) {
 		return s.session, true
 	}
 	return nil, false
+}
+
+func (s fakeSMPPServer) ReceiversBySystemID(systemID string) []*smpp.Session {
+	return append([]*smpp.Session(nil), s.receivers...)
 }
 
 func TestDispatcherRoutesAndSubmits(t *testing.T) {
@@ -55,13 +62,127 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.GatewayID != "g0000000001" || receipt.Provider != "mock-a" || receipt.Route != "mobile" {
+	if receipt.GatewayID != "g000000000001" || receipt.Provider != "mock-a" || receipt.Route != "mobile" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
 	waitForPending(t, d, 1)
 	if d.PendingSize() != 1 {
 		t.Fatalf("expected one pending record, got %d", d.PendingSize())
 	}
+}
+
+func TestDispatcherDefersSMPPDLRUntilReceiverBound(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, fakeSMPPServer{}, testDispatcherConfig(), st)
+	defer d.Close()
+	rec := store.Pending{
+		ProviderID:         "up-1",
+		GatewayID:          "g000000000001",
+		SourceKind:         SourceSMPP.String(),
+		SourceSession:      "tx-1",
+		SourceSystem:       "esme-a",
+		From:               "1069",
+		To:                 "13800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Provider:           "mock-a",
+		ReceivedAt:         time.Now().UTC(),
+		ExpiresAt:          time.Now().Add(time.Hour),
+	}
+	if err := st.SavePending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveMessage(context.Background(), testMessage(rec.GatewayID)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := d.HandleDLR(context.Background(), provider.DLR{
+		Provider:   "mock-a",
+		ProviderID: "up-1",
+		State:      "DELIVRD",
+		DoneAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, ok, err := st.GetPending(context.Background(), "up-1")
+	if err != nil || !ok {
+		t.Fatalf("pending not kept: ok=%v err=%v", ok, err)
+	}
+	if !pending.DLRReady || pending.DLRState != "DELIVRD" {
+		t.Fatalf("dlr not marked ready: %+v", pending)
+	}
+}
+
+func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
+	st := store.NewMemory()
+	rec := store.Pending{
+		ProviderID:         "up-1",
+		GatewayID:          "g000000000001",
+		SourceKind:         SourceSMPP.String(),
+		SourceSession:      "tx-1",
+		SourceSystem:       "esme-a",
+		From:               "1069",
+		To:                 "13800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Provider:           "mock-a",
+		ReceivedAt:         time.Now().UTC(),
+		ExpiresAt:          time.Now().Add(time.Hour),
+		DLRReady:           true,
+		DLRState:           "DELIVRD",
+		DLRDoneAt:          time.Now().UTC(),
+	}
+	if err := st.SavePending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	receiver := smpp.NewSession(serverConn, smpp.SessionConfig{ID: "rx-1", Auth: func(systemID, password string) bool { return true }})
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), provider.NewRegistry(), fakeSMPPServer{receivers: []*smpp.Session{receiver}}, testDispatcherConfig(), st)
+	defer d.Close()
+	go receiver.Serve(context.Background())
+	if err := smpp.WritePDU(clientConn, smpp.PDU{CommandID: smpp.CommandBindReceiver, SequenceID: 1, Body: bindBodyForDispatchTest("esme-a", "")}); err != nil {
+		t.Fatal(err)
+	}
+	bindResp, err := smpp.ReadPDU(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bindResp.CommandID != smpp.CommandBindReceiverResp || bindResp.Status != smpp.StatusOK {
+		t.Fatalf("unexpected bind response: %+v", bindResp)
+	}
+
+	d.FlushDLR("esme-a")
+
+	pdu, err := smpp.ReadPDU(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pdu.CommandID != smpp.CommandDeliverSM {
+		t.Fatalf("expected deliver_sm, got 0x%08x", pdu.CommandID)
+	}
+	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || ok {
+		t.Fatalf("pending should be deleted after flush: ok=%v err=%v", ok, err)
+	}
+}
+
+func bindBodyForDispatchTest(systemID, password string) []byte {
+	body := []byte{}
+	body = append(body, smpp.CString(systemID)...)
+	body = append(body, smpp.CString(password)...)
+	body = append(body, smpp.CString("gateway")...)
+	body = append(body, 0x34, 0x00, 0x00)
+	body = append(body, smpp.CString("")...)
+	return body
+}
+
+func testMessage(id string) message.Message {
+	msg := message.New(id, message.DirectionMT, "1069", "13800138000", "hello")
+	msg.State = "sent"
+	return msg
 }
 
 func TestDispatcherIgnoresDisabledProviderRoutes(t *testing.T) {

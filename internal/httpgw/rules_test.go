@@ -763,11 +763,20 @@ func (s failingStore) SavePending(context.Context, store.Pending) error { return
 func (s failingStore) GetPending(context.Context, string) (store.Pending, bool, error) {
 	return store.Pending{}, false, s.err
 }
+func (s failingStore) MarkDLRReady(context.Context, string, string, int, time.Time) error {
+	return s.err
+}
+func (s failingStore) ListReadyDLR(context.Context, string, int) ([]store.Pending, error) {
+	return nil, s.err
+}
 func (s failingStore) DeletePending(context.Context, string) error { return s.err }
 func (s failingStore) SweepExpiredPending(context.Context, time.Time) (int, error) {
 	return 0, s.err
 }
 func (s failingStore) PendingSize(context.Context) (int, error) { return 0, s.err }
+func (s failingStore) ReserveGatewayIDRange(context.Context, uint64) (uint64, uint64, error) {
+	return 0, 0, s.err
+}
 func (s failingStore) EnqueueOutbox(context.Context, store.OutboxItem) (int64, error) {
 	return 0, s.err
 }
