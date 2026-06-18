@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"testing"
@@ -68,6 +69,65 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	waitForPending(t, d, 1)
 	if d.PendingSize() != 1 {
 		t.Fatalf("expected one pending record, got %d", d.PendingSize())
+	}
+}
+
+func TestDispatcherRejectsUnassignedCountryCode(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "default",
+		Prefix:   []string{},
+		Provider: "mock-a",
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	_, err := d.Submit(context.Background(), Envelope{From: "1069", To: "285032768252", Text: "hello"})
+	if !errors.Is(err, ErrInvalidDestAddr) {
+		t.Fatalf("expected invalid destination address, got %v", err)
+	}
+	if depth, err := st.OutboxDepth(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	} else if depth != 0 {
+		t.Fatalf("invalid destination should not enter outbox, depth=%d", depth)
+	}
+}
+
+func TestDispatcherCanRewriteTrunkZeroAfterCountryCode(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "cn",
+		Prefix:   []string{"86"},
+		Provider: "mock-a",
+		Priority: 1,
+		AddrRewrite: config.AddrRewriteConfig{
+			StripTrunkZeroAfterCC: true,
+			CountryCode:           "86",
+			EnforceE164Len:        true,
+		},
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	receipt, err := d.Submit(context.Background(), Envelope{From: "1069", To: "860015013628000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+	if err != nil || !ok {
+		t.Fatalf("message not saved: ok=%v err=%v", ok, err)
+	}
+	if msg.To != "8615013628000" {
+		t.Fatalf("expected rewritten destination, got %q", msg.To)
 	}
 }
 
@@ -213,6 +273,7 @@ func testDispatcherConfig() config.DispatcherConfig {
 		PollIntervalMS:       10,
 		PendingTTL:           "1m",
 		MaxAttempts:          5,
+		ClaimTimeout:         "1m",
 	}
 }
 

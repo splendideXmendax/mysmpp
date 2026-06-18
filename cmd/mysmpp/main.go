@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +37,9 @@ func main() {
 	}
 	if boot.Generated {
 		logger.Info("generated startup credentials", "config", boot.ConfigPath, "credentials", boot.CredentialsPath)
+	}
+	if strings.EqualFold(cfg.Storage.Driver, "memory") {
+		logger.Warn("memory storage is volatile; messages, outbox, pending DLR mappings, and idempotency keys are lost on restart")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -103,7 +108,11 @@ func main() {
 			SequenceID: submit.SequenceID,
 		}
 		if err != nil {
-			resp.Status = 0x00000045
+			if errors.Is(err, dispatch.ErrInvalidDestAddr) {
+				resp.Status = smpp.StatusInvalidDestAddr
+			} else {
+				resp.Status = smpp.StatusSubmitFailed
+			}
 		} else {
 			resp.Body = smpp.CString(receipt.GatewayID)
 		}

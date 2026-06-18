@@ -74,8 +74,21 @@ func TestNormalizeDispatcherDefaults(t *testing.T) {
 		cfg.Dispatcher.ClaimLimit != 20 ||
 		cfg.Dispatcher.PollIntervalMS != 20 ||
 		cfg.Dispatcher.PendingTTL != "30m" ||
-		cfg.Dispatcher.MaxAttempts != 5 {
+		cfg.Dispatcher.MaxAttempts != 5 ||
+		cfg.Dispatcher.ClaimTimeout != "60s" ||
+		!cfg.Dispatcher.ValidateDestAddrEnabled() {
 		t.Fatalf("unexpected dispatcher defaults: %+v", cfg.Dispatcher)
+	}
+}
+
+func TestDispatcherValidateDestAddrCanBeDisabled(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"dispatcher":{"validate_dest_addr":false}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Normalize()
+	if cfg.Dispatcher.ValidateDestAddrEnabled() {
+		t.Fatal("expected destination validation to be disabled")
 	}
 }
 
@@ -180,6 +193,20 @@ func TestValidateRejectsUnknownStorageDriver(t *testing.T) {
 	cfg.Storage.Driver = "sqlite"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected unknown storage driver to fail")
+	}
+}
+
+func TestValidateRejectsInvalidAddrRewriteConfig(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Routes[0].AddrRewrite.CountryCode = "86x"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid country code to fail")
+	}
+
+	cfg = validConfigForTest()
+	cfg.Routes[0].AddrRewrite.AddPrefix = "+86"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid add prefix to fail")
 	}
 }
 

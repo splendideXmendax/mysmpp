@@ -19,7 +19,9 @@
     "claim_limit": 20,
     "poll_interval_ms": 20,
     "pending_ttl": "30m",
-    "max_attempts": 5
+    "max_attempts": 5,
+    "claim_timeout": "60s",
+    "validate_dest_addr": true
   },
   "esmes": [
     {

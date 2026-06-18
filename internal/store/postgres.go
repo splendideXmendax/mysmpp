@@ -345,6 +345,26 @@ RETURNING id, gateway_id, provider, payload, state, COALESCE(claimed_by, ''), cl
 	return pgx.CollectRows(rows, scanOutbox)
 }
 
+func (s *PostgresStore) RequeueStaleOutbox(ctx context.Context, before time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE outbox
+SET state = 'pending', claimed_by = NULL, claimed_at = NULL, next_retry_at = LEAST(next_retry_at, NOW())
+WHERE id IN (
+	SELECT id FROM outbox
+	WHERE state = 'claimed' AND claimed_at < $1
+	ORDER BY claimed_at, id
+	LIMIT $2
+	FOR UPDATE SKIP LOCKED
+)`, before, limit)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (s *PostgresStore) AckOutbox(ctx context.Context, id int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE outbox SET state = 'done' WHERE id = $1`, id)
 	return checkRows(tag, err)

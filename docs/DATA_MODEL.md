@@ -38,6 +38,8 @@
 | `attempt` / `max_attempts` | 尝试次数 |
 | `last_error` | 最近失败原因 |
 
+If an item remains in `claimed` longer than `dispatcher.claim_timeout`, the dispatcher requeues it to `pending`. This protects Postgres deployments from rows getting stuck after a process crash between claim and ack/fail.
+
 ## pending
 
 DLR 映射表。上游回调只知道 provider_id，mysmpp 用 pending 找回 gateway_id 和下游来源。

@@ -100,7 +100,9 @@ Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到
   "claim_limit": 20,
   "poll_interval_ms": 20,
   "pending_ttl": "30m",
-  "max_attempts": 5
+  "max_attempts": 5,
+  "claim_timeout": "60s",
+  "validate_dest_addr": true
 }
 ```
 
@@ -134,6 +136,15 @@ workers * per_worker_concurrency
 | 100ms | 50 | `workers=10`, `per_worker_concurrency=5` |
 | 200ms | 100 | `workers=10`, `per_worker_concurrency=10` |
 | 500ms | 250 | `workers=10`, `per_worker_concurrency=25` |
+
+Additional dispatcher fields:
+
+| Field | Default | Description |
+|---|---:|---|
+| `claim_timeout` | `60s` | Stale `claimed` outbox reclaim threshold. If a worker crashes after claim but before ack/fail, the row is moved back to `pending` after this duration. |
+| `validate_dest_addr` | `true` | Validate destination address before route match. Invalid E.164 or unassigned country code returns SMPP `ESME_RINVDSTADR` and does not enter outbox. |
+
+Destination validation is intentionally minimal: optional leading `+`, digits only, total E.164 length `4..15`, and an assigned 1-3 digit country calling code. It does not validate each country's full national numbering plan.
 
 ## esmes
 
@@ -193,6 +204,25 @@ workers * per_worker_concurrency
 | `prefix` | 号码前缀列表；空数组表示默认路由 |
 | `provider` | 上游 provider 名称 |
 | `priority` | 优先级 |
+
+Optional route-level address rewrite:
+
+```json
+{
+  "name": "cn",
+  "prefix": ["86"],
+  "provider": "provider-a",
+  "priority": 100,
+  "addr_rewrite": {
+    "strip_trunk_zero_after_cc": true,
+    "country_code": "86",
+    "add_prefix": "",
+    "enforce_e164_len": true
+  }
+}
+```
+
+`addr_rewrite` defaults to pass-through. `strip_trunk_zero_after_cc=true` changes a number like `860015013628000` to `8615013628000`; keep it disabled unless the upstream contract explicitly requires removing national trunk zeroes.
 
 ## providers
 

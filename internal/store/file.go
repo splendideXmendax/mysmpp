@@ -237,6 +237,14 @@ func (s *FileStore) ClaimOutbox(ctx context.Context, workerID string, limit int)
 	return items, s.persist()
 }
 
+func (s *FileStore) RequeueStaleOutbox(ctx context.Context, before time.Time, limit int) (int, error) {
+	n, err := s.MemoryStore.RequeueStaleOutbox(ctx, before, limit)
+	if err != nil || n == 0 {
+		return n, err
+	}
+	return n, s.persist()
+}
+
 func (s *FileStore) AckOutbox(ctx context.Context, id int64) error {
 	if err := s.MemoryStore.AckOutbox(ctx, id); err != nil {
 		return err

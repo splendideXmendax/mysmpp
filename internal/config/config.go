@@ -66,6 +66,8 @@ type DispatcherConfig struct {
 	PollIntervalMS       int    `json:"poll_interval_ms"`
 	PendingTTL           string `json:"pending_ttl"`
 	MaxAttempts          int    `json:"max_attempts"`
+	ClaimTimeout         string `json:"claim_timeout"`
+	ValidateDestAddr     *bool  `json:"validate_dest_addr,omitempty"`
 }
 
 type ESMECred struct {
@@ -89,10 +91,18 @@ type RiskConfig struct {
 }
 
 type RouteConfig struct {
-	Name     string   `json:"name"`
-	Prefix   []string `json:"prefix"`
-	Provider string   `json:"provider"`
-	Priority int      `json:"priority"`
+	Name        string            `json:"name"`
+	Prefix      []string          `json:"prefix"`
+	Provider    string            `json:"provider"`
+	Priority    int               `json:"priority"`
+	AddrRewrite AddrRewriteConfig `json:"addr_rewrite,omitempty"`
+}
+
+type AddrRewriteConfig struct {
+	StripTrunkZeroAfterCC bool   `json:"strip_trunk_zero_after_cc"`
+	CountryCode           string `json:"country_code,omitempty"`
+	AddPrefix             string `json:"add_prefix,omitempty"`
+	EnforceE164Len        bool   `json:"enforce_e164_len,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -210,6 +220,8 @@ func Default() Config {
 			PollIntervalMS:       20,
 			PendingTTL:           "30m",
 			MaxAttempts:          5,
+			ClaimTimeout:         "60s",
+			ValidateDestAddr:     boolPtr(true),
 		},
 		Storage: StorageConfig{Driver: "memory"},
 	}
@@ -254,6 +266,12 @@ func (c *Config) Normalize() {
 	}
 	if c.Dispatcher.MaxAttempts == 0 {
 		c.Dispatcher.MaxAttempts = 5
+	}
+	if c.Dispatcher.ClaimTimeout == "" {
+		c.Dispatcher.ClaimTimeout = "60s"
+	}
+	if c.Dispatcher.ValidateDestAddr == nil {
+		c.Dispatcher.ValidateDestAddr = boolPtr(true)
 	}
 	if c.Risk.PerNumberPerMinute == 0 {
 		c.Risk.PerNumberPerMinute = 5
@@ -381,6 +399,9 @@ func (c Config) validate(allowAutoGenerate bool) error {
 	if _, err := time.ParseDuration(c.Dispatcher.PendingTTL); c.Dispatcher.PendingTTL != "" && err != nil {
 		return fmt.Errorf("dispatcher.pending_ttl is invalid: %w", err)
 	}
+	if _, err := time.ParseDuration(c.Dispatcher.ClaimTimeout); c.Dispatcher.ClaimTimeout != "" && err != nil {
+		return fmt.Errorf("dispatcher.claim_timeout is invalid: %w", err)
+	}
 	for _, proxy := range c.TrustedProxies {
 		if _, err := netip.ParsePrefix(proxy); err == nil {
 			continue
@@ -435,6 +456,12 @@ func (c Config) validate(allowAutoGenerate bool) error {
 			if !validPrefix(prefix) {
 				return fmt.Errorf("route %q has invalid prefix %q", route.Name, prefix)
 			}
+		}
+		if route.AddrRewrite.CountryCode != "" && !allDigits(route.AddrRewrite.CountryCode) {
+			return fmt.Errorf("route %q addr_rewrite.country_code must contain only digits", route.Name)
+		}
+		if route.AddrRewrite.AddPrefix != "" && !allDigits(route.AddrRewrite.AddPrefix) {
+			return fmt.Errorf("route %q addr_rewrite.add_prefix must contain only digits", route.Name)
 		}
 	}
 	if err := validateRoutePrefixes(c.Routes); err != nil {
@@ -685,6 +712,26 @@ func validPrefix(prefix string) bool {
 
 func validName(name string) bool {
 	return namePattern.MatchString(name)
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func (c DispatcherConfig) ValidateDestAddrEnabled() bool {
+	return c.ValidateDestAddr == nil || *c.ValidateDestAddr
 }
 
 func validateRoutePrefixes(routes []RouteConfig) error {

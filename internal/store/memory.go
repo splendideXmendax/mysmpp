@@ -28,6 +28,7 @@ type Store interface {
 	ReserveGatewayIDRange(context.Context, uint64) (uint64, uint64, error)
 	EnqueueOutbox(context.Context, OutboxItem) (int64, error)
 	ClaimOutbox(context.Context, string, int) ([]OutboxItem, error)
+	RequeueStaleOutbox(context.Context, time.Time, int) (int, error)
 	AckOutbox(context.Context, int64) error
 	FailOutbox(context.Context, int64, string, time.Time) error
 	OutboxDepth(context.Context, string) (int, error)
@@ -369,6 +370,32 @@ func (s *MemoryStore) ClaimOutbox(_ context.Context, workerID string, limit int)
 		out = append(out, cloneOutbox(item))
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) RequeueStaleOutbox(_ context.Context, before time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for id, item := range s.outbox {
+		if item.State != "claimed" || item.ClaimedAt.IsZero() || !item.ClaimedAt.Before(before) {
+			continue
+		}
+		item.State = "pending"
+		item.ClaimedBy = ""
+		item.ClaimedAt = time.Time{}
+		if item.NextRetryAt.IsZero() || item.NextRetryAt.After(before) {
+			item.NextRetryAt = before
+		}
+		s.outbox[id] = item
+		count++
+		if count >= limit {
+			break
+		}
+	}
+	return count, nil
 }
 
 func (s *MemoryStore) AckOutbox(_ context.Context, id int64) error {

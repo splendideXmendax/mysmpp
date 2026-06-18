@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,11 +34,13 @@ type Dispatcher struct {
 	idAlloc       *idAllocator
 	dlrPick       atomic.Uint64
 	pendingTTL    time.Duration
+	claimTimeout  time.Duration
 	workers       int
 	claimLimit    int
 	perWorkerConc int
 	pollInterval  time.Duration
 	maxAttempts   int
+	validateDest  bool
 	workerCtx     context.Context
 	cancelWorkers context.CancelFunc
 	wg            sync.WaitGroup
@@ -65,6 +68,10 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 	if err != nil || ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
+	claimTimeout, err := time.ParseDuration(cfg.ClaimTimeout)
+	if err != nil || claimTimeout <= 0 {
+		claimTimeout = 60 * time.Second
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dispatcher{
 		logger:        logger,
@@ -73,11 +80,13 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		store:         st,
 		idAlloc:       newIDAllocator(1000, st.ReserveGatewayIDRange),
 		pendingTTL:    ttl,
+		claimTimeout:  claimTimeout,
 		workers:       cfg.Workers,
 		claimLimit:    cfg.ClaimLimit,
 		perWorkerConc: cfg.PerWorkerConcurrency,
 		pollInterval:  time.Duration(cfg.PollIntervalMS) * time.Millisecond,
 		maxAttempts:   cfg.MaxAttempts,
+		validateDest:  cfg.ValidateDestAddrEnabled(),
 		workerCtx:     ctx,
 		cancelWorkers: cancel,
 	}
@@ -105,6 +114,13 @@ func normalizeDispatcherConfig(cfg config.DispatcherConfig) config.DispatcherCon
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 5
 	}
+	if cfg.ClaimTimeout == "" {
+		cfg.ClaimTimeout = "60s"
+	}
+	if cfg.ValidateDestAddr == nil {
+		enabled := true
+		cfg.ValidateDestAddr = &enabled
+	}
 	return cfg
 }
 
@@ -125,6 +141,12 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	if env.ReceivedAt.IsZero() {
 		env.ReceivedAt = time.Now().UTC()
 	}
+	if d.validateDest {
+		if err := validateDestAddr(env.To); err != nil {
+			return Receipt{}, err
+		}
+		env.To = strings.TrimPrefix(env.To, "+")
+	}
 	rt := d.router.Load()
 	if rt == nil {
 		return Receipt{}, errors.New("router not initialized")
@@ -132,6 +154,14 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	route, ok := rt.MatchPhone(env.To)
 	if !ok {
 		return Receipt{}, fmt.Errorf("no route matched %q", env.To)
+	}
+	if route.AddrRewrite != (config.AddrRewriteConfig{}) {
+		env.To = rewriteDestAddr(env.To, route.AddrRewrite)
+		if route.AddrRewrite.EnforceE164Len {
+			if err := validateDestAddr(env.To); err != nil {
+				return Receipt{}, err
+			}
+		}
 	}
 
 	if env.ClientID != "" && env.ClientMsgID != "" {
@@ -280,6 +310,47 @@ func (d *Dispatcher) StartWorkers(n int) {
 			defer d.wg.Done()
 			d.workerLoop(d.workerCtx, id)
 		}()
+	}
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.requeueLoop(d.workerCtx)
+	}()
+}
+
+func (d *Dispatcher) requeueLoop(ctx context.Context) {
+	if d.claimTimeout <= 0 {
+		return
+	}
+	interval := d.claimTimeout / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	d.requeueStale(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.requeueStale(ctx)
+		}
+	}
+}
+
+func (d *Dispatcher) requeueStale(ctx context.Context) {
+	limit := d.claimLimit * d.workers
+	if limit <= 0 {
+		limit = d.claimLimit
+	}
+	n, err := d.store.RequeueStaleOutbox(ctx, time.Now().UTC().Add(-d.claimTimeout), limit)
+	if err != nil {
+		d.logger.Warn("requeue stale outbox failed", "err", err)
+		return
+	}
+	if n > 0 {
+		d.logger.Warn("requeued stale outbox", "count", n, "claim_timeout", d.claimTimeout)
 	}
 }
 

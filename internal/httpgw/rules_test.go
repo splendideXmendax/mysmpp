@@ -783,6 +783,9 @@ func (s failingStore) EnqueueOutbox(context.Context, store.OutboxItem) (int64, e
 func (s failingStore) ClaimOutbox(context.Context, string, int) ([]store.OutboxItem, error) {
 	return nil, s.err
 }
+func (s failingStore) RequeueStaleOutbox(context.Context, time.Time, int) (int, error) {
+	return 0, s.err
+}
 func (s failingStore) AckOutbox(context.Context, int64) error { return s.err }
 func (s failingStore) FailOutbox(context.Context, int64, string, time.Time) error {
 	return s.err

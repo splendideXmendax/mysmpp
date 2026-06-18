@@ -105,6 +105,44 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 	}
 }
 
+func TestMemoryStoreRequeuesStaleOutbox(t *testing.T) {
+	st := NewMemory()
+	id, err := st.EnqueueOutbox(context.Background(), OutboxItem{
+		GatewayID: "g1",
+		Provider:  "mock",
+		Payload: OutboxPayload{
+			GatewayID: "g1",
+			Provider:  "mock",
+			To:        "8613800138000",
+			Text:      "hello",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.ClaimOutbox(context.Background(), "worker-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != id {
+		t.Fatalf("unexpected claimed items: %+v", items)
+	}
+	count, err := st.RequeueStaleOutbox(context.Background(), time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one requeued item, got %d", count)
+	}
+	items, err = st.ClaimOutbox(context.Background(), "worker-b", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ClaimedBy != "worker-b" {
+		t.Fatalf("expected requeued item to be claimable, got %+v", items)
+	}
+}
+
 func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
 	path := t.TempDir() + "/store.json"
 	st, err := NewFile(path)
