@@ -71,7 +71,7 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 	st := NewMemory()
 	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
 	msg.State = "queued"
-	id, err := st.SubmitAtomic(context.Background(), msg, OutboxItem{
+	id, gatewayID, duplicate, err := st.SubmitAtomic(context.Background(), msg, OutboxItem{
 		GatewayID: "g1",
 		Provider:  "mock",
 		Payload: OutboxPayload{
@@ -85,8 +85,8 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id == 0 {
-		t.Fatal("expected outbox id")
+	if id == 0 || gatewayID != "g1" || duplicate {
+		t.Fatalf("unexpected submit result: id=%d gateway=%q duplicate=%v", id, gatewayID, duplicate)
 	}
 	if _, ok, err := st.GetMessage(context.Background(), "g1"); err != nil {
 		t.Fatal(err)
@@ -102,6 +102,24 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 		t.Fatal(err)
 	} else if !ok || got != "g1" {
 		t.Fatalf("idempotency not saved: ok=%v gateway=%q", ok, got)
+	}
+
+	second := message.New("g2", message.DirectionMT, "1069", "13800138000", "hello")
+	_, gatewayID, duplicate, err = st.SubmitAtomic(context.Background(), second, OutboxItem{
+		GatewayID: "g2",
+		Provider:  "mock",
+		Payload:   OutboxPayload{GatewayID: "g2", Provider: "mock", To: "13800138000", Text: "hello"},
+	}, "client-a", "m1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicate || gatewayID != "g1" {
+		t.Fatalf("expected duplicate to return original gateway id, got duplicate=%v gateway=%q", duplicate, gatewayID)
+	}
+	if depth, err := st.OutboxDepth(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	} else if depth != 1 {
+		t.Fatalf("duplicate submit should not create another outbox row, got %d", depth)
 	}
 }
 

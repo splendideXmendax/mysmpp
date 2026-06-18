@@ -34,6 +34,7 @@ type Dispatcher struct {
 	idAlloc       *idAllocator
 	dlrPick       atomic.Uint64
 	pendingTTL    time.Duration
+	pendingSweep  time.Duration
 	claimTimeout  time.Duration
 	workers       int
 	claimLimit    int
@@ -72,6 +73,10 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 	if err != nil || claimTimeout <= 0 {
 		claimTimeout = 60 * time.Second
 	}
+	pendingSweep, err := time.ParseDuration(cfg.PendingSweepInterval)
+	if err != nil || pendingSweep <= 0 {
+		pendingSweep = time.Minute
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dispatcher{
 		logger:        logger,
@@ -80,6 +85,7 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		store:         st,
 		idAlloc:       newIDAllocator(1000, st.ReserveGatewayIDRange),
 		pendingTTL:    ttl,
+		pendingSweep:  pendingSweep,
 		claimTimeout:  claimTimeout,
 		workers:       cfg.Workers,
 		claimLimit:    cfg.ClaimLimit,
@@ -117,6 +123,9 @@ func normalizeDispatcherConfig(cfg config.DispatcherConfig) config.DispatcherCon
 	if cfg.ClaimTimeout == "" {
 		cfg.ClaimTimeout = "60s"
 	}
+	if cfg.PendingSweepInterval == "" {
+		cfg.PendingSweepInterval = "1m"
+	}
 	if cfg.ValidateDestAddr == nil {
 		enabled := true
 		cfg.ValidateDestAddr = &enabled
@@ -141,12 +150,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	if env.ReceivedAt.IsZero() {
 		env.ReceivedAt = time.Now().UTC()
 	}
-	if d.validateDest {
-		if err := validateDestAddr(env.To); err != nil {
-			return Receipt{}, err
-		}
-		env.To = strings.TrimPrefix(env.To, "+")
-	}
+	env.To = strings.TrimPrefix(env.To, "+")
 	rt := d.router.Load()
 	if rt == nil {
 		return Receipt{}, errors.New("router not initialized")
@@ -157,31 +161,19 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	}
 	if route.AddrRewrite != (config.AddrRewriteConfig{}) {
 		env.To = rewriteDestAddr(env.To, route.AddrRewrite)
-		if route.AddrRewrite.EnforceE164Len {
-			if err := validateDestAddr(env.To); err != nil {
-				return Receipt{}, err
-			}
+	}
+	shouldValidate := route.DestAddr.ValidateEnabled(d.validateDest) || route.AddrRewrite.EnforceE164Len
+	if shouldValidate {
+		opts := destAddrOptions{
+			AllowShortCode: route.DestAddr.AllowShortCode,
+			MinShortLen:    route.DestAddr.MinShortLen,
+			MaxShortLen:    route.DestAddr.MaxShortLen,
+		}
+		if err := validateDestAddr(env.To, opts); err != nil {
+			return Receipt{}, err
 		}
 	}
 
-	if env.ClientID != "" && env.ClientMsgID != "" {
-		if gatewayID, ok, err := d.store.CheckIdempotency(ctx, env.ClientID, env.ClientMsgID); err != nil {
-			return Receipt{}, err
-		} else if ok {
-			msg, found, err := d.store.GetMessage(ctx, gatewayID)
-			if err != nil {
-				return Receipt{}, err
-			}
-			receipt := Receipt{GatewayID: gatewayID, Provider: route.Provider, Route: route.Name, State: "queued"}
-			if found {
-				receipt.ProviderID = msg.ProviderID
-				receipt.Provider = msg.Provider
-				receipt.Route = msg.Route
-				receipt.State = msg.State
-			}
-			return receipt, nil
-		}
-	}
 	gatewayID, err := d.newGatewayID(ctx)
 	if err != nil {
 		return Receipt{}, err
@@ -222,16 +214,35 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		ReceivedAt:         env.ReceivedAt,
 		UDH:                append([]byte(nil), env.UDH...),
 	}
-	if _, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
+	_, existingGatewayID, duplicate, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
 		GatewayID:   gatewayID,
 		Provider:    route.Provider,
 		Payload:     payload,
 		MaxAttempts: d.maxAttempts,
-	}, env.ClientID, env.ClientMsgID, 24*time.Hour); err != nil {
+	}, env.ClientID, env.ClientMsgID, 24*time.Hour)
+	if err != nil {
 		return Receipt{}, err
+	}
+	if duplicate {
+		return d.receiptForExisting(ctx, existingGatewayID, route)
 	}
 	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", route.Provider, "route", route.Name)
 	return Receipt{GatewayID: gatewayID, Provider: route.Provider, Route: route.Name, State: "queued"}, nil
+}
+
+func (d *Dispatcher) receiptForExisting(ctx context.Context, gatewayID string, route config.RouteConfig) (Receipt, error) {
+	msg, found, err := d.store.GetMessage(ctx, gatewayID)
+	if err != nil {
+		return Receipt{}, err
+	}
+	receipt := Receipt{GatewayID: gatewayID, Provider: route.Provider, Route: route.Name, State: "queued"}
+	if found {
+		receipt.ProviderID = msg.ProviderID
+		receipt.Provider = msg.Provider
+		receipt.Route = msg.Route
+		receipt.State = msg.State
+	}
+	return receipt, nil
 }
 
 func (d *Dispatcher) OnDLR(dlr provider.DLR) {
@@ -316,6 +327,11 @@ func (d *Dispatcher) StartWorkers(n int) {
 		defer d.wg.Done()
 		d.requeueLoop(d.workerCtx)
 	}()
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.pendingSweepLoop(d.workerCtx)
+	}()
 }
 
 func (d *Dispatcher) requeueLoop(ctx context.Context) {
@@ -351,6 +367,34 @@ func (d *Dispatcher) requeueStale(ctx context.Context) {
 	}
 	if n > 0 {
 		d.logger.Warn("requeued stale outbox", "count", n, "claim_timeout", d.claimTimeout)
+	}
+}
+
+func (d *Dispatcher) pendingSweepLoop(ctx context.Context) {
+	if d.pendingSweep <= 0 {
+		return
+	}
+	ticker := time.NewTicker(d.pendingSweep)
+	defer ticker.Stop()
+	d.sweepExpiredPending(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.sweepExpiredPending(ctx)
+		}
+	}
+}
+
+func (d *Dispatcher) sweepExpiredPending(ctx context.Context) {
+	n, err := d.store.SweepExpiredPending(ctx, time.Now().UTC())
+	if err != nil {
+		d.logger.Warn("sweep expired pending failed", "err", err)
+		return
+	}
+	if n > 0 {
+		d.logger.Info("swept expired pending", "count", n)
 	}
 }
 

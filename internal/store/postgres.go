@@ -198,7 +198,6 @@ ON CONFLICT (provider_id) DO UPDATE SET
 }
 
 func (s *PostgresStore) GetPending(ctx context.Context, providerID string) (Pending, bool, error) {
-	_, _ = s.SweepExpiredPending(ctx, time.Now().UTC())
 	rows, err := s.pool.Query(ctx, `
 SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
@@ -241,7 +240,6 @@ func (s *PostgresStore) ListReadyDLR(ctx context.Context, systemID string, limit
 	if limit <= 0 {
 		limit = 100
 	}
-	_, _ = s.SweepExpiredPending(ctx, time.Now().UTC())
 	rows, err := s.pool.Query(ctx, `
 SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
@@ -432,15 +430,42 @@ ON CONFLICT (client_id, key) DO UPDATE SET
 	return err
 }
 
-func (s *PostgresStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, error) {
+func (s *PostgresStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, string, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return 0, "", false, err
 	}
 	defer tx.Rollback(ctx)
 
+	if clientID != "" && key != "" {
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM idempotency WHERE client_id = $1 AND key = $2 AND expires_at < NOW()`, clientID, key)
+		if err != nil {
+			return 0, "", false, err
+		}
+		_ = tag
+		tag, err = tx.Exec(ctx, `
+INSERT INTO idempotency (client_id, key, gateway_id, expires_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (client_id, key) DO NOTHING`, clientID, key, msg.ID, time.Now().UTC().Add(ttl))
+		if err != nil {
+			return 0, "", false, err
+		}
+		if tag.RowsAffected() == 0 {
+			var existing string
+			if err := tx.QueryRow(ctx, `
+SELECT gateway_id FROM idempotency
+WHERE client_id = $1 AND key = $2 AND expires_at >= NOW()`, clientID, key).Scan(&existing); err != nil {
+				return 0, "", false, err
+			}
+			return 0, existing, true, nil
+		}
+	}
+
 	if err := saveMessageSQL(ctx, tx, msg); err != nil {
-		return 0, err
+		return 0, "", false, err
 	}
 	if item.State == "" {
 		item.State = "pending"
@@ -453,32 +478,19 @@ func (s *PostgresStore) SubmitAtomic(ctx context.Context, msg message.Message, i
 	}
 	payload, err := json.Marshal(item.Payload)
 	if err != nil {
-		return 0, err
+		return 0, "", false, err
 	}
 	var id int64
 	if err := tx.QueryRow(ctx, `
 INSERT INTO outbox (gateway_id, provider, payload, state, next_retry_at, max_attempts)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id`, item.GatewayID, item.Provider, payload, item.State, item.NextRetryAt, item.MaxAttempts).Scan(&id); err != nil {
-		return 0, err
-	}
-	if clientID != "" && key != "" {
-		if ttl <= 0 {
-			ttl = 24 * time.Hour
-		}
-		if _, err := tx.Exec(ctx, `
-INSERT INTO idempotency (client_id, key, gateway_id, expires_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (client_id, key) DO UPDATE SET
-	gateway_id = EXCLUDED.gateway_id,
-	expires_at = EXCLUDED.expires_at`, clientID, key, msg.ID, time.Now().UTC().Add(ttl)); err != nil {
-			return 0, err
-		}
+		return 0, "", false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, err
+		return 0, "", false, err
 	}
-	return id, nil
+	return id, msg.ID, false, nil
 }
 
 func scanMessage(row pgx.CollectableRow) (message.Message, error) {

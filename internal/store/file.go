@@ -266,10 +266,10 @@ func (s *FileStore) SaveIdempotency(ctx context.Context, clientID, key, gatewayI
 	return s.persist()
 }
 
-func (s *FileStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, error) {
-	id, err := s.MemoryStore.SubmitAtomic(ctx, msg, item, clientID, key, ttl)
-	if err != nil {
-		return 0, err
+func (s *FileStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, string, bool, error) {
+	id, gatewayID, duplicate, err := s.MemoryStore.SubmitAtomic(ctx, msg, item, clientID, key, ttl)
+	if err != nil || duplicate {
+		return id, gatewayID, duplicate, err
 	}
-	return id, s.persist()
+	return id, gatewayID, duplicate, s.persist()
 }

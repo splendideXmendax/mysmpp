@@ -34,7 +34,7 @@ type Store interface {
 	OutboxDepth(context.Context, string) (int, error)
 	CheckIdempotency(context.Context, string, string) (string, bool, error)
 	SaveIdempotency(context.Context, string, string, string, time.Duration) error
-	SubmitAtomic(context.Context, message.Message, OutboxItem, string, string, time.Duration) (int64, error)
+	SubmitAtomic(context.Context, message.Message, OutboxItem, string, string, time.Duration) (int64, string, bool, error)
 }
 
 type ListOptions struct {
@@ -479,7 +479,7 @@ func (s *MemoryStore) SaveIdempotency(_ context.Context, clientID, key, gatewayI
 	return nil
 }
 
-func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, error) {
+func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, string, bool, error) {
 	now := time.Now().UTC()
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
@@ -487,6 +487,17 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
+
+	if clientID != "" && key != "" {
+		k := idempotencyKey{clientID: clientID, key: key}
+		if rec, ok := s.idempotency[k]; ok && rec.expiresAt.After(now) {
+			return 0, rec.gatewayID, true, nil
+		}
+		s.idempotency[k] = idempotencyRecord{
+			gatewayID: msg.ID,
+			expiresAt: now.Add(ttl),
+		}
+	}
 
 	msg = cloneMessage(msg)
 	if idx, ok := s.messageByID[msg.ID]; ok {
@@ -514,13 +525,7 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 	item.Payload.Meta = cloneMap(item.Payload.Meta)
 	s.outbox[item.ID] = item
 
-	if clientID != "" && key != "" {
-		s.idempotency[idempotencyKey{clientID: clientID, key: key}] = idempotencyRecord{
-			gatewayID: msg.ID,
-			expiresAt: now.Add(ttl),
-		}
-	}
-	return item.ID, nil
+	return item.ID, msg.ID, false, nil
 }
 
 func (s *MemoryStore) sweepLocked(now time.Time) {

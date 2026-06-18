@@ -67,6 +67,7 @@ type DispatcherConfig struct {
 	PendingTTL           string `json:"pending_ttl"`
 	MaxAttempts          int    `json:"max_attempts"`
 	ClaimTimeout         string `json:"claim_timeout"`
+	PendingSweepInterval string `json:"pending_sweep_interval"`
 	ValidateDestAddr     *bool  `json:"validate_dest_addr,omitempty"`
 }
 
@@ -96,6 +97,7 @@ type RouteConfig struct {
 	Provider    string            `json:"provider"`
 	Priority    int               `json:"priority"`
 	AddrRewrite AddrRewriteConfig `json:"addr_rewrite,omitempty"`
+	DestAddr    DestAddrConfig    `json:"dest_addr,omitempty"`
 }
 
 type AddrRewriteConfig struct {
@@ -103,6 +105,13 @@ type AddrRewriteConfig struct {
 	CountryCode           string `json:"country_code,omitempty"`
 	AddPrefix             string `json:"add_prefix,omitempty"`
 	EnforceE164Len        bool   `json:"enforce_e164_len,omitempty"`
+}
+
+type DestAddrConfig struct {
+	Validate       *bool `json:"validate,omitempty"`
+	AllowShortCode bool  `json:"allow_short_code,omitempty"`
+	MinShortLen    int   `json:"min_short_len,omitempty"`
+	MaxShortLen    int   `json:"max_short_len,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -221,6 +230,7 @@ func Default() Config {
 			PendingTTL:           "30m",
 			MaxAttempts:          5,
 			ClaimTimeout:         "60s",
+			PendingSweepInterval: "1m",
 			ValidateDestAddr:     boolPtr(true),
 		},
 		Storage: StorageConfig{Driver: "memory"},
@@ -269,6 +279,9 @@ func (c *Config) Normalize() {
 	}
 	if c.Dispatcher.ClaimTimeout == "" {
 		c.Dispatcher.ClaimTimeout = "60s"
+	}
+	if c.Dispatcher.PendingSweepInterval == "" {
+		c.Dispatcher.PendingSweepInterval = "1m"
 	}
 	if c.Dispatcher.ValidateDestAddr == nil {
 		c.Dispatcher.ValidateDestAddr = boolPtr(true)
@@ -402,6 +415,12 @@ func (c Config) validate(allowAutoGenerate bool) error {
 	if _, err := time.ParseDuration(c.Dispatcher.ClaimTimeout); c.Dispatcher.ClaimTimeout != "" && err != nil {
 		return fmt.Errorf("dispatcher.claim_timeout is invalid: %w", err)
 	}
+	if _, err := time.ParseDuration(c.Dispatcher.PendingSweepInterval); c.Dispatcher.PendingSweepInterval != "" && err != nil {
+		return fmt.Errorf("dispatcher.pending_sweep_interval is invalid: %w", err)
+	}
+	if err := validateClaimTimeoutInvariant(c); err != nil {
+		return err
+	}
 	for _, proxy := range c.TrustedProxies {
 		if _, err := netip.ParsePrefix(proxy); err == nil {
 			continue
@@ -462,6 +481,12 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 		if route.AddrRewrite.AddPrefix != "" && !allDigits(route.AddrRewrite.AddPrefix) {
 			return fmt.Errorf("route %q addr_rewrite.add_prefix must contain only digits", route.Name)
+		}
+		if route.DestAddr.MinShortLen < 0 || route.DestAddr.MaxShortLen < 0 {
+			return fmt.Errorf("route %q dest_addr short code lengths must be non-negative", route.Name)
+		}
+		if route.DestAddr.MinShortLen > 0 && route.DestAddr.MaxShortLen > 0 && route.DestAddr.MinShortLen > route.DestAddr.MaxShortLen {
+			return fmt.Errorf("route %q dest_addr min_short_len must be <= max_short_len", route.Name)
 		}
 	}
 	if err := validateRoutePrefixes(c.Routes); err != nil {
@@ -732,6 +757,65 @@ func boolPtr(value bool) *bool {
 
 func (c DispatcherConfig) ValidateDestAddrEnabled() bool {
 	return c.ValidateDestAddr == nil || *c.ValidateDestAddr
+}
+
+func (c DestAddrConfig) ValidateEnabled(global bool) bool {
+	if c.Validate == nil {
+		return global
+	}
+	return *c.Validate
+}
+
+func validateClaimTimeoutInvariant(c Config) error {
+	claimTimeout, err := time.ParseDuration(c.Dispatcher.ClaimTimeout)
+	if err != nil || claimTimeout <= 0 {
+		return nil
+	}
+	perWorker := c.Dispatcher.PerWorkerConcurrency
+	if perWorker <= 0 {
+		perWorker = 10
+	}
+	claimLimit := c.Dispatcher.ClaimLimit
+	if claimLimit <= 0 {
+		claimLimit = 20
+	}
+	maxProviderTimeout := maxConfiguredProviderTimeout(c.Providers)
+	if maxProviderTimeout <= 0 {
+		maxProviderTimeout = 5 * time.Second
+	}
+	batches := (claimLimit + perWorker - 1) / perWorker
+	required := time.Duration(batches) * maxProviderTimeout
+	if claimTimeout <= required {
+		return fmt.Errorf("dispatcher.claim_timeout (%s) must be greater than ceil(claim_limit/per_worker_concurrency) * max provider response timeout (%s); upstream delivery is at-least-once and stale-claim recovery may redeliver", claimTimeout, required)
+	}
+	return nil
+}
+
+func maxConfiguredProviderTimeout(providers []ProviderConfig) time.Duration {
+	var maxTimeout time.Duration
+	for _, p := range providers {
+		var timeout time.Duration
+		switch strings.ToLower(p.Protocol) {
+		case "smpp":
+			if p.SMPP != nil && p.SMPP.ResponseTimeoutMS > 0 {
+				timeout = time.Duration(p.SMPP.ResponseTimeoutMS) * time.Millisecond
+			} else {
+				timeout = 5 * time.Second
+			}
+		case "http", "https":
+			if p.HTTPTimeoutMS > 0 {
+				timeout = time.Duration(p.HTTPTimeoutMS) * time.Millisecond
+			} else {
+				timeout = 3 * time.Second
+			}
+		default:
+			timeout = 4 * time.Second
+		}
+		if timeout > maxTimeout {
+			maxTimeout = timeout
+		}
+	}
+	return maxTimeout
 }
 
 func validateRoutePrefixes(routes []RouteConfig) error {

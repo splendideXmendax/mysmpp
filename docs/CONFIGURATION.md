@@ -102,6 +102,7 @@ Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到
   "pending_ttl": "30m",
   "max_attempts": 5,
   "claim_timeout": "60s",
+  "pending_sweep_interval": "1m",
   "validate_dest_addr": true
 }
 ```
@@ -142,9 +143,12 @@ Additional dispatcher fields:
 | Field | Default | Description |
 |---|---:|---|
 | `claim_timeout` | `60s` | Stale `claimed` outbox reclaim threshold. If a worker crashes after claim but before ack/fail, the row is moved back to `pending` after this duration. |
+| `pending_sweep_interval` | `1m` | Background interval for deleting expired pending DLR mappings. |
 | `validate_dest_addr` | `true` | Validate destination address before route match. Invalid E.164 or unassigned country code returns SMPP `ESME_RINVDSTADR` and does not enter outbox. |
 
 Destination validation is intentionally minimal: optional leading `+`, digits only, total E.164 length `4..15`, and an assigned 1-3 digit country calling code. It does not validate each country's full national numbering plan.
+
+`claim_timeout` must be greater than `ceil(claim_limit / per_worker_concurrency) * max_provider_response_timeout`. mysmpp validates this at startup/config save because stale-claim recovery can otherwise requeue slow but still active work.
 
 ## esmes
 
@@ -218,11 +222,17 @@ Optional route-level address rewrite:
     "country_code": "86",
     "add_prefix": "",
     "enforce_e164_len": true
+  },
+  "dest_addr": {
+    "validate": true,
+    "allow_short_code": false
   }
 }
 ```
 
 `addr_rewrite` defaults to pass-through. `strip_trunk_zero_after_cc=true` changes a number like `860015013628000` to `8615013628000`; keep it disabled unless the upstream contract explicitly requires removing national trunk zeroes.
+
+Set `dest_addr.validate=false` on a specific route when that route is intentionally for non-E.164 destinations such as short codes. Alternatively set `allow_short_code=true` with optional `min_short_len` and `max_short_len`.
 
 ## providers
 

@@ -20,6 +20,7 @@
     "pending_ttl": "30m",
     "max_attempts": 5,
     "claim_timeout": "60s",
+    "pending_sweep_interval": "1m",
     "validate_dest_addr": true
   },
   "esmes": [
@@ -43,6 +44,10 @@
         "country_code": "86",
         "add_prefix": "",
         "enforce_e164_len": true
+      },
+      "dest_addr": {
+        "validate": true,
+        "allow_short_code": false
       }
     },
     {

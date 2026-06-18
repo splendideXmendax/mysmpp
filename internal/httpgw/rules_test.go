@@ -797,6 +797,6 @@ func (s failingStore) CheckIdempotency(context.Context, string, string) (string,
 func (s failingStore) SaveIdempotency(context.Context, string, string, string, time.Duration) error {
 	return s.err
 }
-func (s failingStore) SubmitAtomic(context.Context, message.Message, store.OutboxItem, string, string, time.Duration) (int64, error) {
-	return 0, s.err
+func (s failingStore) SubmitAtomic(context.Context, message.Message, store.OutboxItem, string, string, time.Duration) (int64, string, bool, error) {
+	return 0, "", false, s.err
 }

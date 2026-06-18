@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,96 @@ func TestDispatcherCanRewriteTrunkZeroAfterCountryCode(t *testing.T) {
 	}
 	if msg.To != "8615013628000" {
 		t.Fatalf("expected rewritten destination, got %q", msg.To)
+	}
+}
+
+func TestDispatcherConcurrentIdempotencyQueuesOnce(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	cfg.Workers = 1
+	cfg.PerWorkerConcurrency = 1
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "default",
+		Prefix:   []string{},
+		Provider: "mock-a",
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	const submissions = 20
+	receipts := make(chan Receipt, submissions)
+	errs := make(chan error, submissions)
+	var wg sync.WaitGroup
+	for i := 0; i < submissions; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			receipt, err := d.Submit(context.Background(), Envelope{
+				From:        "1069",
+				To:          "8613800138000",
+				Text:        "hello",
+				ClientID:    "client-a",
+				ClientMsgID: "same-key",
+				Source:      SubmitSource{Kind: SourceHTTPAPI},
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			receipts <- receipt
+		}()
+	}
+	wg.Wait()
+	close(receipts)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var first string
+	for receipt := range receipts {
+		if first == "" {
+			first = receipt.GatewayID
+			continue
+		}
+		if receipt.GatewayID != first {
+			t.Fatalf("expected same gateway id for duplicate submits, got %q and %q", first, receipt.GatewayID)
+		}
+	}
+	if depth, err := st.OutboxDepth(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	} else if depth != 1 {
+		t.Fatalf("expected one outbox row, got %d", depth)
+	}
+}
+
+func TestDispatcherRouteCanDisableDestValidationForShortCode(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	disabled := false
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "short",
+		Prefix:   []string{"123"},
+		Provider: "mock-a",
+		Priority: 1,
+		DestAddr: config.DestAddrConfig{
+			Validate: &disabled,
+		},
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	_, err := d.Submit(context.Background(), Envelope{From: "1069", To: "123", Text: "hello"})
+	if err != nil {
+		t.Fatalf("expected short code to pass when route validation is disabled: %v", err)
 	}
 }
 

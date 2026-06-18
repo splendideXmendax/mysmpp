@@ -9,9 +9,21 @@ import (
 
 var ErrInvalidDestAddr = errors.New("invalid destination address")
 
-func validateDestAddr(addr string) error {
+type destAddrOptions struct {
+	AllowShortCode bool
+	MinShortLen    int
+	MaxShortLen    int
+}
+
+func validateDestAddr(addr string, opts destAddrOptions) error {
 	s := strings.TrimPrefix(addr, "+")
-	if len(s) < 4 || len(s) > 15 || !digitsOnly(s) {
+	if !digitsOnly(s) {
+		return ErrInvalidDestAddr
+	}
+	if opts.AllowShortCode && isShortCode(s, opts) {
+		return nil
+	}
+	if len(s) < 4 || len(s) > 15 {
 		return ErrInvalidDestAddr
 	}
 	if _, ok := splitE164CountryCode(s); !ok {
@@ -60,6 +72,18 @@ func digitsOnly(s string) bool {
 		}
 	}
 	return true
+}
+
+func isShortCode(s string, opts destAddrOptions) bool {
+	minLen := opts.MinShortLen
+	if minLen <= 0 {
+		minLen = 3
+	}
+	maxLen := opts.MaxShortLen
+	if maxLen <= 0 {
+		maxLen = 6
+	}
+	return len(s) >= minLen && len(s) <= maxLen
 }
 
 var e164CountryCodes = map[string]struct{}{
