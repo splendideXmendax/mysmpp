@@ -194,8 +194,8 @@ DLR inbound:
 
 - 长短信拆分当前是消息元数据，HTTP 上游发送仍是完整文本。
 - 风控是单进程内存计数，多副本部署会放大限制。
-- gateway_id 是进程内递增，生产多实例需要存储层统一分配。
-- pending 清理是惰性清理，尚无独立维护任务。
+- gateway_id 已通过 store 分段分配；Postgres 使用 `id_alloc` 表，file store 会落盘，memory store 重启后仍会丢失状态。
+- pending DLR 已有后台过期清理；messages/outbox 历史归档仍需外部任务或后续实现。
 - Metrics 和审计日志还未落地。
 - MO 推送到下游 SMPP/HTTP 还未完整实现。
 

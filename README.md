@@ -1,8 +1,29 @@
 # mysmpp 短信网关
 
-`mysmpp` 是一个轻量级短信网关 MVP。它可以接收下游 SMPP/HTTP 提交，按号码前缀和优先级路由到上游 provider，持久化消息、outbox、pending DLR 和幂等记录，并把状态报告通过 SMPP `deliver_sm` 推回原 ESME 会话。
+`mysmpp` 是一个轻量级短信网关。它可以接收下游 SMPP/HTTP 提交，按号码前缀和优先级路由到上游 provider，持久化消息、outbox、pending DLR 和幂等记录，并把状态报告通过 SMPP `deliver_sm` 推回原 ESME 会话。
 
-当前项目已经不是协议骨架，而是可运行、可联调、可继续扩展的网关雏形。
+当前项目已经不是协议骨架，而是可运行、可联调、可继续扩展的网关雏形。完整模块关系和运行时数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 架构概览
+
+```text
+SMPP ESME / HTTP client
+        -> SMPP server / HTTP gateway
+        -> dispatcher route + validate + enqueue
+        -> store messages + outbox + idempotency
+        -> worker claim outbox
+        -> HTTP/SMPP/mock provider
+        -> pending DLR mapping
+        -> deliver_sm DLR back to SMPP ESME
+```
+
+核心设计:
+
+- 下游提交和上游发送解耦，提交成功后消息先进入 outbox，再由 dispatcher worker 异步投递。
+- Postgres outbox 使用 `FOR UPDATE SKIP LOCKED` claim，支持多 worker 和多实例并发消费。
+- gateway_id 通过 store 分段分配；Postgres 使用 `id_alloc` 表，file store 会落盘，memory store 仅适合开发测试。
+- 上游 SMPP provider 使用连接池、窗口流控、指数退避重连和 enquire_link 空闲探测。
+- 运行时配置可通过管理后台或配置 API 热更新，并可原子写回配置文件。
 
 ## 已实现能力
 
@@ -15,18 +36,19 @@
 - SMPP 上游 Provider: `protocol=smpp` 时 mysmpp 作为 ESME bind 上游 SMSC，支持 `submit_sm`、`submit_sm_resp` 对账和上游 `deliver_sm` DLR 解析。
 - HTTP 入站规则: 支持 provider DLR 回调、普通入站消息和自定义字段映射。
 - 存储: memory、file、Postgres 三种 driver。Postgres outbox 使用 `FOR UPDATE SKIP LOCKED` 并发 claim。
-- Dispatcher: 可配置 worker、单 worker 并发、claim 数量、轮询间隔、pending TTL、最大重试次数。
+- Dispatcher: 可配置 worker、单 worker 并发、claim 数量、轮询间隔、pending TTL、最大重试次数和 stale claim 回收。
 - 管理后台: `/admin/`，用户名密码登录、登录限流、CSRF、防止占位符凭据上线、运行时热更新并写回配置。
-- 可靠性辅助: outbox 重试、指数退避、幂等提交、简单风控、健康检查。
+- 可靠性辅助: outbox 重试、指数退避、幂等提交、pending DLR 补投、简单风控、健康检查。
 
 ## 当前边界
 
 - 长短信在 SMPP 上游可按 UDH/payload/SAR 策略发送；HTTP 上游发送路径仍发送完整原文。
 - 风控计数是进程内 map，多实例部署时限额会放大。
-- gateway_id 是进程内递增计数，单进程内不会碰撞；生产多实例或重启后强唯一建议后续改为存储层分配。
-- pending DLR 清理是惰性清理，没有独立后台归档任务。
+- memory 存储会在重启后丢失消息、outbox、pending DLR 映射、幂等记录和 ID 状态；生产请使用 Postgres。
+- pending DLR 有后台过期清理；messages/outbox 历史归档仍需要外部任务或后续实现。
 - HTTP provider 的 DLR 通过 `inbound` 回调规则进入，`HTTPProvider.OnDLR` 是有意 no-op。
 - SMPP 上游 Provider 当前支持 transceiver bind；`tx_rx` 分离 bind、SMPP over TLS、MO 路由到下游和分段 DLR 落库聚合仍是后续项。
+- HTTP 来源 DLR 当前只更新内部消息状态，尚未主动回调客户提交时携带的 `callback_url`。
 - 暴露到公网时请放在 TLS 反向代理后面，不要直接裸奔 HTTP 管理后台。
 
 ## 目录结构
@@ -166,6 +188,8 @@ SMPP 上游连接页面说明见 [docs/ADMIN_CONNECTIONS.md](docs/ADMIN_CONNECTI
 
 API 参考见 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)。
 
+架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 运维 Runbook 见 [docs/RUNBOOK.md](docs/RUNBOOK.md)。
 
 安全加固清单见 [docs/SECURITY_HARDENING.md](docs/SECURITY_HARDENING.md)。
@@ -213,9 +237,10 @@ go test ./...
 
 ## 后续路线
 
-1. 真正逐段发送长短信。
-2. 存储层分配 gateway_id，支持重启和多实例强唯一。
+1. HTTP 上游长短信逐段发送和分段 DLR 聚合。
+2. HTTP 来源 DLR callback 回调。
 3. Redis/Postgres 分布式风控。
 4. Metrics 和审计日志。
-5. pending/outbox 后台清理和 messages 归档。
+5. outbox/messages 历史归档和保留策略。
 6. MO 下发到 SMPP/HTTP 下游。
+7. SMPP 上游 `tx_rx` 分离 bind 和 TLS。
