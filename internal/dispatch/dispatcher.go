@@ -42,6 +42,7 @@ type Dispatcher struct {
 	pollInterval  time.Duration
 	maxAttempts   int
 	validateDest  bool
+	dlrLookupWait time.Duration
 	workerCtx     context.Context
 	cancelWorkers context.CancelFunc
 	wg            sync.WaitGroup
@@ -93,6 +94,7 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		pollInterval:  time.Duration(cfg.PollIntervalMS) * time.Millisecond,
 		maxAttempts:   cfg.MaxAttempts,
 		validateDest:  cfg.ValidateDestAddrEnabled(),
+		dlrLookupWait: 2 * time.Second,
 		workerCtx:     ctx,
 		cancelWorkers: cancel,
 	}
@@ -255,7 +257,7 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rec, ok, err := d.store.GetPending(ctx, dlr.ProviderID)
+	rec, ok, err := d.getPendingForDLR(ctx, dlr.ProviderID)
 	if err != nil {
 		d.logger.Warn("get dlr mapping failed", "provider_id", dlr.ProviderID, "err", err)
 		return err
@@ -297,6 +299,28 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 		_ = d.store.DeletePending(ctx, dlr.ProviderID)
 	}
 	return nil
+}
+
+func (d *Dispatcher) getPendingForDLR(ctx context.Context, providerID string) (store.Pending, bool, error) {
+	deadline := time.Now().Add(d.dlrLookupWait)
+	for {
+		rec, ok, err := d.store.GetPending(ctx, providerID)
+		if err != nil || ok || d.dlrLookupWait <= 0 || time.Now().After(deadline) {
+			return rec, ok, err
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return store.Pending{}, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (d *Dispatcher) PendingSize() int {

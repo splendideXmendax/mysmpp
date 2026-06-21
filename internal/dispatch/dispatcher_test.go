@@ -266,6 +266,55 @@ func TestDispatcherDefersSMPPDLRUntilReceiverBound(t *testing.T) {
 	}
 }
 
+func TestDispatcherWaitsForPendingWhenDLRArrivesEarly(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+
+	const providerID = "up-fast-1"
+	const gatewayID = "g000000000001"
+	if err := st.SaveMessage(context.Background(), testMessage(gatewayID)); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = st.SavePending(context.Background(), store.Pending{
+			ProviderID:         providerID,
+			GatewayID:          gatewayID,
+			SourceKind:         SourceHTTPAPI.String(),
+			From:               "1069",
+			To:                 "13800138000",
+			Text:               "hello",
+			RegisteredDelivery: 1,
+			Provider:           "mock-a",
+			ReceivedAt:         time.Now().UTC(),
+			ExpiresAt:          time.Now().Add(time.Hour),
+		})
+	}()
+
+	if err := d.HandleDLR(context.Background(), provider.DLR{
+		Provider:   "mock-a",
+		ProviderID: providerID,
+		State:      "DELIVRD",
+		DoneAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, ok, err := st.GetMessage(context.Background(), gatewayID)
+	if err != nil || !ok {
+		t.Fatalf("message not found after dlr: ok=%v err=%v", ok, err)
+	}
+	if msg.State != "DELIVRD" {
+		t.Fatalf("message state = %q", msg.State)
+	}
+	if _, ok, err := st.GetPending(context.Background(), providerID); err != nil || ok {
+		t.Fatalf("pending should be deleted after http dlr: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
 	st := store.NewMemory()
 	rec := store.Pending{
