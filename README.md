@@ -7,7 +7,7 @@
 ## 架构概览
 
 ```text
-SMPP ESME / HTTP client
+SMPP ESME / HTTP client a
         -> SMPP server / HTTP gateway
         -> dispatcher route + validate + enqueue
         -> store messages + outbox + idempotency
