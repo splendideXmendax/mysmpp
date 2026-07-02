@@ -14,7 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/splendideXmendax/mysmpp/internal/cdr"
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/filter"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/router"
@@ -27,12 +29,19 @@ type SMPPServer interface {
 	ReceiversBySystemID(systemID string) []*smpp.Session
 }
 
+type CDRSink interface {
+	Emit(cdr.Event)
+	Close() error
+}
+
 var errNoReceiverOnline = errors.New("no online receiver for smpp dlr")
 
 type Dispatcher struct {
 	logger        *slog.Logger
 	registry      *provider.Registry
 	router        atomic.Pointer[router.Router]
+	filterEngine  atomic.Pointer[filter.Engine]
+	cdrSink       atomic.Pointer[cdrSinkHolder]
 	store         store.Store
 	idAlloc       *idAllocator
 	dlrPick       atomic.Uint64
@@ -51,9 +60,14 @@ type Dispatcher struct {
 	wg            sync.WaitGroup
 	httpClient    *http.Client
 	dlrCh         chan provider.DLR
+	instanceID    string
 
 	mu      sync.RWMutex
 	smppSrv SMPPServer
+}
+
+type cdrSinkHolder struct {
+	sink CDRSink
 }
 
 func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config.DispatcherConfig, stores ...store.Store) *Dispatcher {
@@ -152,6 +166,26 @@ func (d *Dispatcher) ReloadRoutes(routes []config.RouteConfig, providers []confi
 	d.router.Store(router.NewWithProviders(routes, providers))
 }
 
+func (d *Dispatcher) SetFilterEngine(e *filter.Engine) {
+	d.filterEngine.Store(e)
+}
+
+func (d *Dispatcher) ReloadFilter(e *filter.Engine) {
+	d.SetFilterEngine(e)
+}
+
+func (d *Dispatcher) SetCDRSink(s CDRSink) {
+	if s == nil {
+		d.cdrSink.Store(nil)
+		return
+	}
+	d.cdrSink.Store(&cdrSinkHolder{sink: s})
+}
+
+func (d *Dispatcher) SetInstanceID(instance string) {
+	d.instanceID = instance
+}
+
 func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -160,14 +194,55 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		env.ReceivedAt = time.Now().UTC()
 	}
 	env.To = strings.TrimPrefix(env.To, "+")
+	filterDecision := filter.Decision{Action: filter.ActionPass, NewText: env.Text}
+	if engine := d.filterEngine.Load(); engine != nil {
+		filterDecision = engine.Evaluate(env.Text)
+		if filterDecision.Action == filter.ActionBlock {
+			d.emitCDR(cdr.Event{
+				Kind:       "rejected",
+				From:       env.From,
+				To:         env.To,
+				TextLen:    len([]rune(env.Text)),
+				TextHash:   cdr.TextHash(env.Text),
+				ClientID:   env.ClientID,
+				SystemID:   env.Source.SMPPSystemID,
+				Source:     env.Source.Kind.String(),
+				Reason:     "filter_block",
+				FilterRule: filterDecision.Reason,
+			})
+			return Receipt{}, fmt.Errorf("%w: %s", ErrBlocked, filterDecision.Reason)
+		}
+		if filterDecision.Action == filter.ActionMask {
+			env.Text = filterDecision.NewText
+		}
+	}
 	rt := d.router.Load()
 	if rt == nil {
 		return Receipt{}, errors.New("router not initialized")
 	}
-	route, ok := rt.MatchPhone(env.To)
+	match, ok := rt.MatchSubmit(router.MatchInput{
+		To:       env.To,
+		From:     env.From,
+		SystemID: env.Source.SMPPSystemID,
+		ClientID: env.ClientID,
+		Tags:     filterDecision.Tags,
+		Now:      env.ReceivedAt,
+	})
 	if !ok {
-		return Receipt{}, fmt.Errorf("no route matched %q", env.To)
+		d.emitCDR(cdr.Event{
+			Kind:     "rejected",
+			From:     env.From,
+			To:       env.To,
+			TextLen:  len([]rune(env.Text)),
+			TextHash: cdr.TextHash(env.Text),
+			ClientID: env.ClientID,
+			SystemID: env.Source.SMPPSystemID,
+			Source:   env.Source.Kind.String(),
+			Reason:   "no_route",
+		})
+		return Receipt{}, fmt.Errorf("%w %q", ErrNoRoute, env.To)
 	}
+	route := match.Route
 	if route.AddrRewrite != (config.AddrRewriteConfig{}) {
 		env.To = rewriteDestAddr(env.To, route.AddrRewrite)
 	}
@@ -179,6 +254,19 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 			MaxShortLen:    route.DestAddr.MaxShortLen,
 		}
 		if err := validateDestAddr(env.To, opts); err != nil {
+			d.emitCDR(cdr.Event{
+				Kind:     "rejected",
+				From:     env.From,
+				To:       env.To,
+				TextLen:  len([]rune(env.Text)),
+				TextHash: cdr.TextHash(env.Text),
+				ClientID: env.ClientID,
+				SystemID: env.Source.SMPPSystemID,
+				Source:   env.Source.Kind.String(),
+				Route:    route.Name,
+				Provider: match.Provider,
+				Reason:   "bad_dest",
+			})
 			return Receipt{}, err
 		}
 	}
@@ -194,7 +282,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	msg := message.New(gatewayID, message.DirectionMT, env.From, env.To, env.Text)
 	msg.Encoding = encoding
 	msg.Route = route.Name
-	msg.Provider = route.Provider
+	msg.Provider = match.Provider
 	msg.SourceKind = env.Source.Kind.String()
 	msg.SourceID = env.Source.SMPPSessionID
 	msg.Metadata = cloneMeta(env.Meta)
@@ -206,9 +294,16 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	}
 	msg.Segments = message.Split(env.Text, message.SplitOptions{ForceEncoding: encoding})
 	msg.State = "queued"
+	payloadMeta := cloneMeta(env.Meta)
+	if env.ClientID != "" {
+		if payloadMeta == nil {
+			payloadMeta = map[string]string{}
+		}
+		payloadMeta["client_id"] = env.ClientID
+	}
 	payload := store.OutboxPayload{
 		GatewayID:          gatewayID,
-		Provider:           route.Provider,
+		Provider:           match.Provider,
 		Route:              route.Name,
 		From:               env.From,
 		To:                 env.To,
@@ -216,7 +311,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		DataCoding:         env.DataCoding,
 		RegisteredDelivery: env.RegisteredDelivery,
 		Encoding:           encoding,
-		Meta:               cloneMeta(env.Meta),
+		Meta:               payloadMeta,
 		SourceKind:         env.Source.Kind.String(),
 		SourceSession:      env.Source.SMPPSessionID,
 		SourceSystem:       env.Source.SMPPSystemID,
@@ -227,7 +322,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	}
 	_, existingGatewayID, duplicate, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
 		GatewayID:   gatewayID,
-		Provider:    route.Provider,
+		Provider:    match.Provider,
 		Payload:     payload,
 		MaxAttempts: d.maxAttempts,
 	}, env.ClientID, env.ClientMsgID, 24*time.Hour)
@@ -237,8 +332,24 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	if duplicate {
 		return d.receiptForExisting(ctx, existingGatewayID, route)
 	}
-	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", route.Provider, "route", route.Name)
-	return Receipt{GatewayID: gatewayID, Provider: route.Provider, Route: route.Name, State: "queued"}, nil
+	d.emitCDR(cdr.Event{
+		Kind:      "accepted",
+		GatewayID: gatewayID,
+		From:      env.From,
+		To:        env.To,
+		TextLen:   len([]rune(env.Text)),
+		TextHash:  cdr.TextHash(env.Text),
+		Encoding:  encoding,
+		Segments:  len(msg.Segments),
+		Route:     route.Name,
+		Provider:  match.Provider,
+		ClientID:  env.ClientID,
+		SystemID:  env.Source.SMPPSystemID,
+		Source:    env.Source.Kind.String(),
+		State:     "queued",
+	})
+	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", match.Provider, "route", route.Name)
+	return Receipt{GatewayID: gatewayID, Provider: match.Provider, Route: route.Name, State: "queued"}, nil
 }
 
 func (d *Dispatcher) receiptForExisting(ctx context.Context, gatewayID string, route config.RouteConfig) (Receipt, error) {
@@ -291,6 +402,7 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 	if err := d.store.UpdateMessageState(ctx, rec.GatewayID, dlr.State, dlr.ErrorCode); err != nil {
 		d.logger.Warn("update dlr state failed", "gateway_id", rec.GatewayID, "err", err)
 	}
+	d.emitCDR(d.dlrEvent(ctx, rec, dlr))
 	if rec.SourceKind == SourceSMPP.String() && rec.RegisteredDelivery&0x03 == 0 {
 		_ = d.store.DeletePending(ctx, dlr.ProviderID)
 		return nil
@@ -359,6 +471,9 @@ func (d *Dispatcher) PendingSize() int {
 func (d *Dispatcher) Close() error {
 	d.cancelWorkers()
 	d.wg.Wait()
+	if holder := d.cdrSink.Load(); holder != nil && holder.sink != nil {
+		return holder.sink.Close()
+	}
 	return nil
 }
 
@@ -569,6 +684,22 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 			d.failOutbox(ctx, item, fmt.Errorf("save pending: %w", err))
 			return
 		}
+		d.emitCDR(cdr.Event{
+			Kind:       "sent",
+			GatewayID:  payload.GatewayID,
+			ProviderID: providerID,
+			From:       payload.From,
+			To:         payload.To,
+			TextLen:    len([]rune(payload.Text)),
+			TextHash:   cdr.TextHash(payload.Text),
+			Encoding:   payload.Encoding,
+			Route:      payload.Route,
+			Provider:   payload.Provider,
+			ClientID:   payload.Meta["client_id"],
+			SystemID:   payload.SourceSystem,
+			Source:     payload.SourceKind,
+			State:      "sent",
+		})
 	}
 	if err := d.store.AckOutbox(ctx, item.ID); err != nil {
 		d.logger.Warn("ack outbox failed", "outbox_id", item.ID, "err", err)
@@ -579,12 +710,67 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err error) {
 	delay := retryDelay(item.Attempt)
 	next := time.Now().UTC().Add(delay)
+	kind := "retry"
+	state := "retry"
 	if item.Attempt >= item.MaxAttempts || isPermanent(err) {
 		next = time.Time{}
+		kind = "failed"
+		state = "failed"
 		_ = d.store.UpdateMessageState(ctx, item.GatewayID, "failed", 1)
 	}
+	d.emitCDR(cdr.Event{
+		Kind:      kind,
+		GatewayID: item.Payload.GatewayID,
+		From:      item.Payload.From,
+		To:        item.Payload.To,
+		TextLen:   len([]rune(item.Payload.Text)),
+		TextHash:  cdr.TextHash(item.Payload.Text),
+		Encoding:  item.Payload.Encoding,
+		Route:     item.Payload.Route,
+		Provider:  item.Payload.Provider,
+		ClientID:  item.Payload.Meta["client_id"],
+		SystemID:  item.Payload.SourceSystem,
+		Source:    item.Payload.SourceKind,
+		State:     state,
+		ErrorCode: 1,
+		Reason:    err.Error(),
+	})
 	if ferr := d.store.FailOutbox(ctx, item.ID, err.Error(), next); ferr != nil {
 		d.logger.Warn("fail outbox failed", "outbox_id", item.ID, "err", ferr)
+	}
+}
+
+func (d *Dispatcher) emitCDR(e cdr.Event) {
+	holder := d.cdrSink.Load()
+	if holder == nil || holder.sink == nil {
+		return
+	}
+	if e.Instance == "" {
+		e.Instance = d.instanceID
+	}
+	holder.sink.Emit(e)
+}
+
+func (d *Dispatcher) dlrEvent(ctx context.Context, rec store.Pending, dlr provider.DLR) cdr.Event {
+	clientID := ""
+	if msg, ok, err := d.store.GetMessage(ctx, rec.GatewayID); err == nil && ok && msg.Metadata != nil {
+		clientID = msg.Metadata["client_id"]
+	}
+	return cdr.Event{
+		Kind:       "dlr",
+		GatewayID:  rec.GatewayID,
+		ProviderID: dlr.ProviderID,
+		From:       rec.From,
+		To:         rec.To,
+		TextLen:    len([]rune(rec.Text)),
+		TextHash:   cdr.TextHash(rec.Text),
+		Route:      rec.Route,
+		Provider:   rec.Provider,
+		ClientID:   clientID,
+		SystemID:   rec.SourceSystem,
+		Source:     rec.SourceKind,
+		State:      dlr.State,
+		ErrorCode:  dlr.ErrorCode,
 	}
 }
 

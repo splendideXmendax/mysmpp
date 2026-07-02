@@ -39,6 +39,8 @@ type Config struct {
 	Clients        []ClientAuth     `json:"clients"`
 	TrustedProxies []string         `json:"trusted_proxies"`
 	Risk           RiskConfig       `json:"risk"`
+	Filter         FilterConfig     `json:"filter"`
+	CDR            CDRConfig        `json:"cdr"`
 	Storage        StorageConfig    `json:"storage"`
 	Admin          AdminConfig      `json:"admin"`
 }
@@ -92,12 +94,69 @@ type RiskConfig struct {
 }
 
 type RouteConfig struct {
-	Name        string            `json:"name"`
-	Prefix      []string          `json:"prefix"`
-	Provider    string            `json:"provider"`
-	Priority    int               `json:"priority"`
-	AddrRewrite AddrRewriteConfig `json:"addr_rewrite,omitempty"`
-	DestAddr    DestAddrConfig    `json:"dest_addr,omitempty"`
+	Name        string             `json:"name"`
+	Prefix      []string           `json:"prefix"`
+	Provider    string             `json:"provider"`
+	Priority    int                `json:"priority"`
+	AddrRewrite AddrRewriteConfig  `json:"addr_rewrite,omitempty"`
+	DestAddr    DestAddrConfig     `json:"dest_addr,omitempty"`
+	Enabled     *bool              `json:"enabled,omitempty"`
+	FromPrefix  []string           `json:"from_prefix,omitempty"`
+	SystemIDs   []string           `json:"system_ids,omitempty"`
+	ClientIDs   []string           `json:"client_ids,omitempty"`
+	ContentTags []string           `json:"content_tags,omitempty"`
+	TimeWindows []TimeWindow       `json:"time_windows,omitempty"`
+	Weighted    []WeightedProvider `json:"weighted,omitempty"`
+	Failover    []string           `json:"failover,omitempty"`
+}
+
+type WeightedProvider struct {
+	Provider string `json:"provider"`
+	Weight   int    `json:"weight"`
+}
+
+type TimeWindow struct {
+	Days  []string `json:"days,omitempty"`
+	Start string   `json:"start"`
+	End   string   `json:"end"`
+}
+
+type FilterConfig struct {
+	Enabled   bool            `json:"enabled"`
+	Normalize NormalizeConfig `json:"normalize"`
+	Rules     []FilterRule    `json:"rules"`
+}
+
+type NormalizeConfig struct {
+	Lowercase      bool `json:"lowercase"`
+	FullToHalf     bool `json:"full_to_half"`
+	StripZeroWidth bool `json:"strip_zero_width"`
+}
+
+type FilterRule struct {
+	Name     string   `json:"name"`
+	Enabled  *bool    `json:"enabled,omitempty"`
+	Keywords []string `json:"keywords,omitempty"`
+	Regex    string   `json:"regex,omitempty"`
+	Action   string   `json:"action"`
+	Tag      string   `json:"tag,omitempty"`
+	MaskWith string   `json:"mask_with,omitempty"`
+	Priority int      `json:"priority"`
+}
+
+type CDRConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Dir           string `json:"dir"`
+	Mode          string `json:"mode"`
+	MaxRecords    int    `json:"max_records"`
+	MaxAge        string `json:"max_age"`
+	Buffer        int    `json:"buffer"`
+	OnFull        string `json:"on_full"`
+	FsyncEvery    int    `json:"fsync_every"`
+	FsyncInterval string `json:"fsync_interval"`
+	Instance      string `json:"instance"`
+	MaskTo        bool   `json:"mask_to"`
+	StoreText     bool   `json:"store_text"`
 }
 
 type AddrRewriteConfig struct {
@@ -295,6 +354,29 @@ func (c *Config) Normalize() {
 	if c.Risk.PerClientPerSecond == 0 {
 		c.Risk.PerClientPerSecond = 100
 	}
+	if c.CDR.Enabled {
+		if c.CDR.Dir == "" {
+			c.CDR.Dir = "data/cdr"
+		}
+		if c.CDR.Mode == "" {
+			c.CDR.Mode = "events"
+		}
+		if c.CDR.MaxRecords == 0 {
+			c.CDR.MaxRecords = 10000
+		}
+		if c.CDR.MaxAge == "" {
+			c.CDR.MaxAge = "1h"
+		}
+		if c.CDR.Buffer == 0 {
+			c.CDR.Buffer = 65536
+		}
+		if c.CDR.OnFull == "" {
+			c.CDR.OnFull = "block"
+		}
+		if c.CDR.FsyncInterval == "" {
+			c.CDR.FsyncInterval = "2s"
+		}
+	}
 	for i := range c.Inbound {
 		if c.Inbound[i].Method == "" {
 			c.Inbound[i].Method = "POST"
@@ -314,6 +396,16 @@ func (c *Config) Normalize() {
 	for i := range c.Providers {
 		if c.Providers[i].SMPP != nil {
 			c.Providers[i].SMPP.Normalize()
+		}
+	}
+	for i := range c.Routes {
+		if c.Routes[i].Enabled == nil {
+			c.Routes[i].Enabled = boolPtr(true)
+		}
+		for j := range c.Routes[i].Weighted {
+			if c.Routes[i].Weighted[j].Weight <= 0 {
+				c.Routes[i].Weighted[j].Weight = 1
+			}
 		}
 	}
 }
@@ -465,15 +557,46 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		if !validName(route.Name) {
 			return fmt.Errorf("route %q has invalid name", route.Name)
 		}
-		if route.Provider == "" {
+		if route.Provider == "" && len(route.Weighted) == 0 && len(route.Failover) == 0 {
 			return fmt.Errorf("route %q provider is required", route.Name)
 		}
-		if _, ok := names["provider:"+route.Provider]; !ok {
-			return fmt.Errorf("route %q references unknown provider %q", route.Name, route.Provider)
+		if len(route.Weighted) > 0 && len(route.Failover) > 0 {
+			return fmt.Errorf("route %q cannot define both weighted and failover", route.Name)
+		}
+		for _, wp := range route.Weighted {
+			if wp.Provider == "" {
+				return fmt.Errorf("route %q weighted provider is required", route.Name)
+			}
+			if wp.Weight <= 0 {
+				return fmt.Errorf("route %q weighted provider %q weight must be > 0", route.Name, wp.Provider)
+			}
+			if _, ok := names["provider:"+wp.Provider]; !ok {
+				return fmt.Errorf("route %q references unknown weighted provider %q", route.Name, wp.Provider)
+			}
+		}
+		for _, name := range route.Failover {
+			if _, ok := names["provider:"+name]; !ok {
+				return fmt.Errorf("route %q references unknown failover provider %q", route.Name, name)
+			}
+		}
+		if route.Provider != "" {
+			if _, ok := names["provider:"+route.Provider]; !ok {
+				return fmt.Errorf("route %q references unknown provider %q", route.Name, route.Provider)
+			}
 		}
 		for _, prefix := range route.Prefix {
 			if !validPrefix(prefix) {
 				return fmt.Errorf("route %q has invalid prefix %q", route.Name, prefix)
+			}
+		}
+		for _, prefix := range route.FromPrefix {
+			if !validPrefix(prefix) {
+				return fmt.Errorf("route %q has invalid from_prefix %q", route.Name, prefix)
+			}
+		}
+		for _, window := range route.TimeWindows {
+			if err := validateTimeWindow(route.Name, window); err != nil {
+				return err
 			}
 		}
 		if route.AddrRewrite.CountryCode != "" && !allDigits(route.AddrRewrite.CountryCode) {
@@ -490,6 +613,12 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 	}
 	if err := validateRoutePrefixes(c.Routes); err != nil {
+		return err
+	}
+	if err := validateFilter(c.Filter); err != nil {
+		return err
+	}
+	if err := validateCDR(c.CDR); err != nil {
 		return err
 	}
 	esmeNames := map[string]struct{}{}
@@ -820,25 +949,140 @@ func maxConfiguredProviderTimeout(providers []ProviderConfig) time.Duration {
 
 func validateRoutePrefixes(routes []RouteConfig) error {
 	type owner struct {
-		route  string
-		prefix string
+		route    string
+		prefix   string
+		provider string
+		priority int
 	}
 	seen := []owner{}
 	for _, route := range routes {
 		for _, prefix := range route.Prefix {
 			for _, prior := range seen {
-				if prefix == prior.prefix || prefixDominates(prefix, prior.prefix) || prefixDominates(prior.prefix, prefix) {
+				if prefix == prior.prefix && route.Provider == prior.provider && route.Priority == prior.priority {
 					return fmt.Errorf("route %q prefix %q conflicts with route %q prefix %q", route.Name, prefix, prior.route, prior.prefix)
 				}
 			}
-			seen = append(seen, owner{route: route.Name, prefix: prefix})
+			seen = append(seen, owner{route: route.Name, prefix: prefix, provider: route.Provider, priority: route.Priority})
 		}
 	}
 	return nil
 }
 
-func prefixDominates(a, b string) bool {
-	return a != "" && b != "" && strings.HasPrefix(b, a)
+func validateFilter(cfg FilterConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	for _, rule := range cfg.Rules {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
+		if rule.Name == "" {
+			return fmt.Errorf("filter rule name is required")
+		}
+		if !validName(rule.Name) {
+			return fmt.Errorf("filter rule %q has invalid name", rule.Name)
+		}
+		action := strings.ToLower(strings.TrimSpace(rule.Action))
+		switch action {
+		case "block", "mask", "tag", "pass":
+		default:
+			return fmt.Errorf("filter rule %q has invalid action %q", rule.Name, rule.Action)
+		}
+		if len(rule.Keywords) == 0 && rule.Regex == "" {
+			return fmt.Errorf("filter rule %q must define keywords or regex", rule.Name)
+		}
+		if action == "tag" && rule.Tag == "" {
+			return fmt.Errorf("filter rule %q tag is required for tag action", rule.Name)
+		}
+		if rule.Regex != "" {
+			if _, err := regexp.Compile(rule.Regex); err != nil {
+				return fmt.Errorf("filter rule %q regex is invalid: %w", rule.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCDR(cfg CDRConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.Dir == "" {
+		return fmt.Errorf("cdr.dir is required")
+	}
+	if cfg.Mode != "" && cfg.Mode != "events" && cfg.Mode != "settled" {
+		return fmt.Errorf("cdr.mode must be events or settled")
+	}
+	if cfg.MaxRecords <= 0 {
+		return fmt.Errorf("cdr.max_records must be > 0")
+	}
+	if cfg.MaxAge != "" {
+		if d, err := time.ParseDuration(cfg.MaxAge); err != nil || d <= 0 {
+			return fmt.Errorf("cdr.max_age is invalid")
+		}
+	}
+	if cfg.Buffer < 0 {
+		return fmt.Errorf("cdr.buffer must be non-negative")
+	}
+	if cfg.OnFull != "" && cfg.OnFull != "block" && cfg.OnFull != "drop" {
+		return fmt.Errorf("cdr.on_full must be block or drop")
+	}
+	if cfg.FsyncEvery < 0 {
+		return fmt.Errorf("cdr.fsync_every must be non-negative")
+	}
+	if cfg.FsyncInterval != "" {
+		if d, err := time.ParseDuration(cfg.FsyncInterval); err != nil || d < 0 {
+			return fmt.Errorf("cdr.fsync_interval is invalid")
+		}
+	}
+	return nil
+}
+
+func validateTimeWindow(route string, window TimeWindow) error {
+	if _, err := parseClock(window.Start); err != nil {
+		return fmt.Errorf("route %q time_window.start is invalid: %w", route, err)
+	}
+	if _, err := parseClock(window.End); err != nil {
+		return fmt.Errorf("route %q time_window.end is invalid: %w", route, err)
+	}
+	for _, day := range window.Days {
+		switch strings.ToLower(day) {
+		case "mon", "monday", "tue", "tuesday", "wed", "wednesday", "thu", "thursday", "fri", "friday", "sat", "saturday", "sun", "sunday":
+		default:
+			return fmt.Errorf("route %q time_window day %q is invalid", route, day)
+		}
+	}
+	return nil
+}
+
+func parseClock(value string) (time.Duration, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("expected HH:MM")
+	}
+	h, err := parseTwoDigit(parts[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("invalid hour")
+	}
+	m, err := parseTwoDigit(parts[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, fmt.Errorf("invalid minute")
+	}
+	return time.Duration(h)*time.Hour + time.Duration(m)*time.Minute, nil
+}
+
+func parseTwoDigit(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	n := 0
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("not a digit")
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, nil
 }
 
 func isReservedHTTPPath(path string) bool {

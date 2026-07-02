@@ -17,8 +17,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/splendideXmendax/mysmpp/internal/authutil"
+	"github.com/splendideXmendax/mysmpp/internal/cdr"
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/filter"
 	"github.com/splendideXmendax/mysmpp/internal/httprule"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/netutil"
@@ -34,6 +36,7 @@ type Gateway struct {
 	store      store.Store
 	dispatcher *dispatch.Dispatcher
 	registry   *provider.Registry
+	cdrWriter  *cdr.Writer
 	ctx        context.Context
 	configPath string
 	mux        *http.ServeMux
@@ -62,6 +65,8 @@ func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.D
 		switch v := extra.(type) {
 		case *provider.Registry:
 			g.registry = v
+		case *cdr.Writer:
+			g.cdrWriter = v
 		case context.Context:
 			if v != nil {
 				g.ctx = v
@@ -209,7 +214,13 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 				Meta:       req.Meta,
 			})
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				status := http.StatusBadGateway
+				if errors.Is(err, dispatch.ErrBlocked) {
+					status = http.StatusForbidden
+				} else if errors.Is(err, dispatch.ErrInvalidDestAddr) {
+					status = http.StatusBadRequest
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 			writeJSON(w, http.StatusAccepted, receipt)
@@ -324,19 +335,6 @@ func allDigits(value string) bool {
 
 func (g *Gateway) applyRisk(ctx context.Context, clientID, from, to, text string, meta map[string]string) (bool, string) {
 	cfg := g.Config()
-	for _, prefix := range cfg.Risk.BlockedToPrefix {
-		if prefix != "" && strings.HasPrefix(to, prefix) {
-			g.saveBlocked(ctx, clientID, from, to, text, "blocked_prefix", meta)
-			return true, "blocked destination"
-		}
-	}
-	lowerText := strings.ToLower(text)
-	for _, keyword := range cfg.Risk.BlockedKeywords {
-		if keyword != "" && strings.Contains(lowerText, strings.ToLower(keyword)) {
-			g.saveBlocked(ctx, clientID, from, to, text, "blocked_keyword", meta)
-			return true, "blocked keyword"
-		}
-	}
 	if cfg.Risk.PerNumberPerMinute > 0 && !g.allowRate("num:min:"+to, time.Minute, cfg.Risk.PerNumberPerMinute) {
 		g.saveBlocked(ctx, clientID, from, to, text, "number_rate_minute", meta)
 		return true, "number rate limit exceeded"
@@ -401,6 +399,17 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	filterEngine, err := filter.Compile(cfg.Filter)
+	if err != nil {
+		return err
+	}
+	var newCDR *cdr.Writer
+	if cfg.CDR.Enabled {
+		newCDR, err = cdr.NewWriter(cfg.CDR)
+		if err != nil {
+			return err
+		}
+	}
 	var providers map[string]provider.Provider
 	if g.registry != nil {
 		providers = provider.BuildProviders(g.ctx, cfg)
@@ -415,6 +424,13 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 	}
 	if g.dispatcher != nil {
 		g.dispatcher.ReloadRoutes(routes, providerCfgs)
+		g.dispatcher.ReloadFilter(filterEngine)
+		g.dispatcher.SetCDRSink(newCDR)
+	}
+	oldCDR := g.cdrWriter
+	g.cdrWriter = newCDR
+	if oldCDR != nil && oldCDR != newCDR {
+		_ = oldCDR.Close()
 	}
 	return nil
 }

@@ -16,8 +16,10 @@ import (
 
 	"github.com/splendideXmendax/mysmpp/internal/admin"
 	"github.com/splendideXmendax/mysmpp/internal/authutil"
+	"github.com/splendideXmendax/mysmpp/internal/cdr"
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/filter"
 	"github.com/splendideXmendax/mysmpp/internal/httpgw"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
@@ -60,7 +62,20 @@ func main() {
 	dispatcher := dispatch.New(logger, registry, nil, cfg.Dispatcher, st)
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
-	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx, *configPath)
+	filterEngine, err := filter.Compile(cfg.Filter)
+	if err != nil {
+		logger.Error("compile filter failed", "err", err)
+		os.Exit(1)
+	}
+	dispatcher.SetFilterEngine(filterEngine)
+	cdrWriter, err := cdr.NewWriter(cfg.CDR)
+	if err != nil {
+		logger.Error("init cdr failed", "err", err)
+		os.Exit(1)
+	}
+	dispatcher.SetCDRSink(cdrWriter)
+	dispatcher.SetInstanceID(cfg.CDR.Instance)
+	httpGateway := httpgw.NewWithDispatcher(cfg, st, dispatcher, registry, ctx, *configPath, cdrWriter)
 	adminServer := admin.New(httpGateway, *configPath, logger)
 	defer adminServer.Close()
 	httpGateway.Mount("/admin", http.RedirectHandler("/admin/", http.StatusSeeOther))
@@ -125,6 +140,8 @@ func main() {
 			if err != nil {
 				if errors.Is(err, dispatch.ErrInvalidDestAddr) {
 					resp.Status = smpp.StatusInvalidDestAddr
+				} else if errors.Is(err, dispatch.ErrBlocked) {
+					resp.Status = smpp.StatusSubmitFailed
 				} else {
 					resp.Status = smpp.StatusSubmitFailed
 				}

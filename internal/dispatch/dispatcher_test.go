@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/splendideXmendax/mysmpp/internal/cdr"
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/filter"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
@@ -43,6 +45,31 @@ func (p multiIDProvider) OnDLR(provider.DLRCallback) {}
 
 type failPendingStore struct {
 	*store.MemoryStore
+}
+
+type captureCDR struct {
+	mu     sync.Mutex
+	events []cdr.Event
+}
+
+func (s *captureCDR) Emit(e cdr.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, e)
+}
+
+func (s *captureCDR) Close() error { return nil }
+
+func (s *captureCDR) count(kind string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, e := range s.events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 func (s failPendingStore) SavePending(context.Context, store.Pending) error {
@@ -223,6 +250,58 @@ func TestDispatcherConcurrentIdempotencyQueuesOnce(t *testing.T) {
 		t.Fatal(err)
 	} else if depth != 1 {
 		t.Fatalf("expected one outbox row, got %d", depth)
+	}
+}
+
+func TestDispatcherDoesNotEmitAcceptedForDuplicate(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"mock-a": multiIDProvider{ids: []string{"p1"}}})
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	cfg.Workers = 0
+	sink := &captureCDR{}
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.SetCDRSink(sink)
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Prefix: []string{}, Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	env := Envelope{From: "1069", To: "8613800138000", Text: "hello", ClientID: "c1", ClientMsgID: "k1", Source: SubmitSource{Kind: SourceHTTPAPI}}
+	if _, err := d.Submit(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Submit(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.count("accepted"); got != 1 {
+		t.Fatalf("expected one accepted cdr, got %d events=%+v", got, sink.events)
+	}
+}
+
+func TestDispatcherBlocksContentForAllSources(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	sink := &captureCDR{}
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.SetCDRSink(sink)
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Prefix: []string{}, Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	engine, err := filter.Compile(config.FilterConfig{
+		Enabled:   true,
+		Normalize: config.NormalizeConfig{Lowercase: true},
+		Rules:     []config.FilterRule{{Name: "blocked", Keywords: []string{"bad"}, Action: "block"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetFilterEngine(engine)
+	for _, source := range []SubmitSource{{Kind: SourceHTTPAPI}, {Kind: SourceSMPP, SMPPSystemID: "esme-a"}} {
+		_, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "bad text", Source: source})
+		if !errors.Is(err, ErrBlocked) {
+			t.Fatalf("expected ErrBlocked for %s, got %v", source.Kind.String(), err)
+		}
+	}
+	if got := sink.count("rejected"); got != 2 {
+		t.Fatalf("expected two rejected cdr events, got %d", got)
 	}
 }
 

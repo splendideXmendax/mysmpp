@@ -8,6 +8,8 @@ import (
 )
 
 var ErrInvalidDestAddr = errors.New("invalid destination address")
+var ErrBlocked = errors.New("message blocked by content filter")
+var ErrNoRoute = errors.New("no route matched")
 
 type destAddrOptions struct {
 	AllowShortCode bool

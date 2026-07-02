@@ -147,6 +147,43 @@
     "per_number_per_day": 20,
     "per_client_per_second": 500
   },
+  "filter": {
+    "enabled": true,
+    "normalize": {
+      "lowercase": true,
+      "full_to_half": true,
+      "strip_zero_width": true
+    },
+    "rules": [
+      {
+        "name": "blocked-keywords",
+        "keywords": ["spam"],
+        "action": "block",
+        "priority": 100
+      },
+      {
+        "name": "marketing-tag",
+        "keywords": ["promo"],
+        "action": "tag",
+        "tag": "marketing",
+        "priority": 10
+      }
+    ]
+  },
+  "cdr": {
+    "enabled": true,
+    "dir": "data/cdr",
+    "mode": "events",
+    "max_records": 10000,
+    "max_age": "1h",
+    "buffer": 65536,
+    "on_full": "block",
+    "fsync_every": 200,
+    "fsync_interval": "2s",
+    "instance": "gw-01",
+    "mask_to": false,
+    "store_text": false
+  },
   "storage": {
     "driver": "postgres",
     "dsn": "postgres://mysmpp:CHANGE_ME_BEFORE_DEPLOY@127.0.0.1:5432/mysmpp?sslmode=disable&pool_max_conns=50&pool_min_conns=10"

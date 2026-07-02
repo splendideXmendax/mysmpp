@@ -14,6 +14,7 @@ import (
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/dispatch"
+	"github.com/splendideXmendax/mysmpp/internal/filter"
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/store"
@@ -267,7 +268,7 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	}
 }
 
-func TestMessageSubmitRiskBlockedKeywordStoresBlockedMessage(t *testing.T) {
+func TestMessageSubmitRiskKeywordsAreIgnoredWithoutDispatcher(t *testing.T) {
 	cfg := config.Default()
 	enableClientAuth(&cfg)
 	cfg.Risk.BlockedKeywords = []string{"spam"}
@@ -279,15 +280,53 @@ func TestMessageSubmitRiskBlockedKeywordStoresBlockedMessage(t *testing.T) {
 	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
 	messages, err := st.ListMessages(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].State != "blocked" || messages[0].Metadata["reason"] != "blocked_keyword" || messages[0].Metadata["client_id"] != "client-a" {
-		t.Fatalf("expected blocked message record, got %+v", messages)
+	if len(messages) != 1 || messages[0].State == "blocked" {
+		t.Fatalf("fallback path should not content-filter messages: %+v", messages)
+	}
+}
+
+func TestMessageSubmitFilterBlockedKeywordReturnsForbidden(t *testing.T) {
+	cfg := config.Default()
+	enableClientAuth(&cfg)
+	cfg.Routes = []config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}
+	cfg.Providers = []config.ProviderConfig{{Name: "mock-a", Enabled: true}}
+	st := store.NewMemory()
+	reg := provider.NewRegistry()
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), st)
+	defer dispatcher.Close()
+	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+	engine, err := filter.Compile(config.FilterConfig{
+		Enabled:   true,
+		Normalize: config.NormalizeConfig{Lowercase: true},
+		Rules:     []config.FilterRule{{Name: "spam", Keywords: []string{"spam"}, Action: "block"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.SetFilterEngine(engine)
+	gateway := NewWithDispatcher(cfg, st, dispatcher)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"from":"1069","to":"13800138000","text":"buy spam now"}`))
+	req.Header.Set("Content-Type", "application/json")
+	addClientAuth(req)
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	messages, err := st.ListMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("blocked dispatch submit should not save message: %+v", messages)
 	}
 }
 
