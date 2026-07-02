@@ -50,7 +50,16 @@ go test -race ./...
 
 目标服务器：`REDACTED`。
 
-部署阻塞：本机到服务器 22 端口 TCP 可达，但 SSH 服务端在密钥交换阶段主动断开，未进入密码认证：
+二次复测（2026-07-03 00:41 Asia/Shanghai）：
+
+- `http://REDACTED:19087/healthz` 可访问，当前线上服务存活：
+
+```json
+{"checks":{"outbox_depth":0,"pending_size":0,"smpp_listener":"ok","storage":"ok"},"status":"ok"}
+```
+
+- `/v1/config` 与 `/v1/messages` 返回 `401 Unauthorized`，需要线上 admin/client 凭据；已知本地 dev 凭据与 root 密码均不能通过 HTTP Basic Auth。
+- 本机到服务器 22 端口 TCP 可达，但 SSH 服务端仍在密钥交换阶段主动断开，未进入密码认证：
 
 ```text
 Remote protocol version 2.0, remote software version OpenSSH_8.0
@@ -64,10 +73,14 @@ Connection closed by REDACTED port 22
 - OpenSSH 直连；
 - 禁用公钥、强制 password；
 - 指定 `diffie-hellman-group14-sha1`；
+- 指定 `diffie-hellman-group14-sha256`、`ecdh-sha2-nistp256`；
+- 指定 `aes128-ctr`、`aes128-cbc` 与 `hmac-sha2-256`、`hmac-sha1`；
 - 指定 `curve25519-sha256`；
 - Paramiko 密码连接。
 
-结论：当前无法从本机执行远端部署/服务内验证。已本地生成 Linux amd64 二进制：
+结论：线上旧服务健康，但当前无法从本机执行远端部署/热更新。需要恢复 SSH 握手，或提供可用的线上 admin/client 凭据后才能通过 `/v1/config` 热更新运行配置；二进制替换仍必须依赖 SSH/控制台/Docker 发布通道。
+
+已本地验证可生成 Linux amd64 二进制：
 
 ```text
 dist/mysmpp-linux-amd64
