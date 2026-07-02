@@ -35,6 +35,11 @@ type Provider interface {
 	OnDLR(DLRCallback)
 }
 
+type MultiIDProvider interface {
+	Provider
+	SendAll(OutboundMessage) (providerIDs []string, err error)
+}
+
 type NamedProvider interface {
 	Provider
 	Name() string

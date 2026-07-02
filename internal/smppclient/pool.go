@@ -38,29 +38,38 @@ func NewPool(parent context.Context, cfg Config) *Pool {
 }
 
 func (p *Pool) Send(ctx context.Context, msg Message) (string, error) {
+	ids, err := p.SendAll(ctx, msg)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return ids[0], nil
+}
+
+func (p *Pool) SendAll(ctx context.Context, msg Message) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	parts := BuildSubmitSM(msg, p.cfg.SMPP)
 	if len(parts) == 0 {
-		return "", errors.New("empty smpp submit")
+		return nil, errors.New("empty smpp submit")
 	}
-	var firstID string
+	ids := make([]string, 0, len(parts))
 	for _, part := range parts {
 		conn, ok := p.pick()
 		if !ok {
-			return "", errors.New("no bound smpp upstream connection")
+			return ids, errors.New("no bound smpp upstream connection")
 		}
 		id, err := conn.submit(ctx, part.Body)
 		if err != nil {
-			return "", err
+			return ids, err
 		}
 		id = NormalizeID(id, p.cfg.SMPP.MessageIDRespFormat)
-		if firstID == "" {
-			firstID = id
-		}
+		ids = append(ids, id)
 	}
-	return firstID, nil
+	return ids, nil
 }
 
 func (p *Pool) OnDLR(cb DLRCallback) {

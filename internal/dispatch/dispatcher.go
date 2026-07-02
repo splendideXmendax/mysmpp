@@ -2,10 +2,13 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +49,8 @@ type Dispatcher struct {
 	workerCtx     context.Context
 	cancelWorkers context.CancelFunc
 	wg            sync.WaitGroup
+	httpClient    *http.Client
+	dlrCh         chan provider.DLR
 
 	mu      sync.RWMutex
 	smppSrv SMPPServer
@@ -97,6 +102,8 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		dlrLookupWait: 2 * time.Second,
 		workerCtx:     ctx,
 		cancelWorkers: cancel,
+		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		dlrCh:         make(chan provider.DLR, 4096),
 	}
 	reg.SetDLRHandler(d.OnDLR)
 	d.StartWorkers(d.workers)
@@ -213,6 +220,8 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		SourceKind:         env.Source.Kind.String(),
 		SourceSession:      env.Source.SMPPSessionID,
 		SourceSystem:       env.Source.SMPPSystemID,
+		CallbackURL:        env.Source.CallbackURL,
+		CallbackRule:       env.Source.CallbackRule,
 		ReceivedAt:         env.ReceivedAt,
 		UDH:                append([]byte(nil), env.UDH...),
 	}
@@ -248,8 +257,15 @@ func (d *Dispatcher) receiptForExisting(ctx context.Context, gatewayID string, r
 }
 
 func (d *Dispatcher) OnDLR(dlr provider.DLR) {
-	if err := d.HandleDLR(context.Background(), dlr); err != nil {
-		d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
+	select {
+	case d.dlrCh <- dlr:
+	default:
+		d.logger.Warn("dlr channel full, handling in background", "provider", dlr.Provider, "provider_id", dlr.ProviderID)
+		go func() {
+			if err := d.HandleDLR(context.Background(), dlr); err != nil {
+				d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
+			}
+		}()
 	}
 }
 
@@ -293,10 +309,22 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 			d.logger.Warn("send deliver_sm failed", "gateway_id", rec.GatewayID, "err", err)
 			return err
 		}
-		_ = d.store.DeletePending(ctx, dlr.ProviderID)
+		if isFinalDLRState(dlr.State) {
+			_ = d.store.DeletePending(ctx, dlr.ProviderID)
+		}
 	case SourceHTTPAPI.String():
-		d.logger.Info("dlr for http source", "gateway_id", rec.GatewayID, "state", dlr.State)
-		_ = d.store.DeletePending(ctx, dlr.ProviderID)
+		if rec.CallbackURL != "" {
+			if err := d.sendHTTPCallback(ctx, rec, dlr); err != nil {
+				d.logger.Warn("http dlr callback failed", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "url", rec.CallbackURL, "err", err)
+				return err
+			}
+			d.logger.Info("http dlr callback sent", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "url", rec.CallbackURL)
+		} else {
+			d.logger.Info("dlr for http source without callback", "gateway_id", rec.GatewayID, "state", dlr.State)
+		}
+		if isFinalDLRState(dlr.State) {
+			_ = d.store.DeletePending(ctx, dlr.ProviderID)
+		}
 	}
 	return nil
 }
@@ -346,6 +374,13 @@ func (d *Dispatcher) StartWorkers(n int) {
 			d.workerLoop(d.workerCtx, id)
 		}()
 	}
+	for i := 0; i < n; i++ {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.dlrWorker(d.workerCtx)
+		}()
+	}
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -356,6 +391,19 @@ func (d *Dispatcher) StartWorkers(n int) {
 		defer d.wg.Done()
 		d.pendingSweepLoop(d.workerCtx)
 	}()
+}
+
+func (d *Dispatcher) dlrWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case dlr := <-d.dlrCh:
+			if err := d.HandleDLR(ctx, dlr); err != nil {
+				d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
+			}
+		}
+	}
 }
 
 func (d *Dispatcher) requeueLoop(ctx context.Context) {
@@ -407,6 +455,7 @@ func (d *Dispatcher) pendingSweepLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			d.sweepExpiredPending(ctx)
+			d.FlushDLR("")
 		}
 	}
 }
@@ -469,7 +518,7 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		return
 	}
 	payload := item.Payload
-	providerID, err := p.Send(provider.OutboundMessage{
+	msg := provider.OutboundMessage{
 		Context:            ctx,
 		GatewayID:          payload.GatewayID,
 		SourceAddr:         payload.From,
@@ -480,39 +529,51 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		Encoding:           payload.Encoding,
 		Meta:               payload.Meta,
 		UDH:                append([]byte(nil), payload.UDH...),
-	})
+	}
+	providerIDs, err := sendProvider(ctx, p, msg)
 	if err != nil {
 		d.failOutbox(ctx, item, err)
 		return
 	}
-	if providerID == "" {
-		providerID = payload.GatewayID
+	if len(providerIDs) == 0 {
+		providerIDs = []string{payload.GatewayID}
 	}
-	if err := d.store.UpdateMessageSent(ctx, payload.GatewayID, providerID); err != nil {
+	for i, providerID := range providerIDs {
+		if providerID == "" {
+			providerIDs[i] = payload.GatewayID
+		}
+	}
+	if err := d.store.UpdateMessageSent(ctx, payload.GatewayID, providerIDs[0]); err != nil {
 		d.logger.Warn("update sent message failed", "gateway_id", payload.GatewayID, "err", err)
 	}
-	if err := d.store.SavePending(ctx, store.Pending{
-		ProviderID:         providerID,
-		GatewayID:          payload.GatewayID,
-		SourceKind:         payload.SourceKind,
-		SourceSession:      payload.SourceSession,
-		SourceSystem:       payload.SourceSystem,
-		From:               payload.From,
-		To:                 payload.To,
-		Text:               payload.Text,
-		DataCoding:         payload.DataCoding,
-		RegisteredDelivery: payload.RegisteredDelivery,
-		Provider:           payload.Provider,
-		Route:              payload.Route,
-		ReceivedAt:         payload.ReceivedAt,
-		ExpiresAt:          time.Now().UTC().Add(d.pendingTTL),
-	}); err != nil {
-		d.logger.Warn("save pending failed", "gateway_id", payload.GatewayID, "provider_id", providerID, "err", err)
+	for _, providerID := range providerIDs {
+		if err := d.store.SavePending(ctx, store.Pending{
+			ProviderID:         providerID,
+			GatewayID:          payload.GatewayID,
+			SourceKind:         payload.SourceKind,
+			SourceSession:      payload.SourceSession,
+			SourceSystem:       payload.SourceSystem,
+			CallbackURL:        payload.CallbackURL,
+			CallbackRule:       payload.CallbackRule,
+			From:               payload.From,
+			To:                 payload.To,
+			Text:               payload.Text,
+			DataCoding:         payload.DataCoding,
+			RegisteredDelivery: payload.RegisteredDelivery,
+			Provider:           payload.Provider,
+			Route:              payload.Route,
+			ReceivedAt:         payload.ReceivedAt,
+			ExpiresAt:          time.Now().UTC().Add(d.pendingTTL),
+		}); err != nil {
+			d.logger.Error("save pending failed, will requeue", "gateway_id", payload.GatewayID, "provider_id", providerID, "err", err)
+			d.failOutbox(ctx, item, fmt.Errorf("save pending: %w", err))
+			return
+		}
 	}
 	if err := d.store.AckOutbox(ctx, item.ID); err != nil {
 		d.logger.Warn("ack outbox failed", "outbox_id", item.ID, "err", err)
 	}
-	d.logger.Info("message dispatched", "gateway_id", payload.GatewayID, "provider_id", providerID, "provider", payload.Provider, "route", payload.Route)
+	d.logger.Info("message dispatched", "gateway_id", payload.GatewayID, "provider_id", providerIDs[0], "provider_id_count", len(providerIDs), "provider", payload.Provider, "route", payload.Route)
 }
 
 func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err error) {
@@ -525,6 +586,23 @@ func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err 
 	if ferr := d.store.FailOutbox(ctx, item.ID, err.Error(), next); ferr != nil {
 		d.logger.Warn("fail outbox failed", "outbox_id", item.ID, "err", ferr)
 	}
+}
+
+func sendProvider(ctx context.Context, p provider.Provider, msg provider.OutboundMessage) ([]string, error) {
+	if msg.Context == nil {
+		msg.Context = ctx
+	}
+	if multi, ok := p.(provider.MultiIDProvider); ok {
+		return multi.SendAll(msg)
+	}
+	id, err := p.Send(msg)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, nil
+	}
+	return []string{id}, nil
 }
 
 type permanent interface {
@@ -582,36 +660,49 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 		OriginalText: rec.Text,
 	})
 	pdu.SequenceID = session.NextSeq()
-	session.Send(pdu)
+	if !session.Send(pdu) {
+		return errNoReceiverOnline
+	}
 	return nil
 }
 
 func (d *Dispatcher) FlushDLR(systemID string) {
 	ctx := context.Background()
-	items, err := d.store.ListReadyDLR(ctx, systemID, 500)
-	if err != nil {
-		d.logger.Warn("list pending dlr failed", "system_id", systemID, "err", err)
-		return
-	}
-	for _, rec := range items {
-		dlr := provider.DLR{
-			Provider:   rec.Provider,
-			ProviderID: rec.ProviderID,
-			State:      rec.DLRState,
-			ErrorCode:  rec.DLRErrorCode,
-			DoneAt:     rec.DLRDoneAt,
-		}
-		if dlr.DoneAt.IsZero() {
-			dlr.DoneAt = time.Now().UTC()
-		}
-		if err := d.pushSMPPDLR(rec, dlr); err != nil {
-			if !errors.Is(err, errNoReceiverOnline) {
-				d.logger.Warn("flush deliver_sm failed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "err", err)
-			}
+	for {
+		items, err := d.store.ListReadyDLR(ctx, systemID, 500)
+		if err != nil {
+			d.logger.Warn("list pending dlr failed", "system_id", systemID, "err", err)
 			return
 		}
-		_ = d.store.DeletePending(ctx, rec.ProviderID)
-		d.logger.Info("dlr flushed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "system_id", rec.SourceSystem)
+		if len(items) == 0 {
+			return
+		}
+		for _, rec := range items {
+			dlr := provider.DLR{
+				Provider:   rec.Provider,
+				ProviderID: rec.ProviderID,
+				State:      rec.DLRState,
+				ErrorCode:  rec.DLRErrorCode,
+				DoneAt:     rec.DLRDoneAt,
+			}
+			if dlr.DoneAt.IsZero() {
+				dlr.DoneAt = time.Now().UTC()
+			}
+			if err := d.pushSMPPDLR(rec, dlr); err != nil {
+				if !errors.Is(err, errNoReceiverOnline) {
+					d.logger.Warn("flush deliver_sm failed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "err", err)
+				}
+				if systemID == "" {
+					continue
+				}
+				return
+			}
+			_ = d.store.DeletePending(ctx, rec.ProviderID)
+			d.logger.Info("dlr flushed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "system_id", rec.SourceSystem)
+		}
+		if systemID == "" {
+			return
+		}
 	}
 }
 
@@ -632,4 +723,47 @@ func cloneMeta(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func isFinalDLRState(state string) bool {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case "DELIVRD", "EXPIRED", "DELETED", "UNDELIV", "REJECTD", "UNKNOWN":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dlr provider.DLR) error {
+	payload := map[string]any{
+		"gateway_id":  rec.GatewayID,
+		"provider_id": dlr.ProviderID,
+		"provider":    rec.Provider,
+		"route":       rec.Route,
+		"state":       dlr.State,
+		"error_code":  dlr.ErrorCode,
+		"done_at":     dlr.DoneAt.Format(time.RFC3339Nano),
+	}
+	if rec.CallbackRule != "" {
+		payload["callback_rule"] = rec.CallbackRule
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rec.CallbackURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("callback status %d", resp.StatusCode)
+	}
+	return nil
 }

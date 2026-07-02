@@ -48,6 +48,8 @@ type Pending struct {
 	SourceKind         string
 	SourceSession      string
 	SourceSystem       string
+	CallbackURL        string
+	CallbackRule       string
 	From               string
 	To                 string
 	Text               string
@@ -77,6 +79,8 @@ type OutboxPayload struct {
 	SourceKind         string            `json:"source_kind"`
 	SourceSession      string            `json:"source_session"`
 	SourceSystem       string            `json:"source_system"`
+	CallbackURL        string            `json:"callback_url,omitempty"`
+	CallbackRule       string            `json:"callback_rule,omitempty"`
 	ReceivedAt         time.Time         `json:"received_at"`
 	UDH                []byte            `json:"udh,omitempty"`
 }
@@ -271,7 +275,7 @@ func (s *MemoryStore) GetPending(_ context.Context, providerID string) (Pending,
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
 	p, ok := s.pending[providerID]
-	if ok && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+	if ok && !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
 		delete(s.pending, providerID)
 		return Pending{}, false, nil
 	}
@@ -290,7 +294,7 @@ func (s *MemoryStore) SweepExpiredPending(_ context.Context, before time.Time) (
 	defer s.mu.Unlock()
 	count := 0
 	for id, p := range s.pending {
-		if p.ExpiresAt.Before(before) {
+		if !p.DLRReady && p.ExpiresAt.Before(before) {
 			delete(s.pending, id)
 			count++
 		}
@@ -530,7 +534,7 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 
 func (s *MemoryStore) sweepLocked(now time.Time) {
 	for id, p := range s.pending {
-		if !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+		if !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
 			delete(s.pending, id)
 		}
 	}

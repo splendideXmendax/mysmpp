@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log/slog"
@@ -87,36 +89,54 @@ func main() {
 		}
 		return false
 	}
-	onSubmit := func(session *smpp.Session, submit smpp.SubmitSM) {
-		defer session.CompleteSubmit()
-		receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
-			From:               submit.From,
-			To:                 submit.To,
-			Text:               submit.Text,
-			DataCoding:         submit.DataCoding,
-			RegisteredDelivery: submit.RegisteredDelivery,
-			UDH:                submit.UDH,
-			ReceivedAt:         time.Now().UTC(),
-			Source: dispatch.SubmitSource{
-				Kind:          dispatch.SourceSMPP,
-				SMPPSessionID: session.ID(),
-				SMPPSystemID:  session.SystemID(),
-			},
-		})
-		resp := smpp.PDU{
-			CommandID:  smpp.CommandSubmitSMResp,
-			SequenceID: submit.SequenceID,
-		}
-		if err != nil {
-			if errors.Is(err, dispatch.ErrInvalidDestAddr) {
-				resp.Status = smpp.StatusInvalidDestAddr
-			} else {
-				resp.Status = smpp.StatusSubmitFailed
+	submitJobs := make(chan func(), max(1, cfg.SMPP.MaxSessions*max(1, cfg.SMPP.WindowSize)))
+	submitWorkers := max(1, cfg.Dispatcher.Workers*cfg.Dispatcher.PerWorkerConcurrency)
+	for i := 0; i < submitWorkers; i++ {
+		go func() {
+			for job := range submitJobs {
+				job()
 			}
-		} else {
-			resp.Body = smpp.CString(receipt.GatewayID)
+		}()
+	}
+	onSubmit := func(session *smpp.Session, submit smpp.SubmitSM) {
+		select {
+		case submitJobs <- func() {
+			defer session.CompleteSubmit()
+			receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
+				From:               submit.From,
+				To:                 submit.To,
+				Text:               submit.Text,
+				ClientID:           "smpp:" + session.SystemID(),
+				ClientMsgID:        smppClientMsgID(session.SystemID(), submit),
+				DataCoding:         submit.DataCoding,
+				RegisteredDelivery: submit.RegisteredDelivery,
+				UDH:                submit.UDH,
+				ReceivedAt:         time.Now().UTC(),
+				Source: dispatch.SubmitSource{
+					Kind:          dispatch.SourceSMPP,
+					SMPPSessionID: session.ID(),
+					SMPPSystemID:  session.SystemID(),
+				},
+			})
+			resp := smpp.PDU{
+				CommandID:  smpp.CommandSubmitSMResp,
+				SequenceID: submit.SequenceID,
+			}
+			if err != nil {
+				if errors.Is(err, dispatch.ErrInvalidDestAddr) {
+					resp.Status = smpp.StatusInvalidDestAddr
+				} else {
+					resp.Status = smpp.StatusSubmitFailed
+				}
+			} else {
+				resp.Body = smpp.CString(receipt.GatewayID)
+			}
+			session.Send(resp)
+		}:
+		default:
+			session.CompleteSubmit()
+			session.Send(smpp.PDU{CommandID: smpp.CommandSubmitSMResp, Status: smpp.StatusThrottled, SequenceID: submit.SequenceID})
 		}
-		session.Send(resp)
 	}
 	smppServer := smpp.NewServer(cfg.SMPP, logger, auth, onSubmit)
 	dispatcher.SetSMPPServer(smppServer)
@@ -149,4 +169,19 @@ func main() {
 	if err := dispatcher.Close(); err != nil {
 		logger.Warn("dispatcher shutdown failed", "err", err)
 	}
+}
+
+func smppClientMsgID(systemID string, submit smpp.SubmitSM) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(systemID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(submit.From))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(submit.To))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(submit.Text))
+	_, _ = h.Write([]byte{0, submit.DataCoding})
+	_, _ = h.Write(submit.UDH)
+	sum := h.Sum(nil)
+	return "smpp:" + systemID + ":" + hex.EncodeToString(sum[:12]) + ":" + hex.EncodeToString([]byte{byte(submit.SequenceID >> 24), byte(submit.SequenceID >> 16), byte(submit.SequenceID >> 8), byte(submit.SequenceID)})
 }

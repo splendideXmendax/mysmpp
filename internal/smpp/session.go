@@ -107,10 +107,12 @@ func (s *Session) NextSeq() uint32 {
 	return s.nextSeq.Add(1)
 }
 
-func (s *Session) Send(p PDU) {
+func (s *Session) Send(p PDU) bool {
 	select {
 	case s.out <- p:
+		return true
 	case <-s.closed:
+		return false
 	}
 }
 

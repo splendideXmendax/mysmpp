@@ -202,7 +202,7 @@ driver 区别:
 
 - `memory` driver 重启后会丢失消息、outbox、pending、幂等和 ID 状态。
 - 风控计数是进程内 map，多实例部署时限额会按实例数放大。
-- HTTP 来源 DLR 当前不主动回调客户的 `callback_url`。
+- HTTP 来源 DLR 会更新内部状态；提交时携带 `callback_url` 时会主动 POST 回调。
 - HTTP 上游不做长短信逐段发送。
 - SMPP 上游暂不支持 `tx_rx` 分离 bind 和 TLS。
 - 上游 MO 当前识别后忽略，尚未路由给下游。

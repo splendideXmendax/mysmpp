@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +22,31 @@ import (
 type fakeSMPPServer struct {
 	session   *smpp.Session
 	receivers []*smpp.Session
+}
+
+type multiIDProvider struct {
+	ids []string
+}
+
+func (p multiIDProvider) Send(provider.OutboundMessage) (string, error) {
+	if len(p.ids) == 0 {
+		return "", nil
+	}
+	return p.ids[0], nil
+}
+
+func (p multiIDProvider) SendAll(provider.OutboundMessage) ([]string, error) {
+	return append([]string(nil), p.ids...), nil
+}
+
+func (p multiIDProvider) OnDLR(provider.DLRCallback) {}
+
+type failPendingStore struct {
+	*store.MemoryStore
+}
+
+func (s failPendingStore) SavePending(context.Context, store.Pending) error {
+	return errors.New("boom")
 }
 
 func (s fakeSMPPServer) Session(id string) (*smpp.Session, bool) {
@@ -312,6 +339,132 @@ func TestDispatcherWaitsForPendingWhenDLRArrivesEarly(t *testing.T) {
 	}
 	if _, ok, err := st.GetPending(context.Background(), providerID); err != nil || ok {
 		t.Fatalf("pending should be deleted after http dlr: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDispatcherKeepsPendingForIntermediateDLR(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	rec := store.Pending{
+		ProviderID:         "up-1",
+		GatewayID:          "g000000000001",
+		SourceKind:         SourceHTTPAPI.String(),
+		From:               "1069",
+		To:                 "13800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Provider:           "mock-a",
+		ReceivedAt:         time.Now().UTC(),
+		ExpiresAt:          time.Now().Add(time.Hour),
+	}
+	if err := st.SaveMessage(context.Background(), testMessage(rec.GatewayID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "ENROUTE"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || !ok {
+		t.Fatalf("pending should remain for intermediate dlr: ok=%v err=%v", ok, err)
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "DELIVRD"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || ok {
+		t.Fatalf("pending should be deleted for final dlr: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDispatcherSendsHTTPCallback(t *testing.T) {
+	calls := make(chan struct{}, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("callback method = %s", r.Method)
+		}
+		calls <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	d.httpClient = srv.Client()
+	defer d.Close()
+	rec := store.Pending{
+		ProviderID:   "up-1",
+		GatewayID:    "g000000000001",
+		SourceKind:   SourceHTTPAPI.String(),
+		CallbackURL:  srv.URL,
+		CallbackRule: "rule-a",
+		From:         "1069",
+		To:           "13800138000",
+		Text:         "hello",
+		Provider:     "mock-a",
+		ReceivedAt:   time.Now().UTC(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	if err := st.SaveMessage(context.Background(), testMessage(rec.GatewayID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SavePending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "DELIVRD"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("callback was not sent")
+	}
+}
+
+func TestDispatcherCreatesPendingForEachProviderID(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"multi": multiIDProvider{ids: []string{"p1", "p2", "p3"}}})
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Prefix: []string{}, Provider: "multi", Priority: 1}}, []config.ProviderConfig{{Name: "multi", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello", Source: SubmitSource{Kind: SourceHTTPAPI}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForPending(t, d, 3)
+	for _, id := range []string{"p1", "p2", "p3"} {
+		if _, ok, err := st.GetPending(context.Background(), id); err != nil || !ok {
+			t.Fatalf("pending %s missing: ok=%v err=%v", id, ok, err)
+		}
+	}
+}
+
+func TestDispatcherRequeuesWhenSavePendingFails(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"mock-a": multiIDProvider{ids: []string{"p1"}}})
+	st := failPendingStore{MemoryStore: store.NewMemory()}
+	cfg := testDispatcherConfig()
+	cfg.MaxAttempts = 3
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Prefix: []string{}, Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello", Source: SubmitSource{Kind: SourceHTTPAPI}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if depth, _ := st.OutboxDepth(context.Background(), "pending"); depth == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if depth, _ := st.OutboxDepth(context.Background(), "pending"); depth != 1 {
+		t.Fatalf("outbox should be requeued, pending depth=%d", depth)
 	}
 }
 

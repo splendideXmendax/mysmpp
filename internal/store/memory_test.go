@@ -30,6 +30,32 @@ func TestMemoryStoreSweepsExpiredPending(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreKeepsReadyDLRWhenExpired(t *testing.T) {
+	st := NewMemory()
+	if err := st.SavePending(context.Background(), Pending{
+		ProviderID: "p1",
+		GatewayID:  "g1",
+		ExpiresAt:  time.Now().Add(-time.Minute),
+		DLRReady:   true,
+		DLRState:   "DELIVRD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := st.SweepExpiredPending(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected ready DLR to be kept, swept %d", n)
+	}
+	if _, ok, err := st.GetPending(context.Background(), "p1"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("expected ready DLR to remain pending")
+	}
+}
+
 func TestMemoryStoreSweepsExpiredIdempotency(t *testing.T) {
 	st := NewMemory()
 	if err := st.SaveIdempotency(context.Background(), "client-a", "key-a", "g1", time.Nanosecond); err != nil {

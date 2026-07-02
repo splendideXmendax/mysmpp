@@ -63,8 +63,8 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 | `to` | 是 | 目标号码，支持 11 位数字或 E.164 |
 | `text` | 是 | 短信正文，1-1000 字符 |
 | `client_msg_id` | 否 | 幂等键，1-64 非空白字符 |
-| `callback_url` | 否 | HTTP 下游回调 URL，当前版本仅校验并保存，不主动回调 |
-| `callback_rule` | 否 | 预留回调规则名 |
+| `callback_url` | 否 | HTTP 下游 DLR 回调 URL，必须为 `https://`；最终态 DLR 到达后网关会 POST JSON 回调 |
+| `callback_rule` | 否 | 可选回调规则标识，会原样出现在回调 JSON 的 `callback_rule` 字段 |
 | `meta` | 否 | 最多 10 个键，每个值最多 200 字符 |
 
 成功响应 `202 Accepted`：

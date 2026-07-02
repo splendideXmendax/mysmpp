@@ -9,7 +9,7 @@
 - mysmpp 更新消息状态；
 - mysmpp 对 SMPP 下游推送 `deliver_sm` 状态报告。
 
-当前版本边界需要先说清楚：HTTP 下游提交可以通过 `/v1/messages` 轮询看到最终状态，但 mysmpp 目前还没有实现对 HTTP 下游 `callback_url` 的主动回调。当前能验证“主动推送 DR/DLR”的完整闭环是 SMPP 下游链路。
+当前版本中，HTTP 下游提交可以通过 `/v1/messages` 轮询最终状态；如果提交时携带 `callback_url`，mysmpp 也会在最终态 DLR 到达后主动 POST 回调。SMPP 下游链路通过 `deliver_sm` 推送 DLR。
 
 ## 1. 术语
 

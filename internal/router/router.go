@@ -58,15 +58,34 @@ func (r *Router) Match(msg message.Message) (config.RouteConfig, bool) {
 }
 
 func (r *Router) MatchPhone(to string) (config.RouteConfig, bool) {
+	bestPrefix := -1
+	bestPriority := 0
+	var bestRoute config.RouteConfig
+	found := false
 	for _, route := range r.routes {
 		if len(route.Prefix) == 0 {
-			return route, true
+			if !found || route.Priority > bestPriority {
+				bestPriority = route.Priority
+				bestPrefix = 0
+				bestRoute = route
+				found = true
+			}
+			continue
 		}
 		for _, prefix := range route.Prefix {
-			if strings.HasPrefix(to, prefix) {
-				return route, true
+			if !strings.HasPrefix(to, prefix) {
+				continue
+			}
+			if !found || route.Priority > bestPriority || (route.Priority == bestPriority && len(prefix) > bestPrefix) {
+				bestPriority = route.Priority
+				bestPrefix = len(prefix)
+				bestRoute = route
+				found = true
 			}
 		}
+	}
+	if found {
+		return bestRoute, true
 	}
 	return config.RouteConfig{}, false
 }

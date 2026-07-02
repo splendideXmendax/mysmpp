@@ -48,7 +48,7 @@ SMPP ESME / HTTP client a
 - pending DLR 有后台过期清理；messages/outbox 历史归档仍需要外部任务或后续实现。
 - HTTP provider 的 DLR 通过 `inbound` 回调规则进入，`HTTPProvider.OnDLR` 是有意 no-op。
 - SMPP 上游 Provider 当前支持 transceiver bind；`tx_rx` 分离 bind、SMPP over TLS、MO 路由到下游和分段 DLR 落库聚合仍是后续项。
-- HTTP 来源 DLR 当前只更新内部消息状态，尚未主动回调客户提交时携带的 `callback_url`。
+- HTTP 来源 DLR 会更新内部消息状态；提交时携带 `callback_url` 时会主动 POST 回调。
 - 暴露到公网时请放在 TLS 反向代理后面，不要直接裸奔 HTTP 管理后台。
 
 ## 目录结构

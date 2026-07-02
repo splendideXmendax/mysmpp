@@ -2,6 +2,8 @@ package httpgw
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -42,8 +43,6 @@ type Gateway struct {
 }
 
 type clientIDContextKey struct{}
-
-var fallbackIDSeq atomic.Uint64
 
 type rateWindow struct {
 	start     time.Time
@@ -614,7 +613,11 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func newID() string {
-	return fmt.Sprintf("g%010d", fallbackIDSeq.Add(1))
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		return fmt.Sprintf("mo-%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("mo-%d-%s", time.Now().UnixNano(), base64.RawURLEncoding.EncodeToString(b[:]))
 }
 
 func intQuery(r *http.Request, name string, fallback int) int {

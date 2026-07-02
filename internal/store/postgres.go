@@ -170,13 +170,15 @@ func (s *PostgresStore) SavePending(ctx context.Context, p Pending) error {
 INSERT INTO pending (
 	provider_id, gateway_id, source_kind, source_session, source_system, from_addr, to_addr,
 	text, data_coding, registered_delivery, provider, route, received_at, expires_at,
-	dlr_ready, dlr_state, dlr_err, dlr_done_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+	dlr_ready, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 ON CONFLICT (provider_id) DO UPDATE SET
 	gateway_id = EXCLUDED.gateway_id,
 	source_kind = EXCLUDED.source_kind,
 	source_session = EXCLUDED.source_session,
 	source_system = EXCLUDED.source_system,
+	callback_url = EXCLUDED.callback_url,
+	callback_rule = EXCLUDED.callback_rule,
 	from_addr = EXCLUDED.from_addr,
 	to_addr = EXCLUDED.to_addr,
 	text = EXCLUDED.text,
@@ -192,7 +194,7 @@ ON CONFLICT (provider_id) DO UPDATE SET
 	dlr_done_at = EXCLUDED.dlr_done_at`,
 		p.ProviderID, p.GatewayID, p.SourceKind, nullString(p.SourceSession), nullString(p.SourceSystem), nullString(p.From), nullString(p.To),
 		nullString(p.Text), p.DataCoding, p.RegisteredDelivery, nullString(p.Provider), nullString(p.Route), zeroAsNow(p.ReceivedAt), p.ExpiresAt,
-		p.DLRReady, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt),
+		p.DLRReady, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt), nullString(p.CallbackURL), nullString(p.CallbackRule),
 	)
 	return err
 }
@@ -200,6 +202,7 @@ ON CONFLICT (provider_id) DO UPDATE SET
 func (s *PostgresStore) GetPending(ctx context.Context, providerID string) (Pending, bool, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
+	COALESCE(callback_url, ''), COALESCE(callback_rule, ''),
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
 	COALESCE(registered_delivery, 0), COALESCE(provider, ''), COALESCE(route, ''), received_at, expires_at,
 	COALESCE(dlr_ready, FALSE), COALESCE(dlr_state, ''), COALESCE(dlr_err, 0), dlr_done_at
@@ -211,7 +214,7 @@ FROM pending WHERE provider_id = $1`, providerID)
 		var p Pending
 		var dataCoding, registeredDelivery int16
 		var doneAt *time.Time
-		err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.From, &p.To, &p.Text, &dataCoding,
+		err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.CallbackURL, &p.CallbackRule, &p.From, &p.To, &p.Text, &dataCoding,
 			&registeredDelivery, &p.Provider, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRState, &p.DLRErrorCode, &doneAt)
 		p.DataCoding = uint8(dataCoding)
 		p.RegisteredDelivery = uint8(registeredDelivery)
@@ -242,6 +245,7 @@ func (s *PostgresStore) ListReadyDLR(ctx context.Context, systemID string, limit
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT provider_id, gateway_id, source_kind, COALESCE(source_session, ''), COALESCE(source_system, ''),
+	COALESCE(callback_url, ''), COALESCE(callback_rule, ''),
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
 	COALESCE(registered_delivery, 0), COALESCE(provider, ''), COALESCE(route, ''), received_at, expires_at,
 	COALESCE(dlr_ready, FALSE), COALESCE(dlr_state, ''), COALESCE(dlr_err, 0), dlr_done_at
@@ -262,7 +266,7 @@ func (s *PostgresStore) DeletePending(ctx context.Context, providerID string) er
 
 func (s *PostgresStore) SweepExpiredPending(ctx context.Context, before time.Time) (int, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM pending WHERE provider_id IN (
-	SELECT provider_id FROM pending WHERE expires_at < $1 ORDER BY expires_at LIMIT 10000
+	SELECT provider_id FROM pending WHERE dlr_ready = FALSE AND expires_at < $1 ORDER BY expires_at LIMIT 10000
 )`, before)
 	if err != nil {
 		return 0, err
@@ -272,7 +276,7 @@ func (s *PostgresStore) SweepExpiredPending(ctx context.Context, before time.Tim
 
 func (s *PostgresStore) PendingSize(ctx context.Context) (int, error) {
 	var n int
-	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pending WHERE expires_at >= NOW()`).Scan(&n)
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pending WHERE dlr_ready = TRUE OR expires_at >= NOW()`).Scan(&n)
 	return n, err
 }
 
@@ -535,7 +539,7 @@ func scanPending(row pgx.CollectableRow) (Pending, error) {
 	var p Pending
 	var dataCoding, registeredDelivery int16
 	var doneAt *time.Time
-	err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.From, &p.To, &p.Text, &dataCoding,
+	err := row.Scan(&p.ProviderID, &p.GatewayID, &p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.CallbackURL, &p.CallbackRule, &p.From, &p.To, &p.Text, &dataCoding,
 		&registeredDelivery, &p.Provider, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRState, &p.DLRErrorCode, &doneAt)
 	if err != nil {
 		return Pending{}, err
@@ -604,7 +608,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, `SELECT dlr_ready, dlr_state, dlr_err, dlr_done_at FROM pending LIMIT 0`); err != nil {
+	if _, err := s.pool.Exec(ctx, `SELECT dlr_ready, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule FROM pending LIMIT 0`); err != nil {
 		return fmt.Errorf("postgres pending DLR columns are missing; run migrations before startup: %w", err)
 	}
 	return nil

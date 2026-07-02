@@ -31,7 +31,18 @@ func NewSMPPProvider(ctx context.Context, cfg config.ProviderConfig) *SMPPProvid
 func (p *SMPPProvider) Name() string { return p.name }
 
 func (p *SMPPProvider) Send(msg OutboundMessage) (string, error) {
-	return p.pool.Send(msg.Context, smppclient.Message{
+	ids, err := p.SendAll(msg)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return ids[0], nil
+}
+
+func (p *SMPPProvider) SendAll(msg OutboundMessage) ([]string, error) {
+	return p.pool.SendAll(msg.Context, smppclient.Message{
 		GatewayID:          msg.GatewayID,
 		SourceAddr:         msg.SourceAddr,
 		DestAddr:           msg.DestAddr,
