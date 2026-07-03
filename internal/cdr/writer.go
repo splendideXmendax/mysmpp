@@ -208,7 +208,7 @@ type cdrFile struct {
 
 func openCDRFile(dir, instance string) (*cdrFile, error) {
 	now := time.Now().UTC()
-	base := fmt.Sprintf("cdr-%s-%s", now.Format("20060102150405"), safeInstance(instance))
+	base := fmt.Sprintf("cdr-%s-%d-%s", now.Format("20060102150405"), now.UnixNano(), safeInstance(instance))
 	writing := filepath.Join(dir, base+".jsonl.writing")
 	file, err := os.OpenFile(writing, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
