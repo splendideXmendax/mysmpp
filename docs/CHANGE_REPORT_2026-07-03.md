@@ -59,6 +59,10 @@ go test -race ./...
 ```
 
 - `/v1/config` 与 `/v1/messages` 返回 `401 Unauthorized`，需要线上 admin/client 凭据；已知本地 dev 凭据与 root 密码均不能通过 HTTP Basic Auth。
+- 三次复测补充：
+  - 本地门禁再次通过：`go test ./...`、`go vet ./...`、`go test -race ./...`。
+  - SMPP `29175` 可响应 bind，但样例账号 `dev-esme/dresme1`、`dev-esme/esmepw1`、`esme1/dresme1`、`esme1/esmepw1`、`load-tester/dresme1`、`load-tester/esmepw1` 均返回 bind 失败状态 `0x0d`，说明线上 ESME 凭据不是文档样例。
+  - 探测 Docker/API 常见端口 `2375/2376/5000/8080/8443/9000`，均无法取得有效 HTTP API 响应，不能作为部署入口。
 - 本机到服务器 22 端口 TCP 可达，但 SSH 服务端仍在密钥交换阶段主动断开，未进入密码认证：
 
 ```text
