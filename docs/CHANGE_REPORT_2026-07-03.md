@@ -50,6 +50,44 @@ go test -race ./...
 
 目标服务器：`REDACTED`。
 
+最终部署（2026-07-03 09:55 Asia/Shanghai）：
+
+- 使用 Paramiko 以 `root` 登录成功；此前系统 OpenSSH 失败原因是本地执行环境的 SSH/TUN 链路在 KEX 阶段不稳定，并非服务器密码错误。
+- 服务器部署目录：`/root/mysmpp`。
+- 部署方式：Docker Compose，容器 `mysmpp` + `mysmpp-postgres`。
+- 已备份旧配置：`/root/mysmpp-backups/config-20260703095511.json`。
+- 服务器仓库从 `e453018` fast-forward 到 `b4b8643`，重新构建镜像并重建 `mysmpp` 容器。
+- 新镜像 ID：`sha256:8238f9398a81bcf1eefd73fbdf201df3aa4a198d52b943d274f3aba313a569a9`。
+- 部署后 healthz 通过：
+
+```json
+{"checks":{"outbox_depth":0,"pending_size":0,"smpp_listener":"ok","storage":"ok"},"status":"ok"}
+```
+
+线上配置验证：
+
+- 保留生产数据卷配置，未被镜像样例覆盖。
+- 当前生产路由：`ap2-default`。
+- 当前生产 provider：`ap2-upstream`。
+- 当前 ESME：`REDACTED`。
+- `clients=[]`，HTTP API 使用 admin Basic Auth。
+
+线上功能验证：
+
+- 通过 `/v1/config` 增量开启 filter/CDR，并添加唯一测试过滤词 `codex-block-online-20260703`。
+- HTTP 提交测试词返回 `403 Forbidden`：
+
+```text
+message blocked by content filter: codex-online-block-test
+```
+
+- healthz 仍通过，`outbox_depth=0`、`pending_size=0`，说明测试拒绝消息未进入上游投递。
+- CDR 写入验证：
+  - 重启前 `.writing` 文件写入 295 字节。
+  - `docker restart mysmpp` 后优雅关闭并 finalize 为 `cdr-20260703015705-prod-ap2-1.jsonl`。
+  - 重启后再次提交测试词仍返回 `403`，证明 filter/CDR 配置已持久化并可重启加载。
+  - CDR 样本字段：`kind=rejected`、`reason=filter_block`、`filter_rule=codex-online-block-test`、`source=http`、`instance=prod-ap2`。
+
 二次复测（2026-07-03 00:41 Asia/Shanghai）：
 
 - `http://REDACTED:19087/healthz` 可访问，当前线上服务存活：
