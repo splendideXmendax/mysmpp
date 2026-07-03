@@ -88,6 +88,37 @@ message blocked by content filter: codex-online-block-test
   - 重启后再次提交测试词仍返回 `403`，证明 filter/CDR 配置已持久化并可重启加载。
   - CDR 样本字段：`kind=rejected`、`reason=filter_block`、`filter_rule=codex-online-block-test`、`source=http`、`instance=prod-ap2`。
 
+全量线上复测与补丁（2026-07-03 10:12 Asia/Shanghai）：
+
+- 按测试文档执行线上安全版全量测试：临时追加 `codex-mock-a/b` mock provider 与 `999998xx` 专用测试前缀，确保测试短信不会落到真实 `ap2-upstream`。
+- 测试过程中发现 CDR 在同一秒内快速轮转时，文件名可能相同并覆盖旧 `.jsonl`，导致 `accepted` 事件缺失。
+- 已修复：CDR 文件名加入 `UnixNano`，避免同秒同 count 轮转覆盖；新增回归测试 `TestWriterDoesNotOverwriteSameSecondRotations`。
+- 修复提交：`9d25c14 fix: avoid cdr rotation filename collisions`。
+- 服务器已从 `b4b8643` 更新到 `9d25c14`，重新构建并重建 `mysmpp` 容器，部署后 healthz 正常。
+- 本地门禁再次通过：
+
+```text
+go test ./...
+go vet ./...
+go test -race ./...
+```
+
+- 线上复测通过项：
+  - 热更新坏正则被拒：`400`，运行中配置保持可用。
+  - block 规则：HTTP 返回 `403 message blocked by content filter: codex-block-rule2`。
+  - tag 路由：`codex-route-online-full2-20260703` 命中 `codex-tag-route` -> `codex-mock-a`。
+  - mask：入库文本从 `hello codex-mask-online-full2-20260703` 变为 `hello [MASKED2]`。
+  - weighted：同一 `To` 连续 3 次均稳定落到 `codex-mock-a`，路由均为 `codex-weighted-route`。
+  - mock provider 投递与 DLR：测试消息最终状态均为 `DELIVRD`。
+  - 重启验证：`docker restart mysmpp` 后 healthz 正常，filter 规则仍可用。
+  - CDR 完整性：共捕获 17 条测试相关事件，覆盖 `rejected`、`accepted`、`sent`、`dlr`。
+- 测试完成后已清理全部临时 `codex-*` provider/route/filter rule，并将 `cdr.max_records` 恢复为 `10000`。
+- 清理后 healthz：
+
+```json
+{"checks":{"outbox_depth":0,"pending_size":0,"smpp_listener":"ok","storage":"ok"},"status":"ok"}
+```
+
 二次复测（2026-07-03 00:41 Asia/Shanghai）：
 
 - `http://REDACTED:19087/healthz` 可访问，当前线上服务存活：
