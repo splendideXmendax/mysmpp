@@ -587,8 +587,11 @@ func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
 		t.Fatalf("unexpected bind response: %+v", bindResp)
 	}
 
-	d.FlushDLR("esme-a")
-
+	done := make(chan struct{})
+	go func() {
+		d.FlushDLR("esme-a")
+		close(done)
+	}()
 	pdu, err := smpp.ReadPDU(clientConn)
 	if err != nil {
 		t.Fatal(err)
@@ -596,8 +599,95 @@ func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
 	if pdu.CommandID != smpp.CommandDeliverSM {
 		t.Fatalf("expected deliver_sm, got 0x%08x", pdu.CommandID)
 	}
+	if err := smpp.WritePDU(clientConn, smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("flush did not finish after deliver_sm_resp")
+	}
 	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || ok {
 		t.Fatalf("pending should be deleted after flush: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDispatcherPrefersOriginalSessionForSMPPDLR(t *testing.T) {
+	st := store.NewMemory()
+	rec := store.Pending{
+		ProviderID:         "up-1",
+		GatewayID:          "g000000000001",
+		SourceKind:         SourceSMPP.String(),
+		SourceSession:      "trx-original",
+		SourceSystem:       "esme-a",
+		From:               "1069",
+		To:                 "13800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Provider:           "mock-a",
+		ReceivedAt:         time.Now().UTC(),
+		ExpiresAt:          time.Now().Add(time.Hour),
+	}
+	if err := st.SavePending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveMessage(context.Background(), testMessage(rec.GatewayID)); err != nil {
+		t.Fatal(err)
+	}
+
+	otherServer, otherClient := net.Pipe()
+	defer otherServer.Close()
+	defer otherClient.Close()
+	origServer, origClient := net.Pipe()
+	defer origServer.Close()
+	defer origClient.Close()
+	other := smpp.NewSession(otherServer, smpp.SessionConfig{ID: "trx-other", Auth: func(systemID, password string) bool { return true }})
+	orig := smpp.NewSession(origServer, smpp.SessionConfig{ID: "trx-original", Auth: func(systemID, password string) bool { return true }})
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), provider.NewRegistry(), fakeSMPPServer{
+		session:   orig,
+		receivers: []*smpp.Session{other, orig},
+	}, testDispatcherConfig(), st)
+	defer d.Close()
+	go other.Serve(context.Background())
+	go orig.Serve(context.Background())
+	bindSessionForDispatchTest(t, otherClient, smpp.CommandBindTransceiver, smpp.CommandBindTransceiverResp)
+	bindSessionForDispatchTest(t, origClient, smpp.CommandBindTransceiver, smpp.CommandBindTransceiverResp)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "DELIVRD", DoneAt: time.Now().UTC()})
+	}()
+	pdu, err := smpp.ReadPDU(origClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pdu.CommandID != smpp.CommandDeliverSM {
+		t.Fatalf("expected deliver_sm on original session, got 0x%08x", pdu.CommandID)
+	}
+	if err := smpp.WritePDU(origClient, smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dlr handler did not finish")
+	}
+}
+
+func bindSessionForDispatchTest(t *testing.T, conn net.Conn, bindCmd, bindResp uint32) {
+	t.Helper()
+	if err := smpp.WritePDU(conn, smpp.PDU{CommandID: bindCmd, SequenceID: 1, Body: bindBodyForDispatchTest("esme-a", "")}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := smpp.ReadPDU(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.CommandID != bindResp || resp.Status != smpp.StatusOK {
+		t.Fatalf("unexpected bind response: %+v", resp)
 	}
 }
 

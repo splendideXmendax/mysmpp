@@ -34,7 +34,10 @@ type CDRSink interface {
 	Close() error
 }
 
-var errNoReceiverOnline = errors.New("no online receiver for smpp dlr")
+var (
+	errNoReceiverOnline = errors.New("no online receiver for smpp dlr")
+	errDLRNotAcked      = errors.New("smpp dlr was not acknowledged")
+)
 
 type Dispatcher struct {
 	logger        *slog.Logger
@@ -410,12 +413,12 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 	switch rec.SourceKind {
 	case SourceSMPP.String():
 		if err := d.pushSMPPDLR(rec, dlr); err != nil {
-			if errors.Is(err, errNoReceiverOnline) {
+			if errors.Is(err, errNoReceiverOnline) || errors.Is(err, errDLRNotAcked) {
 				if markErr := d.store.MarkDLRReady(ctx, dlr.ProviderID, dlr.State, dlr.ErrorCode, dlr.DoneAt); markErr != nil {
 					d.logger.Warn("mark dlr pending failed", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "err", markErr)
 					return markErr
 				}
-				d.logger.Info("dlr deferred, no receiver online", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "system_id", rec.SourceSystem)
+				d.logger.Info("dlr deferred", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "system_id", rec.SourceSystem, "reason", err)
 				return nil
 			}
 			d.logger.Warn("send deliver_sm failed", "gateway_id", rec.GatewayID, "err", err)
@@ -820,16 +823,16 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 		return errors.New("dlr has no smpp server")
 	}
 	var session *smpp.Session
-	if rec.SourceSystem != "" {
+	if rec.SourceSession != "" {
+		if s, ok := srv.Session(rec.SourceSession); ok && s.CanReceive() {
+			session = s
+		}
+	}
+	if session == nil && rec.SourceSystem != "" {
 		receivers := srv.ReceiversBySystemID(rec.SourceSystem)
 		if len(receivers) > 0 {
 			idx := int(d.dlrPick.Add(1)-1) % len(receivers)
 			session = receivers[idx]
-		}
-	}
-	if session == nil && rec.SourceSession != "" {
-		if s, ok := srv.Session(rec.SourceSession); ok && s.CanReceive() {
-			session = s
 		}
 	}
 	if session == nil {
@@ -846,9 +849,15 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 		OriginalText: rec.Text,
 	})
 	pdu.SequenceID = session.NextSeq()
-	if !session.Send(pdu) {
-		return errNoReceiverOnline
+	d.logger.Info("dlr deliver_sm sending", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "sequence", pdu.SequenceID, "session_id", session.ID(), "system_id", session.SystemID())
+	status, ok := session.SendDeliverSM(pdu, 10*time.Second)
+	if !ok {
+		return errDLRNotAcked
 	}
+	if status != smpp.StatusOK {
+		return fmt.Errorf("%w: status=0x%08x", errDLRNotAcked, status)
+	}
+	d.logger.Info("dlr deliver_sm acked", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "sequence", pdu.SequenceID, "session_id", session.ID(), "system_id", session.SystemID())
 	return nil
 }
 
@@ -875,7 +884,7 @@ func (d *Dispatcher) FlushDLR(systemID string) {
 				dlr.DoneAt = time.Now().UTC()
 			}
 			if err := d.pushSMPPDLR(rec, dlr); err != nil {
-				if !errors.Is(err, errNoReceiverOnline) {
+				if !errors.Is(err, errNoReceiverOnline) && !errors.Is(err, errDLRNotAcked) {
 					d.logger.Warn("flush deliver_sm failed", "gateway_id", rec.GatewayID, "provider_id", rec.ProviderID, "err", err)
 				}
 				if systemID == "" {

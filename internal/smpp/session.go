@@ -58,6 +58,9 @@ type Session struct {
 	closed  chan struct{}
 	closeMu sync.Once
 
+	deliverMu   sync.Mutex
+	deliverResp map[uint32]chan uint32
+
 	bindMode atomic.Int32
 	inflight atomic.Int32
 	nextSeq  atomic.Uint32
@@ -75,12 +78,13 @@ func NewSession(conn net.Conn, cfg SessionConfig) *Session {
 		id = conn.RemoteAddr().String()
 	}
 	s := &Session{
-		id:     id,
-		conn:   conn,
-		logger: logger.With("remote", conn.RemoteAddr().String()),
-		cfg:    cfg,
-		out:    make(chan PDU, 64),
-		closed: make(chan struct{}),
+		id:          id,
+		conn:        conn,
+		logger:      logger.With("remote", conn.RemoteAddr().String()),
+		cfg:         cfg,
+		out:         make(chan PDU, 64),
+		closed:      make(chan struct{}),
+		deliverResp: map[uint32]chan uint32{},
 	}
 	s.systemID.Store("")
 	s.nextSeq.Store(0)
@@ -113,6 +117,51 @@ func (s *Session) Send(p PDU) bool {
 		return true
 	case <-s.closed:
 		return false
+	}
+}
+
+func (s *Session) SendDeliverSM(p PDU, timeout time.Duration) (uint32, bool) {
+	if timeout <= 0 {
+		timeout = writeTimeout
+	}
+	ch := make(chan uint32, 1)
+	s.deliverMu.Lock()
+	s.deliverResp[p.SequenceID] = ch
+	s.deliverMu.Unlock()
+	defer s.unregisterDeliverResp(p.SequenceID)
+
+	if !s.Send(p) {
+		return 0, false
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case status := <-ch:
+		return status, true
+	case <-timer.C:
+		return 0, false
+	case <-s.closed:
+		return 0, false
+	}
+}
+
+func (s *Session) unregisterDeliverResp(seq uint32) {
+	s.deliverMu.Lock()
+	delete(s.deliverResp, seq)
+	s.deliverMu.Unlock()
+}
+
+func (s *Session) completeDeliverResp(seq, status uint32) {
+	s.deliverMu.Lock()
+	ch := s.deliverResp[seq]
+	s.deliverMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- status:
+	default:
 	}
 }
 
@@ -238,6 +287,7 @@ func (s *Session) dispatch(pdu PDU) {
 		}
 	case commandDeliverSMResp:
 		s.logger.Debug("deliver_sm_resp", "sequence", pdu.SequenceID, "status", pdu.Status)
+		s.completeDeliverResp(pdu.SequenceID, pdu.Status)
 	case commandEnquireLink:
 		s.Send(PDU{CommandID: commandEnquireLinkResp, Status: statusOK, SequenceID: pdu.SequenceID})
 	case commandUnbind:
