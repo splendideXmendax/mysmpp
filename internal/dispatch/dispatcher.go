@@ -351,7 +351,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		Source:    env.Source.Kind.String(),
 		State:     "queued",
 	})
-	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", match.Provider, "route", route.Name)
+	d.logger.Info("message queued", "gateway_id", gatewayID, "provider", match.Provider, "route", route.Name, "source", env.Source.Kind.String(), "source_session", env.Source.SMPPSessionID, "system_id", env.Source.SMPPSystemID, "registered_delivery", env.RegisteredDelivery)
 	return Receipt{GatewayID: gatewayID, Provider: match.Provider, Route: route.Name, State: "queued"}, nil
 }
 
@@ -407,6 +407,7 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 	}
 	d.emitCDR(d.dlrEvent(ctx, rec, dlr))
 	if rec.SourceKind == SourceSMPP.String() && rec.RegisteredDelivery&0x03 == 0 {
+		d.logger.Info("dlr skipped, registered_delivery not requested", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "registered_delivery", rec.RegisteredDelivery, "source_session", rec.SourceSession, "system_id", rec.SourceSystem)
 		_ = d.store.DeletePending(ctx, dlr.ProviderID)
 		return nil
 	}
@@ -707,7 +708,7 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 	if err := d.store.AckOutbox(ctx, item.ID); err != nil {
 		d.logger.Warn("ack outbox failed", "outbox_id", item.ID, "err", err)
 	}
-	d.logger.Info("message dispatched", "gateway_id", payload.GatewayID, "provider_id", providerIDs[0], "provider_id_count", len(providerIDs), "provider", payload.Provider, "route", payload.Route)
+	d.logger.Info("message dispatched", "gateway_id", payload.GatewayID, "provider_id", providerIDs[0], "provider_id_count", len(providerIDs), "provider", payload.Provider, "route", payload.Route, "source", payload.SourceKind, "source_session", payload.SourceSession, "system_id", payload.SourceSystem, "registered_delivery", payload.RegisteredDelivery)
 }
 
 func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err error) {
