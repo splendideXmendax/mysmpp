@@ -1,0 +1,591 @@
+/* 声联国际官网 - 全局样式 */
+:root {
+  --bg: #050a15;
+  --panel: rgba(255, 255, 255, 0.03);
+  --card: rgba(255, 255, 255, 0.05);
+  --primary: #4a9eff;
+  --primary-2: #60d4ff;
+  --accent: #a78bfa;
+  --text: #f0f4ff;
+  --muted: #8b9dc3;
+  --border: rgba(255, 255, 255, 0.06);
+  --glow: 0 12px 35px rgba(74, 158, 255, 0.2);
+  --radius: 16px;
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Inter", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+  background: #050a15;
+  background-image:
+    radial-gradient(ellipse 1400px 900px at 15% 5%, rgba(30, 64, 120, 0.25), transparent 60%),
+    radial-gradient(ellipse 1000px 800px at 85% 10%, rgba(45, 80, 140, 0.15), transparent 55%),
+    radial-gradient(ellipse 800px 600px at 50% 80%, rgba(20, 40, 80, 0.2), transparent 50%);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 100px 24px 80px;
+  min-height: 100vh;
+}
+
+/* 顶部导航 */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(16px);
+  background: rgba(7, 9, 20, 0.75);
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.logo-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #fff;
+  box-shadow: var(--glow);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.nav-link {
+  padding: 10px 14px;
+  color: var(--muted);
+  border-radius: 10px;
+  transition: 0.2s;
+}
+
+.nav-link.active,
+.nav-link:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.nav-cta {
+  padding: 12px 18px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: #0a0d1a;
+  font-weight: 700;
+  box-shadow: var(--glow);
+}
+
+/* Hero */
+.hero {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 40px;
+  align-items: center;
+  margin-bottom: 56px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--primary-2);
+  font-size: 14px;
+}
+
+.hero h1 {
+  font-size: clamp(32px, 5vw, 48px);
+  margin: 16px 0 12px;
+  line-height: 1.2;
+}
+
+.hero p {
+  color: var(--muted);
+  max-width: 620px;
+  margin-bottom: 20px;
+}
+
+.tagline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--primary-2);
+  margin-bottom: 28px;
+}
+
+.cta-row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--panel);
+  transition: 0.2s;
+}
+
+.btn.primary {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  border-color: transparent;
+  box-shadow: var(--glow);
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+
+.hero-card {
+  background: radial-gradient(circle at 30% 20%, rgba(90, 140, 255, 0.25), transparent 50%),
+    radial-gradient(circle at 70% 60%, rgba(124, 77, 255, 0.18), transparent 50%),
+    linear-gradient(160deg, rgba(11, 18, 35, 0.9), rgba(7, 9, 20, 0.9));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 太空视角地球特效 */
+.globe-3d {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  aspect-ratio: 1 / 1;
+}
+
+.globe-3d canvas {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 50%;
+  box-shadow:
+    0 0 50px rgba(91, 141, 255, 0.35),
+    0 0 0 1px rgba(122, 240, 255, 0.16),
+    inset -25px -20px 45px rgba(0, 0, 0, 0.55);
+  background: radial-gradient(circle, rgba(91, 141, 255, 0.12), rgba(3, 5, 13, 0.9));
+}
+
+.space-viewport {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  aspect-ratio: 1 / 1;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+}
+
+.space-stars {
+  position: absolute;
+  inset: -15%;
+  background:
+    radial-gradient(1px 1px at 10% 20%, rgba(255, 255, 255, 0.9), transparent 55%),
+    radial-gradient(1px 1px at 80% 15%, rgba(122, 240, 255, 0.9), transparent 55%),
+    radial-gradient(1px 1px at 60% 75%, rgba(124, 77, 255, 0.85), transparent 60%),
+    radial-gradient(1px 1px at 35% 85%, rgba(255, 255, 255, 0.8), transparent 60%),
+    radial-gradient(1px 1px at 20% 60%, rgba(122, 240, 255, 0.7), transparent 60%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.space-halo {
+  position: absolute;
+  width: 110%;
+  height: 110%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(91, 141, 255, 0.18), transparent 60%);
+  filter: blur(16px);
+  z-index: 0;
+}
+
+.earth {
+  position: relative;
+  width: 78%;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow:
+    0 0 60px rgba(91, 141, 255, 0.35),
+    0 0 0 2px rgba(122, 240, 255, 0.12),
+    inset -40px -30px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* 实景地球照片版本 */
+.earth-photo {
+  background: url('https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?auto=format&fit=crop&w=900&q=80') center/cover no-repeat;
+  box-shadow:
+    0 0 50px rgba(91, 141, 255, 0.35),
+    0 0 0 1px rgba(122, 240, 255, 0.16),
+    inset -25px -20px 45px rgba(0, 0, 0, 0.55);
+}
+
+.earth-base {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(120% 120% at 30% 40%, rgba(0, 10, 24, 0.65), transparent 55%),
+    radial-gradient(circle at 70% 60%, rgba(10, 40, 70, 0.6), transparent 55%),
+    linear-gradient(125deg, #0a1a38 0%, #041024 65%, #030814 100%);
+  animation: rotate 30s linear infinite;
+}
+
+.earth-lands {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(30% 22% at 45% 48%, rgba(94, 185, 110, 0.8), transparent 60%),
+    radial-gradient(22% 18% at 65% 55%, rgba(82, 171, 96, 0.78), transparent 60%),
+    radial-gradient(18% 16% at 58% 38%, rgba(94, 185, 110, 0.7), transparent 60%),
+    radial-gradient(26% 20% at 32% 62%, rgba(88, 176, 104, 0.76), transparent 60%),
+    radial-gradient(14% 12% at 52% 70%, rgba(78, 162, 92, 0.72), transparent 65%),
+    radial-gradient(12% 10% at 72% 32%, rgba(104, 194, 128, 0.7), transparent 65%);
+  filter: blur(0.6px);
+  mix-blend-mode: screen;
+  opacity: 0.95;
+  animation: rotate 24s linear infinite;
+}
+
+.earth-terminator {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(120% 100% at 30% 40%, rgba(0, 0, 0, 0.7), transparent 55%);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+}
+
+.earth-rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(122, 240, 255, 0.28);
+  box-shadow:
+    0 0 25px rgba(122, 240, 255, 0.35),
+    inset 0 0 18px rgba(91, 141, 255, 0.35);
+  mix-blend-mode: screen;
+}
+
+.earth-clouds {
+  position: absolute;
+  inset: -4%;
+  border-radius: 50%;
+  background:
+    radial-gradient(10px 10px at 40% 45%, rgba(255, 255, 255, 0.18), transparent 50%),
+    radial-gradient(12px 12px at 60% 55%, rgba(255, 255, 255, 0.2), transparent 50%),
+    radial-gradient(14px 14px at 70% 35%, rgba(255, 255, 255, 0.16), transparent 55%),
+    radial-gradient(16px 16px at 30% 65%, rgba(255, 255, 255, 0.15), transparent 60%);
+  opacity: 0.7;
+  filter: blur(1px);
+  animation: rotate 18s linear infinite;
+  mix-blend-mode: screen;
+}
+
+.earth-glow {
+  position: absolute;
+  inset: -8%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(122, 240, 255, 0.18), transparent 60%);
+  filter: blur(20px);
+  opacity: 0.9;
+}
+
+.orbit-line {
+  position: absolute;
+  width: 115%;
+  height: 115%;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  animation: rotate 22s linear infinite;
+}
+
+.orbit-dot {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  box-shadow: 0 0 12px rgba(122, 240, 255, 0.7);
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.hero-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+
+.metric {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.metric .label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.metric .value {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+/* Sections */
+.section {
+  margin: 64px 0;
+  padding: 0;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  gap: 16px;
+}
+
+.section-header h2 {
+  font-size: 24px;
+}
+
+.section-header p {
+  color: var(--muted);
+  max-width: 620px;
+}
+
+/* 卡片网格 */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(91, 141, 255, 0.6);
+  box-shadow: var(--shadow);
+}
+
+.card .icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(91, 141, 255, 0.15);
+  color: var(--primary-2);
+  margin-bottom: 10px;
+  font-size: 18px;
+}
+
+.card h3 {
+  margin-bottom: 6px;
+  font-size: 18px;
+}
+
+.card p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.pill-badge {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(122, 240, 255, 0.12);
+  color: var(--primary-2);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+/* 时间线 */
+.timeline {
+  display: grid;
+  gap: 14px;
+}
+
+.timeline-item {
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.timeline-item strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.timeline-item span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* 数据表 */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.table th,
+.table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  text-align: left;
+}
+
+.table th {
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.chip {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: rgba(91, 141, 255, 0.15);
+  color: var(--primary-2);
+}
+
+.price {
+  font-weight: 700;
+  color: var(--primary-2);
+}
+
+/* 联系表单 */
+.form {
+  display: grid;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+}
+
+textarea.input {
+  resize: vertical;
+  min-height: 120px;
+}
+
+footer {
+  border-top: 1px solid var(--border);
+  background: rgba(7, 9, 20, 0.85);
+  padding: 28px 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* 响应式 */
+@media (max-width: 900px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-links {
+    display: none;
+  }
+
+  .page {
+    padding-top: 80px;
+  }
+}
+
