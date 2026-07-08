@@ -44,7 +44,40 @@ func NewRateLimitedProvider(inner Provider, cfg config.ProviderRateLimit) Provid
 }
 
 func (p *RateLimitedProvider) Send(msg OutboundMessage) (string, error) {
-	ctx := msg.Context
+	if _, ok := p.inner.(MultiIDProvider); ok {
+		ids, err := p.SendAll(msg)
+		if err != nil {
+			return "", err
+		}
+		if len(ids) == 0 {
+			return "", nil
+		}
+		return ids[0], nil
+	}
+	if err := p.wait(msg.Context); err != nil {
+		return "", err
+	}
+	return p.inner.Send(msg)
+}
+
+func (p *RateLimitedProvider) SendAll(msg OutboundMessage) ([]string, error) {
+	if err := p.wait(msg.Context); err != nil {
+		return nil, err
+	}
+	if multi, ok := p.inner.(MultiIDProvider); ok {
+		return multi.SendAll(msg)
+	}
+	id, err := p.inner.Send(msg)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, nil
+	}
+	return []string{id}, nil
+}
+
+func (p *RateLimitedProvider) wait(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -52,10 +85,10 @@ func (p *RateLimitedProvider) Send(msg OutboundMessage) (string, error) {
 	defer cancel()
 	select {
 	case <-waitCtx.Done():
-		return "", fmt.Errorf("rate limited: %w", waitCtx.Err())
+		return fmt.Errorf("rate limited: %w", waitCtx.Err())
 	case <-p.tokens:
 	}
-	return p.inner.Send(msg)
+	return nil
 }
 
 func (p *RateLimitedProvider) OnDLR(cb DLRCallback) {
