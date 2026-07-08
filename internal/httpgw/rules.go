@@ -53,6 +53,8 @@ type rateWindow struct {
 	count     int
 }
 
+const maxHTTPSubmitSegments = 20
+
 func New(cfg config.Config, st store.Store) *Gateway {
 	g := &Gateway{cfg: cfg, store: st, mux: http.NewServeMux(), riskCounts: map[string]rateWindow{}}
 	g.routes()
@@ -291,8 +293,13 @@ func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta
 	if !validPhone(to) {
 		return fmt.Errorf("to must be E.164 or 11 digits")
 	}
-	if utf8.RuneCountInString(text) < 1 || utf8.RuneCountInString(text) > 1000 {
-		return fmt.Errorf("text must be 1-1000 characters")
+	if utf8.RuneCountInString(text) < 1 {
+		return fmt.Errorf("text must not be empty")
+	}
+	encoding := message.DetectEncoding(text)
+	segments := message.Split(text, message.SplitOptions{ForceEncoding: encoding})
+	if len(segments) > maxHTTPSubmitSegments {
+		return fmt.Errorf("text exceeds %d SMS segments for %s encoding", maxHTTPSubmitSegments, encoding)
 	}
 	if clientMsgID != "" && (utf8.RuneCountInString(clientMsgID) < 1 || utf8.RuneCountInString(clientMsgID) > 64 || strings.ContainsAny(clientMsgID, " \t\r\n")) {
 		return fmt.Errorf("client_msg_id must be 1-64 non-space characters")

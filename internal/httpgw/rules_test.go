@@ -193,6 +193,45 @@ func TestMessageSubmitRejectsInvalidClientMsgID(t *testing.T) {
 	}
 }
 
+func TestMessageSubmitLimitsTextByEncodedSegments(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "gsm7 max 20 segments", text: strings.Repeat("a", message.DefaultGSM7ConcatLimit*maxHTTPSubmitSegments), want: http.StatusAccepted},
+		{name: "gsm7 over 20 segments", text: strings.Repeat("a", message.DefaultGSM7ConcatLimit*maxHTTPSubmitSegments+1), want: http.StatusBadRequest},
+		{name: "ucs2 max 20 segments", text: strings.Repeat("你", message.DefaultUCS2ConcatLimit*maxHTTPSubmitSegments), want: http.StatusAccepted},
+		{name: "ucs2 over 20 segments", text: strings.Repeat("你", message.DefaultUCS2ConcatLimit*maxHTTPSubmitSegments+1), want: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			enableClientAuth(&cfg)
+			gateway := New(cfg, store.NewMemory())
+
+			body, err := json.Marshal(map[string]string{
+				"from": "1069",
+				"to":   "13800138000",
+				"text": tt.text,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			addClientAuth(req)
+			rec := httptest.NewRecorder()
+			gateway.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != tt.want {
+				t.Fatalf("expected %d, got %d: %s", tt.want, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHealthReportsStorageErrors(t *testing.T) {
 	gateway := New(config.Default(), failingStore{err: errors.New("storage down")})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
