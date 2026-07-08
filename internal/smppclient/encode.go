@@ -23,6 +23,9 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 	if dataCoding == 0 && strings.EqualFold(encoding, "ucs2") {
 		dataCoding = 0x08
 	}
+	if dataCoding == 0x08 {
+		encoding = "ucs2"
+	}
 	registeredDelivery := msg.RegisteredDelivery
 	if cfg.RegisteredDelivery >= 0 {
 		registeredDelivery = byte(cfg.RegisteredDelivery)

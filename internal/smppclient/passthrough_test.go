@@ -78,6 +78,41 @@ func TestBuildSubmitSMResplitsOversizedUDHWithoutPayload(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitSMResplitsDataCodingUCS2EvenWhenDetectedGSM7(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "udh"
+	parts := BuildSubmitSM(Message{
+		GatewayID:          "g1",
+		SourceAddr:         "1069",
+		DestAddr:           "13800138000",
+		Text:               "ASCII text that is intentionally long enough to exceed one UCS2 concatenated segment when data_coding forces UCS2. abcdefghijklmnopqrstuvwxyz 0123456789 abcdefghijklmnopqrstuvwxyz 0123456789",
+		DataCoding:         0x08,
+		RegisteredDelivery: 1,
+		UDH:                []byte{0x06, 0x08, 0x04, 0x12, 0x34, 0x02, 0x01},
+	}, cfg)
+	if len(parts) < 3 {
+		t.Fatalf("expected UCS2-sized split, got %d part(s)", len(parts))
+	}
+	for i, part := range parts {
+		submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: uint32(i + 1), Body: part.Body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if submit.DataCoding != 0x08 {
+			t.Fatalf("part %d data_coding=0x%02x", i+1, submit.DataCoding)
+		}
+		if submit.ESMClass&0x40 == 0 || submit.UDH == nil {
+			t.Fatalf("part %d missing UDH: esm_class=0x%02x udh=% x", i+1, submit.ESMClass, submit.UDH)
+		}
+		if submit.OptionalParamsOffset < len(part.Body) {
+			t.Fatalf("part %d should not contain message_payload TLV", i+1)
+		}
+		if len(submit.Payload)+len(submit.UDH) > 254 {
+			t.Fatalf("part %d short_message too long: %d", i+1, len(submit.Payload)+len(submit.UDH))
+		}
+	}
+}
+
 func TestBuildSubmitSMConcatPassthroughSAR(t *testing.T) {
 	cfg := config.DefaultSMPPClientConfig()
 	cfg.LongMessage = "sar"
