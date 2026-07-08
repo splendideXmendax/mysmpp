@@ -53,6 +53,9 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		}
 		params.ESMClass = 0x40
 		params.ShortMessage = append(append([]byte(nil), msg.UDH...), payload...)
+		if cfg.LongMessage == "udh" && len(params.ShortMessage) > 254 {
+			return buildSplitSubmitSM(msg, cfg, encoding, dataCoding, registeredDelivery)
+		}
 		return []submitPart{{Body: buildSubmitBody(params)}}
 	}
 
@@ -105,6 +108,28 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 			DestTON:            byte(cfg.DestTON),
 			DestNPI:            byte(cfg.DestNPI),
 			ESMClass:           esmClass,
+		})})
+	}
+	return out
+}
+
+func buildSplitSubmitSM(msg Message, cfg config.SMPPClientConfig, encoding string, dataCoding, registeredDelivery byte) []submitPart {
+	segments := message.Split(msg.Text, message.SplitOptions{ForceEncoding: encoding})
+	out := make([]submitPart, 0, len(segments))
+	for _, segment := range segments {
+		payload := encodeText(segment.Text, dataCoding, cfg.GSM7Packing)
+		payload = append(append([]byte(nil), segment.UDH...), payload...)
+		out = append(out, submitPart{Body: buildSubmitBody(submitBodyParams{
+			Cfg:                cfg,
+			Msg:                msg,
+			DataCoding:         dataCoding,
+			RegisteredDelivery: registeredDelivery,
+			ShortMessage:       payload,
+			SourceTON:          sourceTON(msg.SourceAddr, cfg.SourceTON),
+			SourceNPI:          sourceNPI(msg.SourceAddr, cfg.SourceNPI),
+			DestTON:            byte(cfg.DestTON),
+			DestNPI:            byte(cfg.DestNPI),
+			ESMClass:           0x40,
 		})})
 	}
 	return out

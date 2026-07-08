@@ -41,6 +41,43 @@ func TestBuildSubmitSMConcatPassthroughUDH(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitSMResplitsOversizedUDHWithoutPayload(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "udh"
+	udh := []byte{0x06, 0x08, 0x04, 0x12, 0x34, 0x02, 0x01}
+	parts := BuildSubmitSM(Message{
+		GatewayID:          "g1",
+		SourceAddr:         "1069",
+		DestAddr:           "13800138000",
+		Text:               "这是一个很长的UCS2短信内容，用来验证下游用message_payload携带UDH长短信时，上游仍然按UDH short_message重新分段发送，避免被不支持message_payload的SMSC拒绝。abcdefghijklmnopqrstuvwxyz0123456789",
+		Encoding:           "ucs2",
+		DataCoding:         0x08,
+		RegisteredDelivery: 1,
+		UDH:                udh,
+	}, cfg)
+	if len(parts) < 2 {
+		t.Fatalf("expected oversized UDH payload to be split, got %d part(s)", len(parts))
+	}
+	for i, part := range parts {
+		submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: uint32(i + 1), Body: part.Body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if submit.ESMClass&0x40 == 0 {
+			t.Fatalf("part %d missing UDHI bit", i+1)
+		}
+		if submit.UDH == nil || submit.Concat == nil {
+			t.Fatalf("part %d missing concat UDH: udh=% x concat=%+v", i+1, submit.UDH, submit.Concat)
+		}
+		if submit.OptionalParamsOffset < len(part.Body) {
+			t.Fatalf("part %d should not contain message_payload TLV", i+1)
+		}
+		if len(submit.Payload)+len(submit.UDH) > 254 {
+			t.Fatalf("part %d short_message too long: %d", i+1, len(submit.Payload)+len(submit.UDH))
+		}
+	}
+}
+
 func TestBuildSubmitSMConcatPassthroughSAR(t *testing.T) {
 	cfg := config.DefaultSMPPClientConfig()
 	cfg.LongMessage = "sar"
