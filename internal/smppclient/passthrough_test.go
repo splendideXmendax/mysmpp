@@ -113,6 +113,72 @@ func TestBuildSubmitSMResplitsDataCodingUCS2EvenWhenDetectedGSM7(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitSMSplitLengthsByDataCoding(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "udh"
+	cfg.GSM7Packing = "unpacked"
+
+	tests := []struct {
+		name       string
+		text       string
+		dataCoding byte
+		wantLen    int
+	}{
+		{
+			name:       "gsm7 unpacked",
+			text:       repeat("a", 200),
+			dataCoding: 0x00,
+			wantLen:    159,
+		},
+		{
+			name:       "8bit",
+			text:       repeat("b", 200),
+			dataCoding: 0x03,
+			wantLen:    140,
+		},
+		{
+			name:       "ucs2",
+			text:       repeat("c", 200),
+			dataCoding: 0x08,
+			wantLen:    140,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := BuildSubmitSM(Message{
+				GatewayID:          "g1",
+				SourceAddr:         "1069",
+				DestAddr:           "13800138000",
+				Text:               tt.text,
+				DataCoding:         tt.dataCoding,
+				RegisteredDelivery: 1,
+				UDH:                []byte{0x05, 0x00, 0x03, 0x7b, 0x02, 0x01},
+			}, cfg)
+			if len(parts) < 2 {
+				t.Fatalf("expected split submit, got %d part(s)", len(parts))
+			}
+			submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if submit.DataCoding != tt.dataCoding {
+				t.Fatalf("data_coding=0x%02x, want 0x%02x", submit.DataCoding, tt.dataCoding)
+			}
+			if len(submit.UDH) != 6 {
+				t.Fatalf("expected 6-byte UDH, got % x", submit.UDH)
+			}
+			gotLen := len(submit.UDH) + len(submit.Payload)
+			if gotLen != tt.wantLen {
+				t.Fatalf("first short_message length=%d, want %d", gotLen, tt.wantLen)
+			}
+			if submit.OptionalParamsOffset < len(parts[0].Body) {
+				t.Fatal("split part should not contain message_payload TLV")
+			}
+		})
+	}
+}
+
 func TestBuildSubmitSMConcatPassthroughSAR(t *testing.T) {
 	cfg := config.DefaultSMPPClientConfig()
 	cfg.LongMessage = "sar"
@@ -144,6 +210,14 @@ func TestBuildSubmitSMConcatPassthroughSAR(t *testing.T) {
 	if submit.Text != "hello" {
 		t.Fatalf("text not preserved: %q", submit.Text)
 	}
+}
+
+func repeat(s string, n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		out += s
+	}
+	return out
 }
 
 func TestBuildSubmitSMNoUDHUnchanged(t *testing.T) {

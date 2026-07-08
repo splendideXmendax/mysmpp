@@ -24,8 +24,28 @@ func TestSplitLongGSM7Message(t *testing.T) {
 	if segments[0].Total != 2 || segments[1].Part != 2 {
 		t.Fatalf("unexpected segment numbering: %+v", segments)
 	}
-	if len(segments[0].UDH) != 7 || segments[0].UDH[1] != 0x08 || segments[0].UDH[2] != 0x04 {
-		t.Fatalf("expected 16-bit concat UDH, got % x", segments[0].UDH)
+	if len(segments[0].UDH) != 6 || segments[0].UDH[1] != 0x00 || segments[0].UDH[2] != 0x03 {
+		t.Fatalf("expected 8-bit concat UDH, got % x", segments[0].UDH)
+	}
+	if Join(segments) != text {
+		t.Fatal("joined text does not match original")
+	}
+}
+
+func TestSplit8BitMessage(t *testing.T) {
+	text := ""
+	for i := 0; i < 200; i++ {
+		text += "a"
+	}
+	segments := Split(text, SplitOptions{ForceEncoding: "8bit"})
+	if len(segments) != 2 {
+		t.Fatalf("expected two segments, got %d", len(segments))
+	}
+	if len(segments[0].UDH) != 6 {
+		t.Fatalf("expected 6-byte UDH, got % x", segments[0].UDH)
+	}
+	if len([]rune(segments[0].Text)) != Default8BitConcatLimit {
+		t.Fatalf("expected first 8bit segment length %d, got %d", Default8BitConcatLimit, len([]rune(segments[0].Text)))
 	}
 	if Join(segments) != text {
 		t.Fatal("joined text does not match original")

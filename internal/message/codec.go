@@ -43,7 +43,15 @@ func EncodeText(text string, dataCoding uint8) []byte {
 		}
 		return out
 	case 0x03:
-		return []byte(text)
+		out := make([]byte, 0, len([]rune(text)))
+		for _, r := range text {
+			if r > 0xff {
+				out = append(out, '?')
+				continue
+			}
+			out = append(out, byte(r))
+		}
+		return out
 	default:
 		return encodeGSM7Packed(text)
 	}

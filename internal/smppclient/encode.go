@@ -25,6 +25,8 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 	}
 	if dataCoding == 0x08 {
 		encoding = "ucs2"
+	} else if dataCoding == 0x03 {
+		encoding = "8bit"
 	}
 	registeredDelivery := msg.RegisteredDelivery
 	if cfg.RegisteredDelivery >= 0 {
@@ -56,7 +58,7 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		}
 		params.ESMClass = 0x40
 		params.ShortMessage = append(append([]byte(nil), msg.UDH...), payload...)
-		if cfg.LongMessage == "udh" && len(params.ShortMessage) > 254 {
+		if cfg.LongMessage == "udh" && len(params.ShortMessage) > maxUDHShortMessageLen(dataCoding, cfg.GSM7Packing) {
 			return buildSplitSubmitSM(msg, cfg, encoding, dataCoding, registeredDelivery)
 		}
 		return []submitPart{{Body: buildSubmitBody(params)}}
@@ -136,6 +138,20 @@ func buildSplitSubmitSM(msg Message, cfg config.SMPPClientConfig, encoding strin
 		})})
 	}
 	return out
+}
+
+func maxUDHShortMessageLen(dataCoding byte, packing string) int {
+	switch dataCoding {
+	case 0x03, 0x08:
+		return 140
+	case 0x00:
+		if packing == "packed" {
+			return 140
+		}
+		return 159
+	default:
+		return 140
+	}
 }
 
 type submitBodyParams struct {
