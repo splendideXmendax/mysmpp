@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,9 +253,10 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	shouldValidate := route.DestAddr.ValidateEnabled(d.validateDest) || route.AddrRewrite.EnforceE164Len
 	if shouldValidate {
 		opts := destAddrOptions{
-			AllowShortCode: route.DestAddr.AllowShortCode,
-			MinShortLen:    route.DestAddr.MinShortLen,
-			MaxShortLen:    route.DestAddr.MaxShortLen,
+			AllowShortCode:    route.DestAddr.AllowShortCode,
+			MinShortLen:       route.DestAddr.MinShortLen,
+			MaxShortLen:       route.DestAddr.MaxShortLen,
+			CountryLengthMode: route.DestAddr.CountryLengthMode,
 		}
 		if err := validateDestAddr(env.To, opts); err != nil {
 			d.emitCDR(cdr.Event{
@@ -907,7 +909,11 @@ func (d *Dispatcher) newGatewayID(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("g%012d", n), nil
+	encoded := strconv.FormatUint(n, 36)
+	if len(encoded) > 7 {
+		return "", errors.New("gateway id sequence exhausted")
+	}
+	return fmt.Sprintf("m%07s", encoded), nil
 }
 
 func cloneMeta(in map[string]string) map[string]string {

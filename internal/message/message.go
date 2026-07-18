@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode/utf16"
 )
 
 const (
@@ -97,17 +97,23 @@ func Split(text string, opts SplitOptions) []Segment {
 		concatLimit = DefaultUCS2ConcatLimit
 	}
 
-	textLen := utf8.RuneCountInString(text)
-	if strings.EqualFold(encoding, "gsm7") {
+	textLen := len([]rune(text))
+	switch {
+	case strings.EqualFold(encoding, "gsm7"):
 		textLen = gsm7SeptetLen(text)
+	case strings.EqualFold(encoding, "ucs2"):
+		textLen = ucs2UnitLen(text)
 	}
 	if textLen <= singleLimit {
 		return []Segment{{Part: 1, Total: 1, Text: text}}
 	}
 
 	chunks := chunkRunes(text, concatLimit)
-	if strings.EqualFold(encoding, "gsm7") {
+	switch {
+	case strings.EqualFold(encoding, "gsm7"):
 		chunks = chunkGSM7(text, concatLimit)
+	case strings.EqualFold(encoding, "ucs2"):
+		chunks = chunkUCS2(text, concatLimit)
 	}
 	ref := randomReference()
 	segments := make([]Segment, 0, len(chunks))
@@ -190,6 +196,34 @@ func chunkGSM7(text string, limit int) []string {
 	return chunks
 }
 
+func ucs2UnitLen(text string) int {
+	total := 0
+	for _, r := range text {
+		total += utf16.RuneLen(r)
+	}
+	return total
+}
+
+func chunkUCS2(text string, limit int) []string {
+	var chunks []string
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		size := utf16.RuneLen(r)
+		if used > 0 && used+size > limit {
+			chunks = append(chunks, b.String())
+			b.Reset()
+			used = 0
+		}
+		b.WriteRune(r)
+		used += size
+	}
+	if b.Len() > 0 {
+		chunks = append(chunks, b.String())
+	}
+	return chunks
+}
+
 func concatUDH(ref uint16, part, total int) []byte {
 	return []byte{0x05, 0x00, 0x03, byte(ref), byte(total), byte(part)}
 }
@@ -203,8 +237,9 @@ func randomReference() uint16 {
 }
 
 func isGSM7Basic(r rune) bool {
-	if r == '\n' || r == '\r' {
+	if _, ok := gsm7DefaultCodes[r]; ok {
 		return true
 	}
-	return (r >= ' ' && r <= '~') || r == '£' || r == '¥' || r == 'è' || r == 'é' || r == 'ù' || r == 'ì' || r == 'ò' || r == 'Ç' || r == 'Ø' || r == 'ø' || r == 'Å' || r == 'å' || r == 'Δ' || r == 'Φ' || r == 'Γ' || r == 'Λ' || r == 'Ω' || r == 'Π' || r == 'Ψ' || r == 'Σ' || r == 'Θ' || r == 'Ξ' || r == 'Æ' || r == 'æ' || r == 'ß' || r == 'É'
+	_, ok := gsm7RuneToExt[r]
+	return ok
 }

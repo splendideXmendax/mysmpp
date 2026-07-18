@@ -37,6 +37,13 @@ func TestParseSubmitSMStripsUDH(t *testing.T) {
 	}
 }
 
+func TestParseSubmitSMRejectsMalformedUDHInformationElements(t *testing.T) {
+	body := submitSMBodyWith(0x40, 0x00, []byte("MZF Test7bitLongSMS"))
+	if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 8, Body: body}); err == nil {
+		t.Fatal("expected malformed UDH to be rejected")
+	}
+}
+
 func TestParseSubmitSMMessagePayloadTLV(t *testing.T) {
 	body := submitSMBodyWith(0x00, 0x00, nil)
 	body = appendTLV(body, TagMessagePayload, message.EncodeText("payload text", 0x00))
@@ -60,6 +67,48 @@ func TestParseSubmitSMSARTLV(t *testing.T) {
 	}
 	if submit.Concat == nil || submit.Concat.Reference != 0x1234 || submit.Concat.Total != 2 || submit.Concat.Part != 2 {
 		t.Fatalf("sar tlv not parsed: %+v", submit.Concat)
+	}
+}
+
+func TestParseSubmitSMRejectsPartialSAR(t *testing.T) {
+	body := submitSMBodyWith(0x00, 0x00, message.EncodeText("part", 0x00))
+	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12, 0x34})
+	if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 10, Body: body}); err == nil {
+		t.Fatal("expected partial SAR parameters to be rejected")
+	}
+}
+
+func TestParseSubmitSMRejectsCombinedUDHAndSAR(t *testing.T) {
+	body := submitSMBodyWith(0x40, 0x00, append([]byte{0x03, 0x70, 0x01, 0xff}, message.EncodeText("part", 0x00)...))
+	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12, 0x34})
+	body = appendTLV(body, TagSARTotalSegments, []byte{0x02})
+	body = appendTLV(body, TagSARSegmentSeqnum, []byte{0x01})
+	if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 10, Body: body}); err == nil {
+		t.Fatal("expected combined UDH and SAR to be rejected")
+	}
+}
+
+func TestParseSubmitSMRejectsMalformedOptionalParameters(t *testing.T) {
+	tests := [][]byte{
+		{0x02, 0x0c, 0x00},
+		{0x02, 0x0c, 0x00, 0x02, 0x01},
+	}
+	for _, suffix := range tests {
+		body := append(submitSMBodyWith(0x00, 0x00, message.EncodeText("part", 0x00)), suffix...)
+		if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 10, Body: body}); err == nil {
+			t.Fatalf("expected malformed optional parameters to be rejected: % x", suffix)
+		}
+	}
+}
+
+func TestParseSubmitSMRejectsDuplicateSARParameters(t *testing.T) {
+	body := submitSMBodyWith(0x00, 0x00, message.EncodeText("part", 0x00))
+	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12})
+	body = appendTLV(body, TagSARMsgRefNum, []byte{0x13})
+	body = appendTLV(body, TagSARTotalSegments, []byte{0x02})
+	body = appendTLV(body, TagSARSegmentSeqnum, []byte{0x01})
+	if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 10, Body: body}); err == nil {
+		t.Fatal("expected duplicate SAR parameters to be rejected")
 	}
 }
 

@@ -41,6 +41,47 @@ func TestBuildSubmitSMConcatPassthroughUDH(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitSMPreservesSevenByteUDHInShortMessageLength(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "udh"
+	cfg.GSM7Packing = "unpacked"
+	cfg.SourceTON = 5
+	cfg.SourceNPI = 0
+	cfg.DestTON = 1
+	cfg.DestNPI = 1
+	udh := []byte{0x06, 0x08, 0x04, 0x38, 0x74, 0x02, 0x01}
+	parts := BuildSubmitSM(Message{
+		GatewayID:          "g1",
+		SourceAddr:         "MZF7BIT",
+		DestAddr:           "8615069232047",
+		Text:               repeat("a", 154),
+		Encoding:           "gsm7",
+		DataCoding:         0x00,
+		RegisteredDelivery: 1,
+		UDH:                udh,
+	}, cfg)
+	if len(parts) != 1 {
+		t.Fatalf("expected one passthrough part, got %d", len(parts))
+	}
+	submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.ESMClass&0x40 == 0 {
+		t.Fatalf("expected UDHI bit, got esm_class=0x%02x", submit.ESMClass)
+	}
+	if string(submit.UDH) != string(udh) {
+		t.Fatalf("UDH not preserved: got % x want % x", submit.UDH, udh)
+	}
+	shortMessageLen := len(submit.UDH) + len(submit.Payload)
+	if shortMessageLen != 161 {
+		t.Fatalf("short_message length=%d, want 161", shortMessageLen)
+	}
+	if pduLength := 16 + len(parts[0].Body); pduLength != 214 {
+		t.Fatalf("pdu length=%d, want 214", pduLength)
+	}
+}
+
 func TestBuildSubmitSMResplitsOversizedUDHWithoutPayload(t *testing.T) {
 	cfg := config.DefaultSMPPClientConfig()
 	cfg.LongMessage = "udh"
@@ -126,13 +167,13 @@ func TestBuildSubmitSMSplitLengthsByDataCoding(t *testing.T) {
 	}{
 		{
 			name:       "gsm7 unpacked",
-			text:       repeat("a", 200),
+			text:       repeat("a", 300),
 			dataCoding: 0x00,
 			wantLen:    159,
 		},
 		{
 			name:       "8bit",
-			text:       repeat("b", 200),
+			text:       repeat("b", 300),
 			dataCoding: 0x03,
 			wantLen:    140,
 		},

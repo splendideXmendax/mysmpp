@@ -3,6 +3,7 @@ dist/
 *.exe
 *.test
 *.out
+*.pcap
 .env
 .env.*
 .gocache/

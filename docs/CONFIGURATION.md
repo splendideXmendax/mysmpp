@@ -225,7 +225,8 @@ Optional route-level address rewrite:
   },
   "dest_addr": {
     "validate": true,
-    "allow_short_code": false
+    "allow_short_code": false,
+    "country_length_mode": "compat"
   }
 }
 ```
@@ -233,6 +234,14 @@ Optional route-level address rewrite:
 `addr_rewrite` defaults to pass-through. `strip_trunk_zero_after_cc=true` changes a number like `860015013628000` to `8615013628000`; keep it disabled unless the upstream contract explicitly requires removing national trunk zeroes.
 
 Set `dest_addr.validate=false` on a specific route when that route is intentionally for non-E.164 destinations such as short codes. Alternatively set `allow_short_code=true` with optional `min_short_len` and `max_short_len`.
+
+`dest_addr.country_length_mode` controls country-specific total-length checks generated from `docs/public_country.xlsx` and `docs/国家号码规则信息.xlsx`:
+
+- Empty or `off`: keep legacy E.164 validation only. This is the backward-compatible default.
+- `compat`: apply a configured country maximum when available; countries without a length rule still use the global E.164 4-15 digit check.
+- `strict`: reject countries without a length rule as well as numbers over the configured maximum. Use only after the rule table covers all intended destinations.
+
+The spreadsheet contains maximum total lengths only. It does not prove that a subscriber number or operator range is assigned. `strip_trunk_zero_after_cc` remains explicit because a national trunk zero can be significant in some numbering plans.
 
 ## providers
 
@@ -592,7 +601,7 @@ file 模式:
 Postgres 模式:
 
 1. 创建数据库和用户。
-2. 执行 `migrations/001_init.up.sql`。
+2. 按编号顺序执行 `migrations/001~004_*.up.sql`。
 3. 配置 `storage.driver=postgres` 和 DSN。
 4. 确保连接池足够，例如 `pool_max_conns=50`。
 

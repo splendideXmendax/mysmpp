@@ -1,0 +1,2 @@
+-- Gateway IDs already issued with the m/base36 format remain valid.
+-- The allocator high-water mark must not be reduced during rollback.

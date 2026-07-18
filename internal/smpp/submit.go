@@ -86,7 +86,13 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	}
 	raw = append([]byte(nil), pdu.Body[offset:offset+smLen]...)
 	offset += smLen
-	tlvs := ParseTLVs(pdu.Body[offset:])
+	tlvs, err := ParseTLVsStrict(pdu.Body[offset:])
+	if err != nil {
+		return SubmitSM{}, err
+	}
+	if hasDuplicateSARTag(tlvs) {
+		return SubmitSM{}, errors.New("duplicate sar optional parameter")
+	}
 	if payload, ok := FindTLV(tlvs, TagMessagePayload); ok && len(payload) > 0 {
 		raw = append([]byte(nil), payload...)
 	}
@@ -103,7 +109,12 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	if concat == nil {
 		if parsed, ok := ParseSAR(tlvs); ok {
 			concat = &parsed
+		} else if HasSAR(tlvs) {
+			return SubmitSM{}, errors.New("malformed sar optional parameters")
 		}
+	}
+	if udh != nil && HasSAR(tlvs) {
+		return SubmitSM{}, errors.New("udh and sar concatenation cannot be combined")
 	}
 	text := message.DecodeSubmitText(body, dataCoding)
 	return SubmitSM{
@@ -124,6 +135,20 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 		Concat:               concat,
 		TLVs:                 tlvs,
 	}, nil
+}
+
+func hasDuplicateSARTag(tlvs []TLV) bool {
+	seen := make(map[uint16]struct{}, 3)
+	for _, item := range tlvs {
+		switch item.Tag {
+		case TagSARMsgRefNum, TagSARTotalSegments, TagSARSegmentSeqnum:
+			if _, ok := seen[item.Tag]; ok {
+				return true
+			}
+			seen[item.Tag] = struct{}{}
+		}
+	}
+	return false
 }
 
 func parseSubmitSM(pdu PDU) (message.Message, error) {

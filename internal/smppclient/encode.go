@@ -58,7 +58,7 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		}
 		params.ESMClass = 0x40
 		params.ShortMessage = append(append([]byte(nil), msg.UDH...), payload...)
-		if cfg.LongMessage == "udh" && len(params.ShortMessage) > maxUDHShortMessageLen(dataCoding, cfg.GSM7Packing) {
+		if cfg.LongMessage == "udh" && len(params.ShortMessage) > 254 {
 			return buildSplitSubmitSM(msg, cfg, encoding, dataCoding, registeredDelivery)
 		}
 		return []submitPart{{Body: buildSubmitBody(params)}}

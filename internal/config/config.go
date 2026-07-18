@@ -167,10 +167,11 @@ type AddrRewriteConfig struct {
 }
 
 type DestAddrConfig struct {
-	Validate       *bool `json:"validate,omitempty"`
-	AllowShortCode bool  `json:"allow_short_code,omitempty"`
-	MinShortLen    int   `json:"min_short_len,omitempty"`
-	MaxShortLen    int   `json:"max_short_len,omitempty"`
+	Validate          *bool  `json:"validate,omitempty"`
+	AllowShortCode    bool   `json:"allow_short_code,omitempty"`
+	MinShortLen       int    `json:"min_short_len,omitempty"`
+	MaxShortLen       int    `json:"max_short_len,omitempty"`
+	CountryLengthMode string `json:"country_length_mode,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -610,6 +611,11 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 		if route.DestAddr.MinShortLen > 0 && route.DestAddr.MaxShortLen > 0 && route.DestAddr.MinShortLen > route.DestAddr.MaxShortLen {
 			return fmt.Errorf("route %q dest_addr min_short_len must be <= max_short_len", route.Name)
+		}
+		switch route.DestAddr.CountryLengthMode {
+		case "", "off", "compat", "strict":
+		default:
+			return fmt.Errorf("route %q dest_addr.country_length_mode must be off, compat, or strict", route.Name)
 		}
 	}
 	if err := validateRoutePrefixes(c.Routes); err != nil {

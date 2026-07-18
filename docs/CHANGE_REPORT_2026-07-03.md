@@ -121,7 +121,7 @@ go test -race ./...
 
 二次复测（2026-07-03 00:41 Asia/Shanghai）：
 
-- `http://REDACTED:19087/healthz` 可访问，当前线上服务存活：
+- 生产健康检查地址（已脱敏）可访问，当前线上服务存活：
 
 ```json
 {"checks":{"outbox_depth":0,"pending_size":0,"smpp_listener":"ok","storage":"ok"},"status":"ok"}

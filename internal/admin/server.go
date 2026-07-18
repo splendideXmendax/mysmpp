@@ -416,15 +416,22 @@ func (s *Server) routeCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routeUpdate(w http.ResponseWriter, r *http.Request) {
 	oldName := strings.TrimPrefix(r.URL.Path, "/admin/routes/")
-	route := routeFromForm(r)
-	route.Name = oldName
+	formRoute := routeFromForm(r)
 	cfg := cloneConfig(s.gateway.Config())
-	if _, ok := findRoute(cfg.Routes, oldName); !ok {
+	route, ok := findRoute(cfg.Routes, oldName)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	cfg.Routes = removeRoute(cfg.Routes, oldName)
-	cfg.Routes = append(cfg.Routes, route)
+	route.Provider = formRoute.Provider
+	route.Priority = formRoute.Priority
+	route.Prefix = formRoute.Prefix
+	for i := range cfg.Routes {
+		if cfg.Routes[i].Name == oldName {
+			cfg.Routes[i] = route
+			break
+		}
+	}
 	if err := s.applyConfig(cfg); err != nil {
 		s.routeFormWithValue(w, r, route, true, err.Error())
 		return

@@ -47,7 +47,8 @@
       },
       "dest_addr": {
         "validate": true,
-        "allow_short_code": false
+        "allow_short_code": false,
+        "country_length_mode": "off"
       }
     },
     {

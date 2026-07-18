@@ -148,6 +148,46 @@ func TestAdminRouteCreatePersistsConfig(t *testing.T) {
 	}
 }
 
+func TestAdminRouteUpdatePreservesAdvancedAddressRules(t *testing.T) {
+	gateway := newFakeGateway()
+	gateway.cfg.Routes = []config.RouteConfig{{
+		Name:     "mobile",
+		Prefix:   []string{"86"},
+		Provider: "mock-a",
+		Priority: 1,
+		AddrRewrite: config.AddrRewriteConfig{
+			StripTrunkZeroAfterCC: true,
+			CountryCode:           "86",
+		},
+		DestAddr: config.DestAddrConfig{CountryLengthMode: "strict"},
+	}}
+	srv := New(gateway, t.TempDir()+"/config.json", nil)
+	defer srv.Close()
+	cookie := loginCookie(t, srv)
+	csrf := csrfFromPage(t, srv, cookie, "/admin/routes/mobile")
+	form := url.Values{
+		"_csrf":    {csrf},
+		"provider": {"mock-a"},
+		"priority": {"20"},
+		"prefix":   {"86\n852"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/routes/mobile", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got := srv.gateway.Config().Routes[0]
+	if got.Priority != 20 || len(got.Prefix) != 2 {
+		t.Fatalf("form-managed fields were not updated: %+v", got)
+	}
+	if !got.AddrRewrite.StripTrunkZeroAfterCC || got.AddrRewrite.CountryCode != "86" || got.DestAddr.CountryLengthMode != "strict" {
+		t.Fatalf("advanced address rules were lost: %+v", got)
+	}
+}
+
 func TestAdminSectionSavePersistsProviders(t *testing.T) {
 	cfgPath := t.TempDir() + "/config.json"
 	srv := New(newFakeGateway(), cfgPath, nil)

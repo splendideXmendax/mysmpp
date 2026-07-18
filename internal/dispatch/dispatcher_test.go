@@ -118,12 +118,32 @@ func TestDispatcherRoutesAndSubmits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.GatewayID != "g000000000001" || receipt.Provider != "mock-a" || receipt.Route != "mobile" {
+	if receipt.GatewayID != "m0000001" || receipt.Provider != "mock-a" || receipt.Route != "mobile" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
 	waitForPending(t, d, 1)
 	if d.PendingSize() != 1 {
 		t.Fatalf("expected one pending record, got %d", d.PendingSize())
+	}
+}
+
+func TestGatewayIDFitsVendorCOctetLimit(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	receipt, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.GatewayID) != 8 || len(smpp.CString(receipt.GatewayID)) != 9 {
+		t.Fatalf("gateway id does not fit Var. Max 9 C-Octet String: id=%q visible=%d encoded=%d", receipt.GatewayID, len(receipt.GatewayID), len(smpp.CString(receipt.GatewayID)))
 	}
 }
 
@@ -147,6 +167,84 @@ func TestDispatcherRejectsUnassignedCountryCode(t *testing.T) {
 		t.Fatal(err)
 	} else if depth != 0 {
 		t.Fatalf("invalid destination should not enter outbox, depth=%d", depth)
+	}
+}
+
+func TestDispatcherRejectsCountrySpecificOversizedNumber(t *testing.T) {
+	reg := provider.NewRegistry()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "default",
+		Provider: "mock-a",
+		Priority: 1,
+		DestAddr: config.DestAddrConfig{CountryLengthMode: "compat"},
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	_, err := d.Submit(context.Background(), Envelope{From: "1069", To: "860015013628000", Text: "hello"})
+	if !errors.Is(err, ErrInvalidDestAddr) {
+		t.Fatalf("expected country-specific length rejection, got %v", err)
+	}
+}
+
+func TestDispatcherKeepsCountriesWithoutSpecificLengthRule(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name:     "default",
+		Provider: "mock-a",
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "246123456789", Text: "hello"}); err != nil {
+		t.Fatalf("expected supplemental E.164 code to remain valid, got %v", err)
+	}
+}
+
+func TestDispatcherCountryLengthModes(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		to      string
+		wantErr bool
+	}{
+		{name: "compat checks covered country", mode: "compat", to: "860015013628000", wantErr: true},
+		{name: "off keeps legacy length behavior", mode: "off", to: "860015013628000"},
+		{name: "compat allows uncovered country", mode: "compat", to: "246123456789"},
+		{name: "strict rejects uncovered country", mode: "strict", to: "246123456789", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reg := provider.NewRegistry()
+			mock := provider.NewNamedMock(context.Background(), "mock-a")
+			mock.DelayMin = time.Hour
+			mock.DelayMax = time.Hour
+			reg.Replace(map[string]provider.Provider{"mock-a": mock})
+			defer reg.CloseAll()
+			d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+			defer d.Close()
+			d.ReloadRoutes([]config.RouteConfig{{
+				Name:     "default",
+				Provider: "mock-a",
+				Priority: 1,
+				DestAddr: config.DestAddrConfig{CountryLengthMode: test.mode},
+			}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+			_, err := d.Submit(context.Background(), Envelope{From: "1069", To: test.to, Text: "hello"})
+			if test.wantErr && !errors.Is(err, ErrInvalidDestAddr) {
+				t.Fatalf("expected invalid destination, got %v", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("expected destination to pass, got %v", err)
+			}
+		})
 	}
 }
 

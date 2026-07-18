@@ -208,6 +208,12 @@ func TestValidateRejectsInvalidAddrRewriteConfig(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected invalid add prefix to fail")
 	}
+
+	cfg = validConfigForTest()
+	cfg.Routes[0].DestAddr.CountryLengthMode = "unknown"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid country length mode to fail")
+	}
 }
 
 func TestSMPPProviderConfigDefaultsAndValidation(t *testing.T) {

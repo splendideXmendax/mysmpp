@@ -220,7 +220,7 @@ SMPP 上游 Provider 与 SMPP-to-SMPP 中继见 [docs/SMPP_UPSTREAM.md](docs/SMP
 4. 启动前执行:
 
 ```bash
-psql "$MYSMPP_DSN" -f migrations/001_init.up.sql
+for migration in migrations/*.up.sql; do psql "$MYSMPP_DSN" -f "$migration"; done
 ```
 
 5. 管理后台和 HTTP API 放在 Nginx/Caddy/负载均衡后面，由反向代理负责 TLS。

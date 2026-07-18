@@ -248,3 +248,28 @@ func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
 		t.Fatalf("outbox was not persisted, depth=%d", depth)
 	}
 }
+
+func TestFileStoreRecoversSequenceFromLegacyAndCurrentIDs(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"g000000019328", "m0000ewx"} {
+		if err := st.SaveMessage(context.Background(), message.New(id, message.DirectionMT, "1069", "8613800138000", "hello")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopened, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, _, err := reopened.ReserveGatewayIDRange(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start <= 19329 {
+		t.Fatalf("recovered sequence did not advance beyond current id: %d", start)
+	}
+}

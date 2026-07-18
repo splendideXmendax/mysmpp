@@ -1,6 +1,10 @@
 package message
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf16"
+)
 
 func TestSplitShortMessage(t *testing.T) {
 	segments := Split("hello", SplitOptions{})
@@ -69,6 +73,47 @@ func TestSplitCountsGSM7ExtensionSeptets(t *testing.T) {
 func TestDetectUCS2(t *testing.T) {
 	if got := DetectEncoding("你好"); got != "ucs2" {
 		t.Fatalf("expected ucs2, got %s", got)
+	}
+}
+
+func TestDetectEncodingCoversGSM0338Alphabet(t *testing.T) {
+	for r := range gsm7DefaultCodes {
+		if got := DetectEncoding(string(r)); got != "gsm7" {
+			t.Fatalf("default alphabet rune %q detected as %s", r, got)
+		}
+	}
+	for r := range gsm7RuneToExt {
+		if got := DetectEncoding(string(r)); got != "gsm7" {
+			t.Fatalf("extension alphabet rune %q detected as %s", r, got)
+		}
+	}
+	if got := DetectEncoding("`"); got != "ucs2" {
+		t.Fatalf("GSM alphabet table-external rune detected as %s", got)
+	}
+}
+
+func TestSplitUCS2ByUTF16CodeUnits(t *testing.T) {
+	tests := []string{
+		strings.Repeat("中", 70),
+		strings.Repeat("中", 71),
+		strings.Repeat("😀", 35),
+		strings.Repeat("😀", 36),
+		strings.Repeat("中", 66) + "😀",
+		strings.Repeat("中", 200),
+		strings.Repeat("😀", 120),
+		"订单✅已发货📦请查收" + strings.Repeat("好", 100),
+	}
+	for _, text := range tests {
+		segments := Split(text, SplitOptions{ForceEncoding: "ucs2"})
+		for _, segment := range segments {
+			payloadLen := len(utf16.Encode([]rune(segment.Text))) * 2
+			if payloadLen+len(segment.UDH) > 140 {
+				t.Fatalf("part %d/%d is oversized: payload=%d udh=%d", segment.Part, segment.Total, payloadLen, len(segment.UDH))
+			}
+		}
+		if got := Join(segments); got != text {
+			t.Fatalf("joined text mismatch: got %q want %q", got, text)
+		}
 	}
 }
 

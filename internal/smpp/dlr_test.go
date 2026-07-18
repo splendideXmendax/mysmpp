@@ -57,6 +57,32 @@ func TestBuildDLR(t *testing.T) {
 	}
 }
 
+func TestBuildDLRUsesCurrentGatewayIDEverywhere(t *testing.T) {
+	id := "m0000eww"
+	now := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	pdu := BuildDLR(DLRParams{GatewayID: id, SubmittedAt: now, DoneAt: now, State: "DELIVRD"})
+	offset := 0
+	_ = readCString(pdu.Body, &offset)
+	offset += 2
+	_ = readCString(pdu.Body, &offset)
+	offset += 2
+	_ = readCString(pdu.Body, &offset)
+	offset += 3
+	_ = readCString(pdu.Body, &offset)
+	_ = readCString(pdu.Body, &offset)
+	offset += 4
+	smLen := int(pdu.Body[offset])
+	offset++
+	text := string(pdu.Body[offset : offset+smLen])
+	offset += smLen
+	if !strings.HasPrefix(text, "id:"+id+" ") {
+		t.Fatalf("receipt text does not use gateway id: %q", text)
+	}
+	if !hasTLV(pdu.Body[offset:], tlvReceiptedMessageID, CString(id)) {
+		t.Fatal("receipted_message_id TLV does not use gateway id")
+	}
+}
+
 func hasTLV(body []byte, tag uint16, value []byte) bool {
 	for len(body) >= 4 {
 		gotTag := binary.BigEndian.Uint16(body[0:2])

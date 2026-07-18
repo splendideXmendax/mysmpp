@@ -59,7 +59,7 @@ Backups created on the server:
 
 Smoke test:
 
-- Bound as SMPP ESME `REDACTED`.
+- Bound as the configured SMPP ESME (`REDACTED`).
 - Submitted message `g000000006329`.
 - Received downstream DLR `DELIVRD`.
 
