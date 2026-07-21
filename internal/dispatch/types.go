@@ -41,6 +41,12 @@ type Envelope struct {
 	ReceivedAt         time.Time
 	Meta               map[string]string
 	UDH                []byte
+	RawPayload         []byte
+	RawPayloadSet      bool
+	SARRefNum          []byte
+	SARTotalSegments   []byte
+	SARSegmentSeqnum   []byte
+	SARSet             bool
 }
 
 type Receipt struct {

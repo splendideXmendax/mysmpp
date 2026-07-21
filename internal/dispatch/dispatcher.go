@@ -217,7 +217,26 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 			return Receipt{}, fmt.Errorf("%w: %s", ErrBlocked, filterDecision.Reason)
 		}
 		if filterDecision.Action == filter.ActionMask {
+			if len(env.UDH) > 0 || env.SARSet {
+				d.emitCDR(cdr.Event{
+					Kind:       "rejected",
+					From:       env.From,
+					To:         env.To,
+					TextLen:    len([]rune(env.Text)),
+					TextHash:   cdr.TextHash(env.Text),
+					ClientID:   env.ClientID,
+					SystemID:   env.Source.SMPPSystemID,
+					Source:     env.Source.Kind.String(),
+					Reason:     "filter_mask_multipart",
+					FilterRule: filterDecision.Reason,
+				})
+				return Receipt{}, fmt.Errorf("%w: cannot mask an individual multipart segment", ErrBlocked)
+			}
 			env.Text = filterDecision.NewText
+			env.RawPayload = nil
+			env.RawPayloadSet = false
+			env.Encoding = ""
+			env.DataCoding = 0
 		}
 	}
 	rt := d.router.Load()
@@ -324,6 +343,12 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		CallbackRule:       env.Source.CallbackRule,
 		ReceivedAt:         env.ReceivedAt,
 		UDH:                append([]byte(nil), env.UDH...),
+		RawPayload:         append([]byte(nil), env.RawPayload...),
+		RawPayloadSet:      env.RawPayloadSet,
+		SARRefNum:          append([]byte(nil), env.SARRefNum...),
+		SARTotalSegments:   append([]byte(nil), env.SARTotalSegments...),
+		SARSegmentSeqnum:   append([]byte(nil), env.SARSegmentSeqnum...),
+		SARSet:             env.SARSet,
 	}
 	_, existingGatewayID, duplicate, err := d.store.SubmitAtomic(ctx, msg, store.OutboxItem{
 		GatewayID:   gatewayID,
@@ -650,6 +675,12 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		Encoding:           payload.Encoding,
 		Meta:               payload.Meta,
 		UDH:                append([]byte(nil), payload.UDH...),
+		RawPayload:         append([]byte(nil), payload.RawPayload...),
+		RawPayloadSet:      payload.RawPayloadSet,
+		SARRefNum:          append([]byte(nil), payload.SARRefNum...),
+		SARTotalSegments:   append([]byte(nil), payload.SARTotalSegments...),
+		SARSegmentSeqnum:   append([]byte(nil), payload.SARSegmentSeqnum...),
+		SARSet:             payload.SARSet,
 	}
 	providerIDs, err := sendProvider(ctx, p, msg)
 	if err != nil {

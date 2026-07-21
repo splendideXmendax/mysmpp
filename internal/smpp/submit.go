@@ -93,7 +93,10 @@ func ParseSubmitSM(pdu PDU) (SubmitSM, error) {
 	if hasDuplicateSARTag(tlvs) {
 		return SubmitSM{}, errors.New("duplicate sar optional parameter")
 	}
-	if payload, ok := FindTLV(tlvs, TagMessagePayload); ok && len(payload) > 0 {
+	if payload, ok := FindTLV(tlvs, TagMessagePayload); ok {
+		if smLen > 0 {
+			return SubmitSM{}, errors.New("short_message and message_payload cannot both be set")
+		}
 		raw = append([]byte(nil), payload...)
 	}
 	udh, body, err := SplitUDH(raw, esmClass)

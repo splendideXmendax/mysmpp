@@ -29,6 +29,8 @@
 
 修复后自动判定直接复用实际编码映射，不再维护两套字符表。packed/unpacked 出站逻辑保持不变。入站 DCS0 packed/unpacked 本身存在协议歧义，当前仍保留兼容启发式；需要绝对确定时应由 ESME/provider 约定 packing。
 
+2026-07-21 根据新增 `29175(2).pcap` 与 `2776(3).pcap` 复核发现，中继链路若把入站 DCS0 先解码为 Unicode、再按文本重编码，会改变原始 GSM 字节；其中 `09` 和 `60` 被升级为 DCS8，`1b65`、`1b40`、`1b3c` 被错误转为空 payload。修复后 SMPP→SMPP 在过滤器未修改正文时透明保留显式 DCS、正文 payload 字节及 UDH/SAR 分段元数据；不承诺原报文使用的 `short_message` 或 `message_payload` 承载方式不变。过滤器执行 mask 后清除原始 payload，并按修改后的文本重新编码。HTTP 提交和自动 UCS2 选择保持原行为。
+
 用户提供的 [DevelopersHome GSM 7-bit 页面](https://www.developershome.com/sms/gsmAlphabet.asp) 已于 2026-07-18 再次核查：页面列出 128 个默认字符及通过 `0x1B` 转义的 10 个扩展字符，与当前映射一致。该页面不包含国家码或号码长度资料，因此只作为 GSM alphabet 的交叉证据，不能作为号码规则来源。
 
 ## 2. message_id
@@ -58,7 +60,7 @@
 
 入站 UDHI 现在严格检查 IE 结构、拼接 IE 长度和 total/part，拒绝 `2776.pcap` 中设置 UDHI 但正文直接以 `MZF...` 开头的畸形首段。合法未知 IE 仍允许。SAR TLV 同样检查长度、重复项和分段范围，UDH 与 SAR 不允许混用。
 
-线上已有的 UDH 透传兼容行为保留：已有合法 UDH 的 `short_message` 在 SMPP 允许的 254 字节内原样透传，超过后才重新分段。
+线上已有的 UDH 透传兼容行为保留：已有合法 UDH 的 `short_message` 在 SMPP 允许的 254 字节内原样透传；原始 UDH 与 payload 合计超过 254 字节时改用单个 `message_payload` TLV 保持字节一致，要求目标上游支持该标准 TLV。
 
 ## 4. 国家码和号码长度
 
@@ -105,6 +107,10 @@
 
 生产使用 PostgreSQL，不会像 memory driver 一样进程退出即清空。outbox 在提交与入队时原子落库，但发送到上游后、标记完成前崩溃仍可能重试，因此语义是至少一次；下游幂等和对账仍然必要。
 
+SMPP 入站原始 payload、UDH/SAR 只在 outbox 待发送或重试期间保存；成功投递并确认 outbox 后会清除这些额外传输副本。SMPP 幂等键升级为 `v2`，摘要包含当前进程随机实例 nonce、SMPP session、带长度边界的原始 payload、UDH 和 SAR：同一会话中完全相同的报文重试仍命中同一键，不同 DCS0 字节、SAR 分段或重连后的新会话不会被误判重复。SMPP `submit_sm` 没有标准业务幂等 ID，因此断线重连后遵循至少一次语义；升级切换瞬间重传也可能重新受理一次，需由下游幂等和对账处理。
+
+过滤器仅能安全修改完整的独立短信。带 UDH 或 SAR 的单独长短信分段命中 mask 时整段拒绝，避免把一个分段拆成孤立短信并使其余拼接段永久缺失。这里的透明性特指 DCS、正文 payload 和 UDH/SAR 分段元数据；并不宣称 `protocol_id`、priority、replace flag、默认消息 ID 或任意 TLV 的完整 PDU 代理。
+
 ## 6. 回归门禁
 
 完成的验证：
@@ -134,5 +140,9 @@
 - 回滚材料保存在 `/root/mysmpp-release-backup-20260718-104043`，包含原源码、生产配置、PostgreSQL 备份、容器信息、原镜像标签和 SHA-256 清单。
 
 最终切换时曾因手工重建容器遗漏 `mysmpp_default` 网络，出现 PostgreSQL 主机名无法解析并触发短暂重启；发现后按备份 inspect 修正。最终容器的命令、entrypoint、restart policy、端口、volume 目标和 network mode 六项均与部署前配置一致，生产 `config.json` 与数据库内容未被改写。
+
+2026-07-21 DCS0 修复最终镜像为 `sha256:4f73e07f3515d9eb7d45a5eb8e07ddfe737db873b92caf58a1b231abd0ad1553`。部署前先在服务器用独立 memory 配置和真实 SMPP 双桩完成抓包 16 组 payload 的 16/16 字节回归；部署后再从生产 SMPP 入口提交相同 16 组数据，并在发往现有下游测试桩 `:2776` 的临时抓包中逐条确认 DCS=0、payload 完全一致。对应网关 ID `m0000h89` 至 `m0000h8o` 最终全部 `DELIVRD`，outbox 全部 `done` 且 raw/UDH/SAR 传输副本已清除。
+
+本次生产切换的 network、restart policy、ports、volume、entrypoint 和 cmd 首次即与旧容器匹配；配置 SHA-256 仍为 `320e3b9c81c5b964380165bb4ced977f06a468f3df272b1defb26fea0ad0ebf2`。最终健康正常、RestartCount=0、部署后日志 ERROR=0/WARN=0；messages 从 5256 增至 5272（仅本次 16 条测试数据），pending 保持 2，outbox pending 保持 0。本次回滚材料位于 `/root/mysmpp-dcs0-prod-backup-20260721-165900`。
 
 号码长度能力的最终边界不变：当前 51 条规则只提供最大总长度，不能判断最短长度、移动号段、运营商分配或号码是否真实存在；`strict` 也只适用于规则已覆盖的目标国家，不能贸然全局开启。

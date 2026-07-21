@@ -30,6 +30,17 @@ type multiIDProvider struct {
 	ids []string
 }
 
+type captureProvider struct {
+	messages chan provider.OutboundMessage
+}
+
+func (p captureProvider) Send(msg provider.OutboundMessage) (string, error) {
+	p.messages <- msg
+	return "provider-id", nil
+}
+
+func (p captureProvider) OnDLR(provider.DLRCallback) {}
+
 func (p multiIDProvider) Send(provider.OutboundMessage) (string, error) {
 	if len(p.ids) == 0 {
 		return "", nil
@@ -400,6 +411,88 @@ func TestDispatcherBlocksContentForAllSources(t *testing.T) {
 	}
 	if got := sink.count("rejected"); got != 2 {
 		t.Fatalf("expected two rejected cdr events, got %d", got)
+	}
+}
+
+func TestDispatcherMaskDisablesRawPayloadPassthrough(t *testing.T) {
+	reg := provider.NewRegistry()
+	captured := make(chan provider.OutboundMessage, 2)
+	reg.Replace(map[string]provider.Provider{"mock-a": captureProvider{messages: captured}})
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	engine, err := filter.Compile(config.FilterConfig{
+		Enabled: true,
+		Rules:   []config.FilterRule{{Name: "mask", Keywords: []string{"bad"}, Action: "mask", MaskWith: "*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetFilterEngine(engine)
+	if _, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "bad", DataCoding: 0, Encoding: "gsm7",
+		RawPayload: []byte("bad"), RawPayloadSet: true, Source: SubmitSource{Kind: SourceSMPP},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-captured:
+		if msg.Text != "*" || msg.RawPayloadSet || msg.RawPayload != nil {
+			t.Fatalf("masked message kept raw bytes: %+v", msg)
+		}
+		if msg.Encoding != "gsm7" {
+			t.Fatalf("masked encoding=%q, want gsm7", msg.Encoding)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("masked message was not sent to provider")
+	}
+}
+
+func TestDispatcherRejectsMaskForMultipartSegment(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"mock-a": multiIDProvider{ids: []string{"p1"}}})
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	engine, err := filter.Compile(config.FilterConfig{
+		Enabled: true,
+		Rules:   []config.FilterRule{{Name: "mask", Keywords: []string{"bad"}, Action: "mask", MaskWith: "你"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetFilterEngine(engine)
+	_, err = d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "bad", DataCoding: 0x03, Encoding: "8bit",
+		UDH: []byte{0x05, 0x00, 0x03, 0x12, 0x02, 0x01}, RawPayload: []byte("bad"), RawPayloadSet: true,
+		Source: SubmitSource{Kind: SourceSMPP},
+	})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("expected multipart mask to be blocked, got %v", err)
+	}
+}
+
+func TestDispatcherPreservesRawPayloadToProvider(t *testing.T) {
+	reg := provider.NewRegistry()
+	captured := make(chan provider.OutboundMessage, 1)
+	reg.Replace(map[string]provider.Provider{"mock-a": captureProvider{messages: captured}})
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	payload := []byte{0x1b, 0x65}
+	if _, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", DataCoding: 0, Encoding: "gsm7",
+		RawPayload: payload, RawPayloadSet: true, Source: SubmitSource{Kind: SourceSMPP},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-captured:
+		if msg.DataCoding != 0 || !msg.RawPayloadSet || string(msg.RawPayload) != string(payload) {
+			t.Fatalf("provider message changed: %+v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("raw message was not sent to provider")
 	}
 }
 

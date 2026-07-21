@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +28,8 @@ import (
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
+
+var smppIdempotencyInstance = newSMPPIdempotencyInstance()
 
 func main() {
 	configPath := flag.String("config", "configs/example.json", "path to JSON config file")
@@ -117,22 +122,7 @@ func main() {
 		select {
 		case submitJobs <- func() {
 			defer session.CompleteSubmit()
-			receipt, err := dispatcher.Submit(context.Background(), dispatch.Envelope{
-				From:               submit.From,
-				To:                 submit.To,
-				Text:               submit.Text,
-				ClientID:           "smpp:" + session.SystemID(),
-				ClientMsgID:        smppClientMsgID(session.SystemID(), submit),
-				DataCoding:         submit.DataCoding,
-				RegisteredDelivery: submit.RegisteredDelivery,
-				UDH:                submit.UDH,
-				ReceivedAt:         time.Now().UTC(),
-				Source: dispatch.SubmitSource{
-					Kind:          dispatch.SourceSMPP,
-					SMPPSessionID: session.ID(),
-					SMPPSystemID:  session.SystemID(),
-				},
-			})
+			receipt, err := dispatcher.Submit(context.Background(), smppSubmitEnvelope(session.ID(), session.SystemID(), submit))
 			resp := smpp.PDU{
 				CommandID:  smpp.CommandSubmitSMResp,
 				SequenceID: submit.SequenceID,
@@ -188,17 +178,84 @@ func main() {
 	}
 }
 
-func smppClientMsgID(systemID string, submit smpp.SubmitSM) string {
+func smppSubmitEncoding(dataCoding uint8) string {
+	switch dataCoding {
+	case 0x00:
+		return "gsm7"
+	case 0x03:
+		return "8bit"
+	case 0x08:
+		return "ucs2"
+	default:
+		return "8bit"
+	}
+}
+
+func smppSubmitEnvelope(sessionID, systemID string, submit smpp.SubmitSM) dispatch.Envelope {
+	env := dispatch.Envelope{
+		From:               submit.From,
+		To:                 submit.To,
+		Text:               submit.Text,
+		ClientID:           "smpp:" + systemID,
+		ClientMsgID:        smppClientMsgID(sessionID, systemID, submit),
+		DataCoding:         submit.DataCoding,
+		Encoding:           smppSubmitEncoding(submit.DataCoding),
+		RegisteredDelivery: submit.RegisteredDelivery,
+		UDH:                append([]byte(nil), submit.UDH...),
+		RawPayload:         append([]byte(nil), submit.Payload...),
+		RawPayloadSet:      true,
+		ReceivedAt:         time.Now().UTC(),
+		Source: dispatch.SubmitSource{
+			Kind:          dispatch.SourceSMPP,
+			SMPPSessionID: sessionID,
+			SMPPSystemID:  systemID,
+		},
+	}
+	ref, hasRef := smpp.FindTLV(submit.TLVs, smpp.TagSARMsgRefNum)
+	total, hasTotal := smpp.FindTLV(submit.TLVs, smpp.TagSARTotalSegments)
+	part, hasPart := smpp.FindTLV(submit.TLVs, smpp.TagSARSegmentSeqnum)
+	if hasRef && hasTotal && hasPart {
+		env.SARRefNum = append([]byte(nil), ref...)
+		env.SARTotalSegments = append([]byte(nil), total...)
+		env.SARSegmentSeqnum = append([]byte(nil), part...)
+		env.SARSet = true
+	}
+	return env
+}
+
+func smppClientMsgID(sessionID, systemID string, submit smpp.SubmitSM) string {
 	h := sha256.New()
-	_, _ = h.Write([]byte(systemID))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(submit.From))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(submit.To))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(submit.Text))
-	_, _ = h.Write([]byte{0, submit.DataCoding})
-	_, _ = h.Write(submit.UDH)
+	writeSMPPIdempotencyField(h, smppIdempotencyInstance)
+	writeSMPPIdempotencyField(h, []byte(sessionID))
+	writeSMPPIdempotencyField(h, []byte(systemID))
+	writeSMPPIdempotencyField(h, []byte(submit.From))
+	writeSMPPIdempotencyField(h, []byte(submit.To))
+	writeSMPPIdempotencyField(h, []byte{submit.DataCoding})
+	writeSMPPIdempotencyField(h, submit.UDH)
+	writeSMPPIdempotencyField(h, submit.Payload)
+	for _, tag := range []uint16{smpp.TagSARMsgRefNum, smpp.TagSARTotalSegments, smpp.TagSARSegmentSeqnum} {
+		value, ok := smpp.FindTLV(submit.TLVs, tag)
+		if !ok {
+			writeSMPPIdempotencyField(h, nil)
+			continue
+		}
+		writeSMPPIdempotencyField(h, value)
+	}
 	sum := h.Sum(nil)
-	return "smpp:" + systemID + ":" + hex.EncodeToString(sum[:12]) + ":" + hex.EncodeToString([]byte{byte(submit.SequenceID >> 24), byte(submit.SequenceID >> 16), byte(submit.SequenceID >> 8), byte(submit.SequenceID)})
+	return "smpp:v2:" + systemID + ":" + hex.EncodeToString(sum[:12]) + ":" + hex.EncodeToString([]byte{byte(submit.SequenceID >> 24), byte(submit.SequenceID >> 16), byte(submit.SequenceID >> 8), byte(submit.SequenceID)})
+}
+
+func newSMPPIdempotencyInstance() []byte {
+	instance := make([]byte, 16)
+	if _, err := rand.Read(instance); err == nil {
+		return instance
+	}
+	return []byte(strconv.FormatInt(time.Now().UnixNano(), 10))
+}
+
+func writeSMPPIdempotencyField(h interface{ Write([]byte) (int, error) }, value []byte) {
+	var size [4]byte
+	binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write(value)
 }

@@ -83,6 +83,12 @@ type OutboxPayload struct {
 	CallbackRule       string            `json:"callback_rule,omitempty"`
 	ReceivedAt         time.Time         `json:"received_at"`
 	UDH                []byte            `json:"udh,omitempty"`
+	RawPayload         []byte            `json:"raw_payload,omitempty"`
+	RawPayloadSet      bool              `json:"raw_payload_set,omitempty"`
+	SARRefNum          []byte            `json:"sar_ref_num,omitempty"`
+	SARTotalSegments   []byte            `json:"sar_total_segments,omitempty"`
+	SARSegmentSeqnum   []byte            `json:"sar_segment_seqnum,omitempty"`
+	SARSet             bool              `json:"sar_set,omitempty"`
 }
 
 type OutboxItem struct {
@@ -337,7 +343,7 @@ func (s *MemoryStore) EnqueueOutbox(_ context.Context, item OutboxItem) (int64, 
 	if item.MaxAttempts <= 0 {
 		item.MaxAttempts = 5
 	}
-	item.Payload.Meta = cloneMap(item.Payload.Meta)
+	item = cloneOutbox(item)
 	s.outbox[item.ID] = item
 	return item.ID, nil
 }
@@ -410,6 +416,13 @@ func (s *MemoryStore) AckOutbox(_ context.Context, id int64) error {
 		return ErrNotFound
 	}
 	item.State = "done"
+	item.Payload.UDH = nil
+	item.Payload.RawPayload = nil
+	item.Payload.RawPayloadSet = false
+	item.Payload.SARRefNum = nil
+	item.Payload.SARTotalSegments = nil
+	item.Payload.SARSegmentSeqnum = nil
+	item.Payload.SARSet = false
 	s.outbox[id] = item
 	return nil
 }
@@ -526,7 +539,7 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 	if item.MaxAttempts <= 0 {
 		item.MaxAttempts = 5
 	}
-	item.Payload.Meta = cloneMap(item.Payload.Meta)
+	item = cloneOutbox(item)
 	s.outbox[item.ID] = item
 
 	return item.ID, msg.ID, false, nil
@@ -568,6 +581,11 @@ func cloneMessage(msg message.Message) message.Message {
 
 func cloneOutbox(item OutboxItem) OutboxItem {
 	item.Payload.Meta = cloneMap(item.Payload.Meta)
+	item.Payload.UDH = append([]byte(nil), item.Payload.UDH...)
+	item.Payload.RawPayload = append([]byte(nil), item.Payload.RawPayload...)
+	item.Payload.SARRefNum = append([]byte(nil), item.Payload.SARRefNum...)
+	item.Payload.SARTotalSegments = append([]byte(nil), item.Payload.SARTotalSegments...)
+	item.Payload.SARSegmentSeqnum = append([]byte(nil), item.Payload.SARSegmentSeqnum...)
 	return item
 }
 

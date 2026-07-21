@@ -20,7 +20,7 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		encoding = message.DetectEncoding(msg.Text)
 	}
 	dataCoding := msg.DataCoding
-	if dataCoding == 0 && strings.EqualFold(encoding, "ucs2") {
+	if !msg.RawPayloadSet && dataCoding == 0 && strings.EqualFold(encoding, "ucs2") {
 		dataCoding = 0x08
 	}
 	if dataCoding == 0x08 {
@@ -32,9 +32,22 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 	if cfg.RegisteredDelivery >= 0 {
 		registeredDelivery = byte(cfg.RegisteredDelivery)
 	}
+	if msg.SARSet {
+		return []submitPart{{Body: buildSubmitBody(submitBodyParams{
+			Cfg: cfg, Msg: msg, DataCoding: dataCoding, RegisteredDelivery: registeredDelivery,
+			ShortMessage: encodeMessagePayload(msg, dataCoding, cfg.GSM7Packing),
+			TLVs: []tlv{
+				{Tag: smpp.TagSARMsgRefNum, Value: append([]byte(nil), msg.SARRefNum...)},
+				{Tag: smpp.TagSARTotalSegments, Value: append([]byte(nil), msg.SARTotalSegments...)},
+				{Tag: smpp.TagSARSegmentSeqnum, Value: append([]byte(nil), msg.SARSegmentSeqnum...)},
+			},
+			SourceTON: sourceTON(msg.SourceAddr, cfg.SourceTON), SourceNPI: sourceNPI(msg.SourceAddr, cfg.SourceNPI),
+			DestTON: byte(cfg.DestTON), DestNPI: byte(cfg.DestNPI),
+		})}}
+	}
 
 	if len(msg.UDH) > 0 {
-		payload := encodeText(msg.Text, dataCoding, cfg.GSM7Packing)
+		payload := encodeMessagePayload(msg, dataCoding, cfg.GSM7Packing)
 		params := submitBodyParams{
 			Cfg:                cfg,
 			Msg:                msg,
@@ -46,7 +59,7 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 			DestTON:            byte(cfg.DestTON),
 			DestNPI:            byte(cfg.DestNPI),
 		}
-		if cfg.LongMessage == "sar" {
+		if cfg.LongMessage == "sar" && !msg.RawPayloadSet {
 			if info, ok := smpp.ParseConcat(msg.UDH); ok {
 				params.TLVs = []tlv{
 					{Tag: smpp.TagSARMsgRefNum, Value: []byte{byte(info.Reference >> 8), byte(info.Reference)}},
@@ -58,7 +71,7 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		}
 		params.ESMClass = 0x40
 		params.ShortMessage = append(append([]byte(nil), msg.UDH...), payload...)
-		if cfg.LongMessage == "udh" && len(params.ShortMessage) > 254 {
+		if cfg.LongMessage == "udh" && !msg.RawPayloadSet && len(params.ShortMessage) > 254 {
 			return buildSplitSubmitSM(msg, cfg, encoding, dataCoding, registeredDelivery)
 		}
 		return []submitPart{{Body: buildSubmitBody(params)}}
@@ -72,12 +85,28 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 				DataCoding:         dataCoding,
 				RegisteredDelivery: registeredDelivery,
 				ShortMessage:       nil,
-				MessagePayload:     encodeText(msg.Text, dataCoding, cfg.GSM7Packing),
+				MessagePayload:     encodeMessagePayload(msg, dataCoding, cfg.GSM7Packing),
 				SourceTON:          sourceTON(msg.SourceAddr, cfg.SourceTON),
 				SourceNPI:          sourceNPI(msg.SourceAddr, cfg.SourceNPI),
 				DestTON:            byte(cfg.DestTON),
 				DestNPI:            byte(cfg.DestNPI),
 				ESMClass:           0,
+			}),
+		}}
+	}
+
+	if msg.RawPayloadSet {
+		return []submitPart{{
+			Body: buildSubmitBody(submitBodyParams{
+				Cfg:                cfg,
+				Msg:                msg,
+				DataCoding:         dataCoding,
+				RegisteredDelivery: registeredDelivery,
+				ShortMessage:       append([]byte(nil), msg.RawPayload...),
+				SourceTON:          sourceTON(msg.SourceAddr, cfg.SourceTON),
+				SourceNPI:          sourceNPI(msg.SourceAddr, cfg.SourceNPI),
+				DestTON:            byte(cfg.DestTON),
+				DestNPI:            byte(cfg.DestNPI),
 			}),
 		}}
 	}
@@ -213,6 +242,13 @@ func encodeText(text string, dataCoding byte, packing string) []byte {
 		return message.EncodeText(text, dataCoding)
 	}
 	return message.EncodeGSM7Unpacked(text)
+}
+
+func encodeMessagePayload(msg Message, dataCoding byte, packing string) []byte {
+	if msg.RawPayloadSet {
+		return append([]byte(nil), msg.RawPayload...)
+	}
+	return encodeText(msg.Text, dataCoding, packing)
 }
 
 func sourceTON(addr string, configured int) byte {

@@ -56,6 +56,14 @@ func TestParseSubmitSMMessagePayloadTLV(t *testing.T) {
 	}
 }
 
+func TestParseSubmitSMRejectsShortMessageAndMessagePayload(t *testing.T) {
+	body := submitSMBodyWith(0x00, 0x00, []byte("short"))
+	body = appendTLV(body, TagMessagePayload, []byte("payload"))
+	if _, err := ParseSubmitSM(PDU{CommandID: commandSubmitSM, SequenceID: 9, Body: body}); err == nil {
+		t.Fatal("expected conflicting short_message and message_payload to be rejected")
+	}
+}
+
 func TestParseSubmitSMSARTLV(t *testing.T) {
 	body := submitSMBodyWith(0x00, 0x00, message.EncodeText("part", 0x00))
 	body = appendTLV(body, TagSARMsgRefNum, []byte{0x12, 0x34})

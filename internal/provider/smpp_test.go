@@ -146,6 +146,42 @@ func TestSMPPProviderSendAndDLR(t *testing.T) {
 	}
 }
 
+func TestSMPPProviderPreservesExplicitDCS0Payload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	submits := make(chan smpp.SubmitSM, 1)
+	upstream := smpp.NewServer(config.SMPPConfig{Addr: "127.0.0.1:0", SystemID: "smsc"}, nil,
+		func(systemID, password string) bool { return true },
+		func(session *smpp.Session, submit smpp.SubmitSM) {
+			submits <- submit
+			session.Send(smpp.PDU{CommandID: smpp.CommandSubmitSMResp, SequenceID: submit.SequenceID, Body: smpp.CString("1")})
+			session.CompleteSubmit()
+		})
+	go upstream.ListenAndServe(ctx)
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.ResponseTimeoutMS = 2000
+	provider := NewSMPPProvider(ctx, config.ProviderConfig{
+		Name: "smsc", Protocol: "smpp", Endpoint: waitUpstreamAddr(t, upstream), SystemID: "acct", Password: "secret", Enabled: true, SMPP: &cfg,
+	})
+	defer provider.Close()
+	waitProviderBound(t, provider)
+	payload := []byte{0x1b, 0x65}
+	if _, err := provider.Send(OutboundMessage{
+		Context: ctx, GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000",
+		DataCoding: 0x00, Encoding: "gsm7", RawPayload: payload, RawPayloadSet: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case submit := <-submits:
+		if submit.DataCoding != 0 || string(submit.Payload) != string(payload) {
+			t.Fatalf("DCS0 payload changed: dcs=0x%02x payload=%x", submit.DataCoding, submit.Payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not receive DCS0 submit")
+	}
+}
+
 func waitUpstreamAddr(t *testing.T, server *smpp.Server) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

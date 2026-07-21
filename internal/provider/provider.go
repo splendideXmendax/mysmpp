@@ -16,6 +16,12 @@ type OutboundMessage struct {
 	Encoding           string
 	Meta               map[string]string
 	UDH                []byte
+	RawPayload         []byte
+	RawPayloadSet      bool
+	SARRefNum          []byte
+	SARTotalSegments   []byte
+	SARSegmentSeqnum   []byte
+	SARSet             bool
 }
 
 type DLR struct {

@@ -284,3 +284,129 @@ func TestBuildSubmitSMNoUDHUnchanged(t *testing.T) {
 		t.Fatalf("unexpected text: %q", got)
 	}
 }
+
+func TestBuildSubmitSMPreservesExplicitDCS0Payloads(t *testing.T) {
+	payloads := [][]byte{
+		{0x09}, {0x7e}, {0x7d}, {0x7c}, {0x7b}, {0x60}, {0x5f}, {0x5e},
+		{0x5d}, {0x5c}, {0x5b}, {0x40}, {0x24}, {0x1b, 0x65}, {0x1b, 0x40}, {0x1b, 0x3c},
+	}
+	cfg := config.DefaultSMPPClientConfig()
+	for _, payload := range payloads {
+		parts := BuildSubmitSM(Message{
+			GatewayID:     "m0000001",
+			SourceAddr:    "1069",
+			DestAddr:      "8613800138000",
+			Text:          message.DecodeSubmitText(payload, 0x00),
+			DataCoding:    0x00,
+			Encoding:      "gsm7",
+			RawPayload:    append([]byte(nil), payload...),
+			RawPayloadSet: true,
+		}, cfg)
+		if len(parts) != 1 {
+			t.Fatalf("payload %x produced %d parts", payload, len(parts))
+		}
+		submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+		if err != nil {
+			t.Fatalf("payload %x: %v", payload, err)
+		}
+		if submit.DataCoding != 0x00 {
+			t.Fatalf("payload %x data_coding=0x%02x, want 0", payload, submit.DataCoding)
+		}
+		if string(submit.Payload) != string(payload) {
+			t.Fatalf("payload changed: got %x want %x", submit.Payload, payload)
+		}
+	}
+}
+
+func TestBuildSubmitSMPreservesRawPayloadTLVMode(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "payload"
+	payload := []byte{0x1b, 0x65}
+	parts := BuildSubmitSM(Message{
+		GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000",
+		DataCoding: 0, Encoding: "gsm7", RawPayload: payload, RawPayloadSet: true,
+	}, cfg)
+	if len(parts) != 1 {
+		t.Fatalf("got %d parts", len(parts))
+	}
+	submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.DataCoding != 0 || string(submit.Payload) != string(payload) {
+		t.Fatalf("payload TLV changed: dcs=0x%02x payload=%x", submit.DataCoding, submit.Payload)
+	}
+}
+
+func TestBuildSubmitSMPreservesExplicitSARMetadata(t *testing.T) {
+	msg := Message{
+		GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000",
+		DataCoding: 0, Encoding: "gsm7", RawPayload: []byte("part"), RawPayloadSet: true,
+		SARRefNum: []byte{0x12, 0x34}, SARTotalSegments: []byte{0x02}, SARSegmentSeqnum: []byte{0x01}, SARSet: true,
+	}
+	parts := BuildSubmitSM(msg, config.DefaultSMPPClientConfig())
+	if len(parts) != 1 {
+		t.Fatalf("got %d parts", len(parts))
+	}
+	submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submit.DataCoding != 0 || string(submit.Payload) != "part" || submit.Concat == nil || submit.Concat.Reference != 0x1234 || submit.Concat.Total != 2 || submit.Concat.Part != 1 {
+		t.Fatalf("SAR submit changed: %+v payload=%x", submit, submit.Payload)
+	}
+	for tag, want := range map[uint16][]byte{
+		smpp.TagSARMsgRefNum: msg.SARRefNum, smpp.TagSARTotalSegments: msg.SARTotalSegments, smpp.TagSARSegmentSeqnum: msg.SARSegmentSeqnum,
+	} {
+		got, ok := smpp.FindTLV(submit.TLVs, tag)
+		if !ok || string(got) != string(want) {
+			t.Fatalf("SAR TLV 0x%04x=%x, want %x", tag, got, want)
+		}
+	}
+}
+
+func TestBuildSubmitSMPreservesOversizedUDHRawPayload(t *testing.T) {
+	udh := []byte{0x03, 0x70, 0x01, 0xff}
+	payload := []byte(repeat("a", 251))
+	parts := BuildSubmitSM(Message{
+		GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000",
+		DataCoding: 0, Encoding: "gsm7", UDH: udh, RawPayload: payload, RawPayloadSet: true,
+	}, config.DefaultSMPPClientConfig())
+	if len(parts) != 1 {
+		t.Fatalf("got %d parts", len(parts))
+	}
+	submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(submit.UDH) != string(udh) || string(submit.Payload) != string(payload) || submit.DataCoding != 0 {
+		t.Fatalf("oversized UDH payload changed: dcs=%d udh=%x payload_len=%d", submit.DataCoding, submit.UDH, len(submit.Payload))
+	}
+	if raw, ok := smpp.FindTLV(submit.TLVs, smpp.TagMessagePayload); !ok || len(raw) != len(udh)+len(payload) {
+		t.Fatalf("message_payload missing or wrong length: ok=%v len=%d", ok, len(raw))
+	}
+}
+
+func TestBuildSubmitSMPreservesRawUDHWhenProviderUsesSAR(t *testing.T) {
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.LongMessage = "sar"
+	udh := []byte{0x05, 0x00, 0x03, 0x12, 0x02, 0x01}
+	payload := []byte{0x1b, 0x65}
+	parts := BuildSubmitSM(Message{
+		GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000",
+		DataCoding: 0, Encoding: "gsm7", UDH: udh, RawPayload: payload, RawPayloadSet: true,
+	}, cfg)
+	if len(parts) != 1 {
+		t.Fatalf("got %d parts", len(parts))
+	}
+	submit, err := smpp.ParseSubmitSM(smpp.PDU{CommandID: smpp.CommandSubmitSM, SequenceID: 1, Body: parts[0].Body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(submit.UDH) != string(udh) || string(submit.Payload) != string(payload) || submit.ESMClass&0x40 == 0 {
+		t.Fatalf("raw UDH was converted or changed: udh=%x payload=%x esm=0x%02x", submit.UDH, submit.Payload, submit.ESMClass)
+	}
+	if _, ok := smpp.FindTLV(submit.TLVs, smpp.TagSARMsgRefNum); ok {
+		t.Fatal("raw UDH was converted to SAR")
+	}
+}

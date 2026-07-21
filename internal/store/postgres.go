@@ -368,7 +368,15 @@ WHERE id IN (
 }
 
 func (s *PostgresStore) AckOutbox(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE outbox SET state = 'done' WHERE id = $1`, id)
+	tag, err := s.pool.Exec(ctx, `
+UPDATE outbox
+	SET state = 'done',
+	    payload = payload - ARRAY[
+	        'udh',
+	        'raw_payload', 'raw_payload_set',
+        'sar_ref_num', 'sar_total_segments', 'sar_segment_seqnum', 'sar_set'
+    ]
+WHERE id = $1`, id)
 	return checkRows(tag, err)
 }
 

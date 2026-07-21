@@ -101,11 +101,14 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 		GatewayID: "g1",
 		Provider:  "mock",
 		Payload: OutboxPayload{
-			GatewayID: "g1",
-			Provider:  "mock",
-			From:      "1069",
-			To:        "13800138000",
-			Text:      "hello",
+			GatewayID:     "g1",
+			Provider:      "mock",
+			From:          "1069",
+			To:            "13800138000",
+			Text:          "hello",
+			RawPayload:    []byte{0x1b, 0x65},
+			RawPayloadSet: true,
+			SARRefNum:     []byte{0x12, 0x34}, SARTotalSegments: []byte{0x02}, SARSegmentSeqnum: []byte{0x01}, SARSet: true,
 		},
 	}, "client-a", "m1", time.Hour)
 	if err != nil {
@@ -123,6 +126,25 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 		t.Fatal(err)
 	} else if depth != 1 {
 		t.Fatalf("expected one pending outbox item, got %d", depth)
+	}
+	items, err := st.ClaimOutbox(context.Background(), "raw-check", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || !items[0].Payload.RawPayloadSet || string(items[0].Payload.RawPayload) != string([]byte{0x1b, 0x65}) {
+		t.Fatalf("raw payload not preserved: %+v", items)
+	}
+	items[0].Payload.RawPayload[0] = 0xff
+	stored := st.outbox[id]
+	if stored.Payload.RawPayload[0] != 0x1b {
+		t.Fatal("claimed raw payload aliases stored outbox payload")
+	}
+	if err := st.AckOutbox(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	stored = st.outbox[id]
+	if stored.Payload.UDH != nil || stored.Payload.RawPayloadSet || stored.Payload.RawPayload != nil || stored.Payload.SARSet || stored.Payload.SARRefNum != nil {
+		t.Fatalf("acked outbox retained raw transport payload: %+v", stored.Payload)
 	}
 	if got, ok, err := st.CheckIdempotency(context.Background(), "client-a", "m1"); err != nil {
 		t.Fatal(err)
@@ -201,12 +223,18 @@ func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
 		GatewayID: "g1",
 		Provider:  "mock",
 		Payload: OutboxPayload{
-			GatewayID:  "g1",
-			Provider:   "mock",
-			From:       "1069",
-			To:         "13800138000",
-			Text:       "hello",
-			ReceivedAt: time.Now().UTC(),
+			GatewayID:        "g1",
+			Provider:         "mock",
+			From:             "1069",
+			To:               "13800138000",
+			Text:             "hello",
+			ReceivedAt:       time.Now().UTC(),
+			RawPayload:       []byte{0x1b, 0x65},
+			RawPayloadSet:    true,
+			SARRefNum:        []byte{0x12, 0x34},
+			SARTotalSegments: []byte{0x02},
+			SARSegmentSeqnum: []byte{0x01},
+			SARSet:           true,
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -246,6 +274,27 @@ func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	} else if depth != 1 {
 		t.Fatalf("outbox was not persisted, depth=%d", depth)
+	}
+	items, err := reopened.ClaimOutbox(context.Background(), "raw-check", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || !items[0].Payload.RawPayloadSet || string(items[0].Payload.RawPayload) != string([]byte{0x1b, 0x65}) {
+		t.Fatalf("raw payload was not persisted: %+v", items)
+	}
+	if !items[0].Payload.SARSet || string(items[0].Payload.SARRefNum) != string([]byte{0x12, 0x34}) || string(items[0].Payload.SARTotalSegments) != "\x02" || string(items[0].Payload.SARSegmentSeqnum) != "\x01" {
+		t.Fatalf("SAR metadata was not persisted: %+v", items[0].Payload)
+	}
+	if err := reopened.AckOutbox(context.Background(), items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	reopenedAgain, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acked := reopenedAgain.outbox[items[0].ID]
+	if acked.Payload.UDH != nil || acked.Payload.RawPayloadSet || acked.Payload.RawPayload != nil || acked.Payload.SARSet || acked.Payload.SARRefNum != nil {
+		t.Fatalf("file store retained raw transport payload after ack: %+v", acked.Payload)
 	}
 }
 

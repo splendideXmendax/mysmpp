@@ -51,6 +51,12 @@ func (p *SMPPProvider) SendAll(msg OutboundMessage) ([]string, error) {
 		RegisteredDelivery: msg.RegisteredDelivery,
 		Encoding:           msg.Encoding,
 		UDH:                append([]byte(nil), msg.UDH...),
+		RawPayload:         append([]byte(nil), msg.RawPayload...),
+		RawPayloadSet:      msg.RawPayloadSet,
+		SARRefNum:          append([]byte(nil), msg.SARRefNum...),
+		SARTotalSegments:   append([]byte(nil), msg.SARTotalSegments...),
+		SARSegmentSeqnum:   append([]byte(nil), msg.SARSegmentSeqnum...),
+		SARSet:             msg.SARSet,
 	})
 }
 
