@@ -1,6 +1,9 @@
 package dispatch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGeneratedCountryRules(t *testing.T) {
 	if len(e164CountryCodes) != 216 {
@@ -54,5 +57,52 @@ func TestValidateCountryLengthBoundaries(t *testing.T) {
 				t.Fatal("expected invalid address")
 			}
 		})
+	}
+}
+
+func TestGeneratedCountryCodesAreUnambiguous(t *testing.T) {
+	for code := range e164CountryCodes {
+		if len(code) < 1 || len(code) > 3 || !digitsOnly(code) {
+			t.Fatalf("invalid generated country code %q", code)
+		}
+		parsed, ok := splitE164CountryCode(code + "1")
+		if !ok || parsed != code {
+			t.Fatalf("country code %q parsed as %q, ok=%v", code, parsed, ok)
+		}
+		for other := range e164CountryCodes {
+			if code != other && strings.HasPrefix(other, code) {
+				t.Fatalf("country codes %q and %q have ambiguous prefixes", code, other)
+			}
+		}
+	}
+}
+
+func TestAllCountryLengthRuleBoundaries(t *testing.T) {
+	for code, maxLen := range countryMaxTotalLength {
+		t.Run(code, func(t *testing.T) {
+			if _, ok := e164CountryCodes[code]; !ok {
+				t.Fatalf("length rule references unknown country code %q", code)
+			}
+			if maxLen <= len(code) || maxLen > 15 {
+				t.Fatalf("invalid maximum total length %d for country code %q", maxLen, code)
+			}
+			atMax := code + strings.Repeat("1", maxLen-len(code))
+			if err := validateDestAddr(atMax, destAddrOptions{CountryLengthMode: "strict"}); err != nil {
+				t.Fatalf("maximum-length address %q rejected: %v", atMax, err)
+			}
+			overMax := atMax + "1"
+			if err := validateDestAddr(overMax, destAddrOptions{CountryLengthMode: "strict"}); err == nil {
+				t.Fatalf("overlength address %q accepted", overMax)
+			}
+		})
+	}
+}
+
+func TestValidateDestAddrInternationalPrefixForms(t *testing.T) {
+	if err := validateDestAddr("+8613800138000", destAddrOptions{CountryLengthMode: "compat"}); err != nil {
+		t.Fatalf("leading plus should be accepted: %v", err)
+	}
+	if err := validateDestAddr("008613800138000", destAddrOptions{CountryLengthMode: "compat"}); err == nil {
+		t.Fatal("international dialing prefix 00 is not an E.164 country code and should be rejected")
 	}
 }

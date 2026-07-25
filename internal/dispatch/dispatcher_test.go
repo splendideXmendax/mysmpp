@@ -18,6 +18,7 @@ import (
 	"github.com/splendideXmendax/mysmpp/internal/message"
 	"github.com/splendideXmendax/mysmpp/internal/provider"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
@@ -34,12 +35,22 @@ type captureProvider struct {
 	messages chan provider.OutboundMessage
 }
 
+type errorProvider struct {
+	err error
+}
+
 func (p captureProvider) Send(msg provider.OutboundMessage) (string, error) {
 	p.messages <- msg
 	return "provider-id", nil
 }
 
 func (p captureProvider) OnDLR(provider.DLRCallback) {}
+
+func (p errorProvider) Send(provider.OutboundMessage) (string, error) {
+	return "", p.err
+}
+
+func (p errorProvider) OnDLR(provider.DLRCallback) {}
 
 func (p multiIDProvider) Send(provider.OutboundMessage) (string, error) {
 	if len(p.ids) == 0 {
@@ -738,6 +749,165 @@ func TestDispatcherRequeuesWhenSavePendingFails(t *testing.T) {
 	}
 }
 
+func TestDispatcherSendsTerminalFailureDLRToOnlineSMPPClient(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	receiver := smpp.NewSession(serverConn, smpp.SessionConfig{ID: "trx-1", Auth: func(systemID, password string) bool { return true }})
+	go receiver.Serve(context.Background())
+	bindSessionForDispatchTest(t, clientConn, smpp.CommandBindTransceiver, smpp.CommandBindTransceiverResp)
+
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{
+		"reject": errorProvider{err: smppclient.PermanentError{Err: smppclient.SubmitStatusError{Status: smpp.StatusInvalidSrcAddr}}},
+	})
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, fakeSMPPServer{session: receiver, receivers: []*smpp.Session{receiver}}, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "reject", Priority: 1}}, []config.ProviderConfig{{Name: "reject", Enabled: true}})
+
+	receipt, err := d.Submit(context.Background(), Envelope{
+		From:               "1069",
+		To:                 "8613800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Source: SubmitSource{
+			Kind:          SourceSMPP,
+			SMPPSessionID: receiver.ID(),
+			SMPPSystemID:  "esme-a",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlr, err := readPDUForDispatchTest(clientConn, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dlr.CommandID != smpp.CommandDeliverSM {
+		t.Fatalf("expected deliver_sm, got 0x%08x", dlr.CommandID)
+	}
+	if err := smpp.WritePDU(clientConn, smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: smpp.StatusOK, SequenceID: dlr.SequenceID}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(dlr.Body, []byte("id:"+receipt.GatewayID)) || !bytes.Contains(dlr.Body, []byte("dlvrd:000")) || !bytes.Contains(dlr.Body, []byte("stat:REJECTD")) || !bytes.Contains(dlr.Body, []byte("err:010")) {
+		t.Fatalf("unexpected failure receipt: %q", dlr.Body)
+	}
+	waitForOutboxDepth(t, st, "failed", 1)
+	waitForPending(t, d, 0)
+}
+
+func TestDispatcherPersistsTerminalFailureDLRForOfflineSMPPClient(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{
+		"reject": errorProvider{err: smppclient.PermanentError{Err: smppclient.SubmitStatusError{Status: smpp.StatusInvalidSrcAddr}}},
+	})
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "reject", Priority: 1}}, []config.ProviderConfig{{Name: "reject", Enabled: true}})
+
+	receipt, err := d.Submit(context.Background(), Envelope{
+		From:               "1069",
+		To:                 "8613800138000",
+		Text:               "hello",
+		RegisteredDelivery: 1,
+		Source:             SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForOutboxDepth(t, st, "failed", 1)
+	waitForPending(t, d, 1)
+	items, err := st.ListReadyDLR(context.Background(), "esme-a", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("ready dlr count = %d, want 1", len(items))
+	}
+	if items[0].GatewayID != receipt.GatewayID || items[0].ProviderID != "local-failure:"+receipt.GatewayID || items[0].DLRState != "REJECTD" || items[0].DLRErrorCode != int(smpp.StatusInvalidSrcAddr) {
+		t.Fatalf("unexpected pending failure dlr: %+v", items[0])
+	}
+	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+	if err != nil || !ok {
+		t.Fatalf("message missing: ok=%v err=%v", ok, err)
+	}
+	if msg.State != "REJECTD" || msg.ErrorCode != int(smpp.StatusInvalidSrcAddr) {
+		t.Fatalf("unexpected failed message: %+v", msg)
+	}
+}
+
+func TestDispatcherSkipsTerminalFailureDLRWhenNotRequested(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{
+		"reject": errorProvider{err: smppclient.PermanentError{Err: smppclient.SubmitStatusError{Status: smpp.StatusInvalidSrcAddr}}},
+	})
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "reject", Priority: 1}}, []config.ProviderConfig{{Name: "reject", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "hello",
+		Source: SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutboxDepth(t, st, "failed", 1)
+	if size := d.PendingSize(); size != 0 {
+		t.Fatalf("pending size = %d, want 0", size)
+	}
+}
+
+func TestDispatcherDoesNotSendFailureDLRBeforeRetriesExhausted(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"temporary": errorProvider{err: errors.New("temporary upstream error")}})
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	cfg.MaxAttempts = 3
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "temporary", Priority: 1}}, []config.ProviderConfig{{Name: "temporary", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "hello", RegisteredDelivery: 1,
+		Source: SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutboxDepth(t, st, "pending", 1)
+	if size := d.PendingSize(); size != 0 {
+		t.Fatalf("pending size = %d before retries exhausted, want 0", size)
+	}
+}
+
+func TestDispatcherPersistsUndeliverableDLRWhenRetriesExhausted(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"temporary": errorProvider{err: errors.New("temporary upstream error")}})
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	cfg.MaxAttempts = 1
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "temporary", Priority: 1}}, []config.ProviderConfig{{Name: "temporary", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "hello", RegisteredDelivery: 1,
+		Source: SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutboxDepth(t, st, "failed", 1)
+	items, err := st.ListReadyDLR(context.Background(), "esme-a", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].DLRState != "UNDELIV" || items[0].DLRErrorCode != 1 {
+		t.Fatalf("unexpected exhausted-retry dlr: %+v", items)
+	}
+}
+
 func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
 	st := store.NewMemory()
 	rec := store.Pending{
@@ -940,4 +1110,35 @@ func waitForPending(t *testing.T, d *Dispatcher, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("pending size did not reach %d, got %d", want, d.PendingSize())
+}
+
+func waitForOutboxDepth(t *testing.T, st store.Store, state string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if depth, err := st.OutboxDepth(context.Background(), state); err == nil && depth == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	depth, err := st.OutboxDepth(context.Background(), state)
+	t.Fatalf("outbox %s depth did not reach %d: depth=%d err=%v", state, want, depth, err)
+}
+
+func readPDUForDispatchTest(conn net.Conn, timeout time.Duration) (smpp.PDU, error) {
+	type result struct {
+		pdu smpp.PDU
+		err error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		pdu, err := smpp.ReadPDU(conn)
+		resultCh <- result{pdu: pdu, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.pdu, result.err
+	case <-time.After(timeout):
+		return smpp.PDU{}, errors.New("timed out waiting for pdu")
+	}
 }

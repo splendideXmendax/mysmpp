@@ -293,7 +293,7 @@ func (c *connection) submit(ctx context.Context, body []byte) (string, error) {
 		}
 		if res.pdu.Status != smpp.StatusOK {
 			c.errCount.Add(1)
-			err := fmt.Errorf("submit_sm_resp status=0x%08x", res.pdu.Status)
+			err := SubmitStatusError{Status: res.pdu.Status}
 			if permanentStatus(res.pdu.Status) {
 				return "", PermanentError{Err: err}
 			}

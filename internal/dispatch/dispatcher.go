@@ -749,11 +749,18 @@ func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err 
 	next := time.Now().UTC().Add(delay)
 	kind := "retry"
 	state := "retry"
-	if item.Attempt >= item.MaxAttempts || isPermanent(err) {
+	errorCode := 1
+	terminal := item.Attempt >= item.MaxAttempts || isPermanent(err)
+	var failurePending store.Pending
+	var failureDLR provider.DLR
+	failureDLRQueued := false
+	if terminal {
 		next = time.Time{}
 		kind = "failed"
 		state = "failed"
-		_ = d.store.UpdateMessageState(ctx, item.GatewayID, "failed", 1)
+		failureDLR.State, errorCode = terminalFailureDLR(err)
+		_ = d.store.UpdateMessageState(ctx, item.GatewayID, failureDLR.State, errorCode)
+		failurePending, failureDLR, failureDLRQueued = d.queueTerminalFailureDLR(ctx, item, failureDLR.State, errorCode)
 	}
 	d.emitCDR(cdr.Event{
 		Kind:      kind,
@@ -769,12 +776,79 @@ func (d *Dispatcher) failOutbox(ctx context.Context, item store.OutboxItem, err 
 		SystemID:  item.Payload.SourceSystem,
 		Source:    item.Payload.SourceKind,
 		State:     state,
-		ErrorCode: 1,
+		ErrorCode: errorCode,
 		Reason:    err.Error(),
 	})
 	if ferr := d.store.FailOutbox(ctx, item.ID, err.Error(), next); ferr != nil {
 		d.logger.Warn("fail outbox failed", "outbox_id", item.ID, "err", ferr)
+		if failureDLRQueued {
+			_ = d.store.DeletePending(ctx, failurePending.ProviderID)
+		}
+		return
 	}
+	if failureDLRQueued {
+		d.OnDLR(failureDLR)
+	}
+}
+
+type smppStatusError interface {
+	SMPPStatus() uint32
+}
+
+func terminalFailureDLR(err error) (string, int) {
+	var statusErr smppStatusError
+	if errors.As(err, &statusErr) {
+		status := statusErr.SMPPStatus()
+		if status > 999 {
+			status = 999
+		}
+		return "REJECTD", int(status)
+	}
+	return "UNDELIV", 1
+}
+
+func (d *Dispatcher) queueTerminalFailureDLR(ctx context.Context, item store.OutboxItem, state string, errorCode int) (store.Pending, provider.DLR, bool) {
+	payload := item.Payload
+	if payload.SourceKind != SourceSMPP.String() || payload.RegisteredDelivery&0x03 == 0 {
+		return store.Pending{}, provider.DLR{}, false
+	}
+	doneAt := time.Now().UTC()
+	receivedAt := payload.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = doneAt
+	}
+	providerID := "local-failure:" + payload.GatewayID
+	rec := store.Pending{
+		ProviderID:         providerID,
+		GatewayID:          payload.GatewayID,
+		SourceKind:         payload.SourceKind,
+		SourceSession:      payload.SourceSession,
+		SourceSystem:       payload.SourceSystem,
+		From:               payload.From,
+		To:                 payload.To,
+		Text:               payload.Text,
+		DataCoding:         payload.DataCoding,
+		RegisteredDelivery: payload.RegisteredDelivery,
+		Provider:           payload.Provider,
+		Route:              payload.Route,
+		ReceivedAt:         receivedAt,
+		ExpiresAt:          doneAt.Add(d.pendingTTL),
+		DLRReady:           true,
+		DLRState:           state,
+		DLRErrorCode:       errorCode,
+		DLRDoneAt:          doneAt,
+	}
+	if err := d.store.SavePending(ctx, rec); err != nil {
+		d.logger.Error("save terminal failure dlr failed", "gateway_id", payload.GatewayID, "err", err)
+		return store.Pending{}, provider.DLR{}, false
+	}
+	return rec, provider.DLR{
+		Provider:   payload.Provider,
+		ProviderID: providerID,
+		State:      state,
+		ErrorCode:  errorCode,
+		DoneAt:     doneAt,
+	}, true
 }
 
 func (d *Dispatcher) emitCDR(e cdr.Event) {

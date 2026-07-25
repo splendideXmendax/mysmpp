@@ -31,12 +31,18 @@ func BuildDLR(params DLRParams) PDU {
 }
 
 func FormatReceiptText(params DLRParams) string {
+	state := normalizeState(params.State)
+	delivered := 0
+	if state == "DELIVRD" {
+		delivered = 1
+	}
 	return fmt.Sprintf(
-		"id:%s sub:001 dlvrd:001 submit date:%s done date:%s stat:%s err:%03d text:%s",
+		"id:%s sub:001 dlvrd:%03d submit date:%s done date:%s stat:%s err:%03d text:%s",
 		params.GatewayID,
+		delivered,
 		params.SubmittedAt.UTC().Format("0601021504"),
 		params.DoneAt.UTC().Format("0601021504"),
-		normalizeState(params.State),
+		state,
 		params.ErrorCode,
 		truncateRunes(params.OriginalText, 20),
 	)

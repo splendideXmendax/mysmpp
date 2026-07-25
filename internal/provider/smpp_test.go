@@ -3,12 +3,14 @@ package provider
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
+	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 )
 
 func TestSMPPProviderSendAndDLR(t *testing.T) {
@@ -143,6 +145,49 @@ func TestSMPPProviderSendAndDLR(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream did not stop")
+	}
+}
+
+func TestSMPPProviderPreservesRejectedSubmitStatus(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	upstream := smpp.NewServer(config.SMPPConfig{Addr: "127.0.0.1:0", SystemID: "smsc"}, nil,
+		func(systemID, password string) bool { return true },
+		func(session *smpp.Session, submit smpp.SubmitSM) {
+			session.Send(smpp.PDU{
+				CommandID:  smpp.CommandSubmitSMResp,
+				Status:     smpp.StatusInvalidSrcAddr,
+				SequenceID: submit.SequenceID,
+			})
+			session.CompleteSubmit()
+		})
+	go upstream.ListenAndServe(ctx)
+
+	cfg := config.DefaultSMPPClientConfig()
+	cfg.ResponseTimeoutMS = 2000
+	provider := NewSMPPProvider(ctx, config.ProviderConfig{
+		Name: "smsc", Protocol: "smpp", Endpoint: waitUpstreamAddr(t, upstream), SystemID: "acct", Password: "secret", Enabled: true, SMPP: &cfg,
+	})
+	defer provider.Close()
+	waitProviderBound(t, provider)
+
+	_, err := provider.Send(OutboundMessage{
+		Context: ctx, GatewayID: "m0000001", SourceAddr: "1069", DestAddr: "8613800138000", Text: "rejected",
+	})
+	if err == nil {
+		t.Fatal("expected submit rejection")
+	}
+	var statusErr smppclient.SubmitStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("submit error does not retain SMPP status: %T %v", err, err)
+	}
+	if statusErr.Status != smpp.StatusInvalidSrcAddr {
+		t.Fatalf("submit status = 0x%08x, want 0x%08x", statusErr.Status, smpp.StatusInvalidSrcAddr)
+	}
+	var permanent interface{ Permanent() bool }
+	if !errors.As(err, &permanent) || !permanent.Permanent() {
+		t.Fatalf("invalid source address should be permanent: %T %v", err, err)
 	}
 }
 

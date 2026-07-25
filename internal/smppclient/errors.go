@@ -15,6 +15,18 @@ func (e PermanentError) Permanent() bool {
 	return true
 }
 
+type SubmitStatusError struct {
+	Status uint32
+}
+
+func (e SubmitStatusError) Error() string {
+	return fmt.Sprintf("submit_sm_resp status=0x%08x", e.Status)
+}
+
+func (e SubmitStatusError) SMPPStatus() uint32 {
+	return e.Status
+}
+
 type TimeoutError struct {
 	Duration time.Duration
 }

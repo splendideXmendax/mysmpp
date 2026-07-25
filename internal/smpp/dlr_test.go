@@ -83,6 +83,25 @@ func TestBuildDLRUsesCurrentGatewayIDEverywhere(t *testing.T) {
 	}
 }
 
+func TestFormatReceiptTextUsesDeliveredCountForState(t *testing.T) {
+	now := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		state string
+		want  string
+	}{
+		{state: "DELIVRD", want: "dlvrd:001"},
+		{state: "REJECTD", want: "dlvrd:000"},
+		{state: "UNDELIV", want: "dlvrd:000"},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			text := FormatReceiptText(DLRParams{GatewayID: "m1", SubmittedAt: now, DoneAt: now, State: test.state})
+			if !strings.Contains(text, test.want) {
+				t.Fatalf("receipt %q does not contain %q", text, test.want)
+			}
+		})
+	}
+}
+
 func hasTLV(body []byte, tag uint16, value []byte) bool {
 	for len(body) >= 4 {
 		gotTag := binary.BigEndian.Uint16(body[0:2])
