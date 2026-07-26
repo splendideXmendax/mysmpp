@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -320,5 +322,52 @@ func TestFileStoreRecoversSequenceFromLegacyAndCurrentIDs(t *testing.T) {
 	}
 	if start <= 19329 {
 		t.Fatalf("recovered sequence did not advance beyond current id: %d", start)
+	}
+}
+
+// TestFileStoreConcurrentPersistNoErrorOrCorruption drives many concurrent
+// mutating ops (each triggers persist) to exercise the snapshot+write+rename
+// path. Before persistMu serialized it, concurrent renames could make an op
+// return a spurious error or leave a lost/older snapshot on disk. This asserts
+// every op succeeds and the final file is valid, complete JSON.
+func TestFileStoreConcurrentPersistNoErrorOrCorruption(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const writers, perWriter = 8, 40
+	var wg sync.WaitGroup
+	errs := make(chan error, writers*perWriter)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				id := fmt.Sprintf("g-%d-%d", w, i)
+				msg := message.New(id, message.DirectionMT, "1069", "13800138000", "hi")
+				if err := st.SaveMessage(context.Background(), msg); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent SaveMessage failed: %v", err)
+	}
+	// Final on-disk snapshot must be valid, complete JSON with all records.
+	reopened, err := NewFile(path)
+	if err != nil {
+		t.Fatalf("reopen persisted store failed (possible corruption): %v", err)
+	}
+	msgs, err := reopened.ListMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != writers*perWriter {
+		t.Fatalf("persisted message count = %d, want %d", len(msgs), writers*perWriter)
 	}
 }

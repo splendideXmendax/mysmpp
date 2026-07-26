@@ -64,7 +64,7 @@ type Dispatcher struct {
 	wg            sync.WaitGroup
 	httpClient    *http.Client
 	dlrCh         chan provider.DLR
-	instanceID    string
+	instanceID    atomic.Pointer[string]
 
 	mu      sync.RWMutex
 	smppSrv SMPPServer
@@ -187,7 +187,7 @@ func (d *Dispatcher) SetCDRSink(s CDRSink) {
 }
 
 func (d *Dispatcher) SetInstanceID(instance string) {
-	d.instanceID = instance
+	d.instanceID.Store(&instance)
 }
 
 func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) {
@@ -857,7 +857,9 @@ func (d *Dispatcher) emitCDR(e cdr.Event) {
 		return
 	}
 	if e.Instance == "" {
-		e.Instance = d.instanceID
+		if id := d.instanceID.Load(); id != nil {
+			e.Instance = *id
+		}
 	}
 	holder.sink.Emit(e)
 }

@@ -114,3 +114,38 @@ func TestWriterDoesNotOverwriteSameSecondRotations(t *testing.T) {
 		t.Fatalf("expected 6 lines across rotated files, got %d", total)
 	}
 }
+
+// TestWriterEmitConcurrentWithCloseNoPanic exercises the send-vs-close race on
+// the internal channel. Before the sendMu guard, an Emit racing Close could hit
+// "send on closed channel" and crash the process. The test asserts Emit is a
+// safe no-op once Close has run.
+func TestWriterEmitConcurrentWithCloseNoPanic(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		w, err := NewWriter(config.CDRConfig{
+			Enabled:       true,
+			Dir:           t.TempDir(),
+			Mode:          "events",
+			MaxRecords:    1000,
+			MaxAge:        "1h",
+			Buffer:        4,
+			OnFull:        "drop",
+			FsyncInterval: "0s",
+			Instance:      "test",
+		})
+		if err != nil {
+			t.Fatalf("new writer: %v", err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; i < 200; i++ {
+				w.Emit(Event{Kind: "submit", GatewayID: "m"})
+			}
+		}()
+		w.Emit(Event{Kind: "submit", GatewayID: "warmup"})
+		if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		<-done // must complete without panicking
+	}
+}

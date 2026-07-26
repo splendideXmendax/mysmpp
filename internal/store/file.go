@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/message"
@@ -13,6 +14,11 @@ import (
 type FileStore struct {
 	*MemoryStore
 	path string
+	// persistMu serializes the snapshot+write+rename sequence so concurrent
+	// mutations (each of which calls persist) cannot interleave their file
+	// renames — which otherwise races the path<->path.bak swap and can lose a
+	// newer snapshot to an older one.
+	persistMu sync.Mutex
 }
 
 type fileSnapshot struct {
@@ -99,6 +105,8 @@ func (s *FileStore) load() error {
 }
 
 func (s *FileStore) persist() error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	s.mu.RLock()
 	snap := fileSnapshot{
 		Messages:    make([]message.Message, len(s.messages)),

@@ -24,6 +24,11 @@ type Writer struct {
 	seq       atomic.Uint64
 	closeOnce sync.Once
 	closeErr  error
+	// sendMu guards the send-vs-close race on `in`: Emit holds the read lock
+	// while sending, Close takes the write lock before close(in). This makes a
+	// concurrent Emit during shutdown/reload a safe no-op instead of a
+	// send-on-closed-channel panic. Behavior on the happy path is unchanged.
+	sendMu sync.RWMutex
 }
 
 func NewWriter(cfg config.CDRConfig) (*Writer, error) {
@@ -68,7 +73,12 @@ func NewWriter(cfg config.CDRConfig) (*Writer, error) {
 }
 
 func (w *Writer) Emit(e Event) {
-	if w == nil || w.closed.Load() {
+	if w == nil {
+		return
+	}
+	w.sendMu.RLock()
+	defer w.sendMu.RUnlock()
+	if w.closed.Load() {
 		return
 	}
 	e.Seq = w.seq.Add(1)
@@ -96,8 +106,10 @@ func (w *Writer) Close() error {
 		return nil
 	}
 	w.closeOnce.Do(func() {
+		w.sendMu.Lock()
 		w.closed.Store(true)
 		close(w.in)
+		w.sendMu.Unlock()
 		<-w.done
 	})
 	return w.closeErr
