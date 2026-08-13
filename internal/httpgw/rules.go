@@ -166,8 +166,9 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		messages, err := g.store.ListMessagesPage(r.Context(), store.ListOptions{
-			Limit:  intQuery(r, "limit", 100),
-			Offset: intQuery(r, "offset", 0),
+			Limit:    intQuery(r, "limit", 100),
+			Offset:   intQuery(r, "offset", 0),
+			ClientID: clientIDFromRequest(r),
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -231,6 +232,12 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 		cfg := g.Config()
 		msg := message.New(newID(), message.DirectionMT, req.From, req.To, req.Text)
 		msg.Metadata = req.Meta
+		if clientID != "" {
+			if msg.Metadata == nil {
+				msg.Metadata = map[string]string{}
+			}
+			msg.Metadata["client_id"] = clientID
+		}
 		msg.Segments = message.Split(req.Text, message.SplitOptions{ForceEncoding: msg.Encoding})
 		if route, ok := router.New(cfg.Routes).Match(msg); ok {
 			msg.Route = route.Name
@@ -279,7 +286,7 @@ func clientIDFromRequest(r *http.Request) string {
 	if clientID, ok := r.Context().Value(clientIDContextKey{}).(string); ok {
 		return clientID
 	}
-	return r.Header.Get("X-Client-ID")
+	return ""
 }
 
 func requestIPAllowed(r *http.Request, allowed, trustedProxies []string) bool {

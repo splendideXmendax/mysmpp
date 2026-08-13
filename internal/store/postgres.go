@@ -75,12 +75,12 @@ func saveMessageSQL(ctx context.Context, exec sqlExecer, msg message.Message) er
 	_, err = exec.Exec(ctx, `
 INSERT INTO messages (
 	gateway_id, provider_id, direction, from_addr, to_addr, text, encoding, data_coding,
-	segments, route, provider, source_kind, source_session, state, error_code,
+	segments, route, provider, source_kind, source_session, client_id, state, error_code,
 	received_at, sent_at, done_at, meta
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
-	$9, $10, $11, $12, $13, $14, $15,
-	$16, $17, $18, $19
+	$9, $10, $11, $12, $13, $14, $15, $16,
+	$17, $18, $19, $20
 )
 ON CONFLICT (gateway_id) DO UPDATE SET
 	provider_id = EXCLUDED.provider_id,
@@ -95,6 +95,7 @@ ON CONFLICT (gateway_id) DO UPDATE SET
 	provider = EXCLUDED.provider,
 	source_kind = EXCLUDED.source_kind,
 	source_session = EXCLUDED.source_session,
+	client_id = EXCLUDED.client_id,
 	state = EXCLUDED.state,
 	error_code = EXCLUDED.error_code,
 	received_at = EXCLUDED.received_at,
@@ -102,7 +103,7 @@ ON CONFLICT (gateway_id) DO UPDATE SET
 	done_at = EXCLUDED.done_at,
 	meta = EXCLUDED.meta`,
 		msg.ID, nullString(msg.ProviderID), string(msg.Direction), msg.From, msg.To, msg.Text, nullString(msg.Encoding), dataCodingFromEncoding(msg.Encoding),
-		segments, nullString(msg.Route), nullString(msg.Provider), nullString(msg.SourceKind), nullString(msg.SourceID), msg.State, msg.ErrorCode,
+		segments, nullString(msg.Route), nullString(msg.Provider), nullString(msg.SourceKind), nullString(msg.SourceID), nullString(msg.Metadata["client_id"]), msg.State, msg.ErrorCode,
 		zeroAsNow(msg.SubmittedAt), nullTime(msg.SentAt), nullTime(msg.DoneAt), meta,
 	)
 	return err
@@ -154,11 +155,18 @@ func (s *PostgresStore) ListMessagesPage(ctx context.Context, opts ListOptions) 
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.pool.Query(ctx, `
+	query := `
 SELECT gateway_id, COALESCE(provider_id, ''), direction, from_addr, to_addr, text, COALESCE(encoding, ''),
 	COALESCE(route, ''), COALESCE(provider, ''), COALESCE(source_kind, ''), COALESCE(source_session, ''),
 	state, COALESCE(error_code, 0), received_at, sent_at, done_at, COALESCE(meta, '{}'::jsonb)
-FROM messages ORDER BY received_at ASC, gateway_id ASC LIMIT $1 OFFSET $2`, limit, offset)
+FROM messages`
+	args := []any{limit, offset}
+	if opts.ClientID != "" {
+		query += ` WHERE client_id = $3`
+		args = append(args, opts.ClientID)
+	}
+	query += ` ORDER BY received_at ASC, gateway_id ASC LIMIT $1 OFFSET $2`
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

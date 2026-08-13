@@ -52,12 +52,16 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	if messages[0].Route != "mobile" || messages[0].Provider != "cmcc" {
 		t.Fatalf("route not applied: %+v", messages[0])
 	}
+	if messages[0].Metadata["client_id"] != "client-a" {
+		t.Fatalf("authenticated client id not persisted: %+v", messages[0].Metadata)
+	}
 }
 
 func TestMessagesGETUsesPagination(t *testing.T) {
 	st := store.NewMemory()
 	for i := 0; i < 3; i++ {
 		msg := message.New(string(rune('a'+i)), message.DirectionMT, "1069", "13800138000", "hello")
+		msg.Metadata["client_id"] = "client-a"
 		if err := st.SaveMessage(context.Background(), msg); err != nil {
 			t.Fatal(err)
 		}
@@ -147,6 +151,46 @@ func TestMessagesGETRequiresConfiguredClient(t *testing.T) {
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with client credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessagesGETOnlyReturnsAuthenticatedClientsMessages(t *testing.T) {
+	cfg := config.Default()
+	cfg.Clients = []config.ClientAuth{
+		{ClientID: "client-a", Token: "token-a", Enabled: true},
+		{ClientID: "client-b", Token: "token-b", Enabled: true},
+	}
+	st := store.NewMemory()
+	for _, tc := range []struct {
+		id       string
+		clientID string
+	}{
+		{id: "a-1", clientID: "client-a"},
+		{id: "b-1", clientID: "client-b"},
+		{id: "a-2", clientID: "client-a"},
+	} {
+		msg := message.New(tc.id, message.DirectionMT, "1069", "13800138000", "hello")
+		msg.Metadata["client_id"] = tc.clientID
+		if err := st.SaveMessage(context.Background(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gateway := New(cfg, st)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages?limit=1&offset=1", nil)
+	req.Header.Set("X-Client-ID", "client-a")
+	req.Header.Set("X-Token", "token-a")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var messages []message.Message
+	if err := json.Unmarshal(rec.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != "a-2" {
+		t.Fatalf("expected only the second client-a message, got %+v", messages)
 	}
 }
 
@@ -751,7 +795,23 @@ func TestRequestIPAllowedUsesTrustedProxyXForwardedFor(t *testing.T) {
 func TestMessagesRequireAdminWhenNoClientsConfigured(t *testing.T) {
 	cfg := config.Default()
 	cfg.Admin = config.AdminConfig{Username: "admin", Password: "secret"}
-	gateway := New(cfg, store.NewMemory())
+	st := store.NewMemory()
+	for _, tc := range []struct {
+		id       string
+		clientID string
+	}{
+		{id: "unowned"},
+		{id: "owned", clientID: "untrusted-client"},
+	} {
+		msg := message.New(tc.id, message.DirectionMT, "1069", "13800138000", "hello")
+		if tc.clientID != "" {
+			msg.Metadata["client_id"] = tc.clientID
+		}
+		if err := st.SaveMessage(context.Background(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gateway := New(cfg, st)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
 	rec := httptest.NewRecorder()
@@ -762,10 +822,18 @@ func TestMessagesRequireAdminWhenNoClientsConfigured(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
 	req.SetBasicAuth("admin", "secret")
+	req.Header.Set("X-Client-ID", "untrusted-client")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with admin credentials, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var messages []message.Message
+	if err := json.Unmarshal(rec.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("untrusted X-Client-ID must not filter an admin query, got %+v", messages)
 	}
 }
 

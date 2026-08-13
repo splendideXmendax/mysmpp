@@ -38,8 +38,9 @@ type Store interface {
 }
 
 type ListOptions struct {
-	Limit  int
-	Offset int
+	Limit    int
+	Offset   int
+	ClientID string
 }
 
 type Pending struct {
@@ -206,23 +207,32 @@ func (s *MemoryStore) ListMessages(_ context.Context) ([]message.Message, error)
 func (s *MemoryStore) ListMessagesPage(_ context.Context, opts ListOptions) ([]message.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	messages := s.messages
+	if opts.ClientID != "" {
+		messages = make([]message.Message, 0, len(s.messages))
+		for _, msg := range s.messages {
+			if msg.Metadata["client_id"] == opts.ClientID {
+				messages = append(messages, msg)
+			}
+		}
+	}
 	offset := opts.Offset
 	if offset < 0 {
 		offset = 0
 	}
-	if offset > len(s.messages) {
-		offset = len(s.messages)
+	if offset > len(messages) {
+		offset = len(messages)
 	}
 	limit := opts.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
 	end := offset + limit
-	if end > len(s.messages) {
-		end = len(s.messages)
+	if end > len(messages) {
+		end = len(messages)
 	}
 	out := make([]message.Message, end-offset)
-	for i, msg := range s.messages[offset:end] {
+	for i, msg := range messages[offset:end] {
 		out[i] = cloneMessage(msg)
 	}
 	return out, nil

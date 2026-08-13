@@ -553,6 +553,8 @@ curl -X POST http://127.0.0.1:19087/v1/messages \
 
 如果 `clients` 为空，`/v1/messages` 会退回到 admin Basic Auth，而不是允许匿名提交或查询。
 
+配置 `clients` 后，`GET /v1/messages` 只返回当前已鉴权 `client_id` 的消息；租户身份来自鉴权上下文，不接受未验证的请求头覆盖。完整请求字段、返回结构和 DLR 回调说明见 [HTTP_TO_SMPP_API_ZH.md](HTTP_TO_SMPP_API_ZH.md)。
+
 ## trusted_proxies
 
 反向代理后如果还要使用 `clients[].allowed_ips`，需要配置受信代理:

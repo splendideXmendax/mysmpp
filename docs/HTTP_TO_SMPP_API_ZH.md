@@ -4,7 +4,7 @@
 
 ## 1. 当前部署信息
 
-截至 2026-08-13，服务器 `8.219.56.23` 的部署情况如下：
+截至 2026-08-14，服务器 `8.219.56.23` 的部署情况如下：
 
 | 项目 | 当前值 |
 |---|---|
@@ -12,9 +12,10 @@
 | HTTP 提交接口 | `POST /v1/messages` |
 | HTTP 查询接口 | `GET /v1/messages` |
 | 上游协议 | SMPP 3.4 |
-| 上游 provider | `ap2-upstream` |
-| 当前默认路由 | `ap2-default`，匹配所有目标号码 |
-| 上游连接 | 1 个 transceiver bind，当前为 `bound` |
+| HTTP 客户端 | `tenant-a`、`tenant-b`、`tenant-c` |
+| 上游 provider | `ap2-upstream`、`stub-2777`、`stub-2778`、`stub-2779`、`stub-2780` |
+| HTTP 路由 | 按已鉴权 `client_id` 匹配租户，再按 `gateway_id` 加权选择 provider |
+| 上游连接 | 5 个 transceiver bind，当前均可提交 |
 | 存储 | PostgreSQL |
 
 HTTP 请求进入 `POST /v1/messages` 后会经过字段校验、风控、内容过滤和路由选择，成功受理后进入 outbox，由 worker 转换为 SMPP `submit_sm` 异步发送至上游。
@@ -23,27 +24,29 @@ HTTP 请求进入 `POST /v1/messages` 后会经过字段校验、风控、内容
 
 ## 2. 鉴权
 
-当前部署的 `clients` 配置为空，因此 `/v1/messages` 暂时使用管理员 HTTP Basic Auth：
+当前部署已配置三个独立 HTTP client。请求必须携带对应租户的两个请求头：
 
 ```http
-Authorization: Basic <base64(username:password)>
+X-Client-ID: tenant-a
+X-Token: <tenant-a-token>
 ```
 
-调用示例中的账号和密码均使用环境变量，不应把真实凭据写入代码或日志：
+调用示例中的 token 使用环境变量，不应把真实凭据写入代码或日志：
 
 ```bash
-export MYSMPP_USER='<username>'
-export MYSMPP_PASSWORD='<password>'
+export MYSMPP_CLIENT_ID='tenant-a'
+export MYSMPP_TOKEN='<tenant-a-token>'
 ```
 
-生产接入建议配置独立 `clients`。配置后改用以下请求头，且每个 client 可以设置来源 IP 白名单：
+三个租户的 token 保存在服务器 root-only 文件中：
 
-```http
-X-Client-ID: <client_id>
-X-Token: <token>
+```text
+/root/mysmpp-backups/http-tenant-credentials-v1.0.2.txt
 ```
 
-当前端口提供的是明文 HTTP。Basic Auth 和 Token 都必须通过 HTTPS 才能避免在传输途中泄露；对公网开放前应在网关前部署 HTTPS 反向代理，并限制源 IP，不建议让调用方继续直连公网 `19087`。
+当 `clients` 为空时，接口才回退到管理员 HTTP Basic Auth。该兼容模式没有 HTTP 租户身份，不适合 A/B/C 配比或按租户幂等。
+
+当前端口提供的是明文 HTTP。Token 必须通过 HTTPS 才能避免在传输途中泄露；对公网开放前应在网关前部署 HTTPS 反向代理，并限制源 IP，不建议让调用方长期直连公网 `19087`。
 
 ## 3. 提交短信
 
@@ -52,7 +55,8 @@ X-Token: <token>
 ```http
 POST /v1/messages HTTP/1.1
 Host: 8.219.56.23:19087
-Authorization: Basic <credentials>
+X-Client-ID: tenant-a
+X-Token: <tenant-a-token>
 Content-Type: application/json
 ```
 
@@ -83,14 +87,15 @@ Content-Type: application/json
 | `callback_rule` | 否 | 调用方自定义标识；配置后会原样返回在 DLR 回调中 |
 | `meta` | 否 | 最多 10 个键；键不能为空，每个值最多 200 个 Unicode 字符 |
 
-当前部署使用 Basic Auth 且 `clients` 为空，因此请求没有稳定的 `client_id`，`client_msg_id` 暂时不会触发持久化幂等去重。需要可靠防重时，应先配置独立 HTTP client。
+当前部署使用独立 HTTP client，同一 `X-Client-ID` 下重复提交相同 `client_msg_id`，24 小时内会返回原 `gateway_id`，不会重复入队。不同租户可使用相同的 `client_msg_id`，互不冲突。
 
 ### curl 示例
 
 ```bash
 curl --fail-with-body \
-  --user "$MYSMPP_USER:$MYSMPP_PASSWORD" \
   --header 'Content-Type: application/json' \
+  --header "X-Client-ID: $MYSMPP_CLIENT_ID" \
+  --header "X-Token: $MYSMPP_TOKEN" \
   --data '{
     "from": "YourBrand",
     "to": "+8613800138000",
@@ -110,8 +115,8 @@ HTTP 状态为 `202 Accepted`：
 {
   "gateway_id": "m0000abc",
   "provider_id": "",
-  "provider": "ap2-upstream",
-  "route": "ap2-default",
+  "provider": "stub-2778",
+  "route": "tenant-a-http-weighted",
   "state": "queued"
 }
 ```
@@ -130,7 +135,8 @@ HTTP 状态为 `202 Accepted`：
 
 ```bash
 curl --fail-with-body \
-  --user "$MYSMPP_USER:$MYSMPP_PASSWORD" \
+  --header "X-Client-ID: $MYSMPP_CLIENT_ID" \
+  --header "X-Token: $MYSMPP_TOKEN" \
   'http://8.219.56.23:19087/v1/messages?limit=100&offset=0'
 ```
 
@@ -138,6 +144,8 @@ curl --fail-with-body \
 |---|---:|---|
 | `limit` | `100` | `1-1000`；越界时回退为 100 |
 | `offset` | `0` | 不能小于 0；负数按 0 处理 |
+
+客户端模式会先按已鉴权 `client_id` 过滤，再应用分页；A、B、C 只能查询各自消息。请求头中的租户 ID 只有在 token 校验成功后才生效。
 
 响应是 JSON 数组。当前版本的字段名使用 Go 结构体字段名，区分大小写：
 
@@ -151,8 +159,8 @@ curl --fail-with-body \
     "To": "8613800138000",
     "Text": "test message",
     "Encoding": "gsm7",
-    "Route": "ap2-default",
-    "Provider": "ap2-upstream",
+    "Route": "tenant-a-http-weighted",
+    "Provider": "stub-2778",
     "SourceKind": "http",
     "State": "DELIVRD",
     "ErrorCode": 0,
@@ -189,8 +197,8 @@ Content-Type: application/json
 {
   "gateway_id": "m0000abc",
   "provider_id": "123456789",
-  "provider": "ap2-upstream",
-  "route": "ap2-default",
+  "provider": "stub-2778",
+  "route": "tenant-a-http-weighted",
   "state": "DELIVRD",
   "error_code": 0,
   "done_at": "2026-08-13T01:00:02.123456789Z",
@@ -237,13 +245,22 @@ curl --fail-with-body 'http://8.219.56.23:19087/healthz'
 
 `smpp_listener: ok` 只代表 mysmpp 自身的 SMPP 服务端监听状态，不代表上游 SMPP provider 已 bind。上游实时状态需要在管理后台 `/admin/connections` 查看，正常状态为 `bound`。
 
-## 8. 当前部署核查结果
+## 8. 当前租户配比
 
-2026-08-13 的只读核查结果：
+| HTTP 客户端 | SMPP 上游端口配比 |
+|---|---|
+| `tenant-a` | `2776=10%`、`2777=30%`、`2778=60%` |
+| `tenant-b` | `2779=50%`、`2780=50%` |
+| `tenant-c` | `2776=0%`、`2777=20%`、`2778=80%`；权重列表省略 0% 通道 |
+
+权重使用每条消息的 `gateway_id` 做稳定哈希。同一个目标号码的多条消息分别参与配比；单次小样本允许波动，消息量增加后会趋近配置比例。
+
+## 9. 当前部署核查结果
+
+2026-08-14 的上线核查结果：
 
 - mysmpp 容器运行正常，restart count 为 0。
 - HTTP `19087` 和 SMPP `29175` 均绑定到宿主机所有 IPv4/IPv6 地址。
 - 健康检查为 `status: ok`，PostgreSQL、outbox、pending 均正常。
-- `ap2-upstream` 的唯一连接为 `bound`，窗口 `0 / 4096`。
-- 运行时计数为 submit `100 ok / 0 fail`，已接收 DLR `100`，最近错误为 `none`。
-- 默认路由指向 `ap2-upstream`，所以当前部署支持 HTTP 转 SMPP。
+- `2776-2780` 五个测试上游均已建立连接。
+- 三租户 HTTP 提交、SMPP 转发、DLR、幂等和查询隔离均需在每次升级后回归验证。

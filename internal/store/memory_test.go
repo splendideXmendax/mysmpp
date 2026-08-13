@@ -95,6 +95,43 @@ func TestMemoryStoreTrimsOldMessages(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreListMessagesPageFiltersBeforePagination(t *testing.T) {
+	st := NewMemory()
+	for _, tc := range []struct {
+		id       string
+		clientID string
+	}{
+		{id: "a-1", clientID: "client-a"},
+		{id: "b-1", clientID: "client-b"},
+		{id: "a-2", clientID: "client-a"},
+	} {
+		msg := message.New(tc.id, message.DirectionMT, "1069", "13800138000", "hello")
+		msg.Metadata["client_id"] = tc.clientID
+		if err := st.SaveMessage(context.Background(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	messages, err := st.ListMessagesPage(context.Background(), ListOptions{
+		Limit:    1,
+		Offset:   1,
+		ClientID: "client-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != "a-2" {
+		t.Fatalf("expected second client-a message, got %+v", messages)
+	}
+	all, err := st.ListMessagesPage(context.Background(), ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected unfiltered admin-style query to return all messages, got %+v", all)
+	}
+}
+
 func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) {
 	st := NewMemory()
 	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
