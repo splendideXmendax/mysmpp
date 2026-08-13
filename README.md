@@ -31,7 +31,7 @@ SMPP ESME / HTTP client a
 - SMPP DLR: 构造 `deliver_sm`，包含 receipt text、`receipted_message_id` TLV、`message_state` TLV。
 - SMPP 会话保护: 最大会话数、单 system_id 最大会话数、submit window、未 bind 超时、空闲超时。
 - HTTP API: `/v1/messages` 提交和分页查询，支持客户端 token 鉴权和 IP 白名单。
-- 路由: 按号码前缀和 priority 选择上游 provider。
+- 路由: 支持号码前缀、priority 和基于 `gateway_id` 的 provider 权重配比。
 - HTTP 上游规则: 支持 JSON、form、query、header 渲染，支持响应 `id_path` / `id_regex` 提取 provider_id。
 - SMPP 上游 Provider: `protocol=smpp` 时 mysmpp 作为 ESME bind 上游 SMSC，支持 `submit_sm`、`submit_sm_resp` 对账和上游 `deliver_sm` DLR 解析。
 - HTTP 入站规则: 支持 provider DLR 回调、普通入站消息和自定义字段映射。

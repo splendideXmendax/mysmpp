@@ -16,7 +16,7 @@
 
 - 文档指出的历史缺口“HTTP 有关键词过滤、SMPP 绕过过滤”属实，已修复为统一在 `dispatch.Submit` 前置过滤。
 - 文档附录 A.1 的“accepted 话单漏去重分支”属实，已按 `duplicate==false` 才 emit accepted 实现，并加回归测试。
-- 文档附录 A.1 的“加权选路不能用 gateway_id”属实，本实现使用 `To` 做稳定哈希。
+- 当时的实现使用 `To` 做稳定哈希。该行为已在 2026-08-13 调整为使用每条消息的 `gateway_id`，同一号码的多条消息现在也会参与权重配比。
 - 文档建议的容灾链会触碰 outbox/store/schema，风险较高。本次未实现 P4 自动切链，`failover` 仅作为配置合法性与首 provider 选择基础保留，不做失败后切换。
 - HTTP `dispatcher==nil` 兜底路径定义为测试/降级路径，不承诺内容过滤和 CDR；生产路径应配置 dispatcher。
 
@@ -34,7 +34,7 @@ go test -race ./...
 
 - filter：归一化关键词 block、mask 保留原文非命中部分、tag 汇聚。
 - cdr：`max_records` 轮转、`.writing` finalize、JSONL 行数验证。
-- router：内容标签+主叫前缀、多维匹配、同一 To 加权稳定、时间窗。
+- router：内容标签+主叫前缀、多维匹配、加权稳定、时间窗。当前加权哈希键为 `gateway_id`。
 - dispatcher：HTTP/SMPP Source 均被 filter 拒绝；幂等重复只产生一条 accepted CDR。
 - httpgw：dispatcher 路径 filter 拒绝返回 403；无 dispatcher 兜底路径不做内容过滤。
 
@@ -108,7 +108,7 @@ go test -race ./...
   - block 规则：HTTP 返回 `403 message blocked by content filter: codex-block-rule2`。
   - tag 路由：`codex-route-online-full2-20260703` 命中 `codex-tag-route` -> `codex-mock-a`。
   - mask：入库文本从 `hello codex-mask-online-full2-20260703` 变为 `hello [MASKED2]`。
-  - weighted：同一 `To` 连续 3 次均稳定落到 `codex-mock-a`，路由均为 `codex-weighted-route`。
+  - weighted：此处记录的是 2026-07-03 当时按 `To` 选路的验证；2026-08-13 起已改为按 `gateway_id` 选路。
   - mock provider 投递与 DLR：测试消息最终状态均为 `DELIVRD`。
   - 重启验证：`docker restart mysmpp` 后 healthz 正常，filter 规则仍可用。
   - CDR 完整性：共捕获 17 条测试相关事件，覆盖 `rejected`、`accepted`、`sent`、`dlr`。

@@ -243,14 +243,15 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	if rt == nil {
 		return Receipt{}, errors.New("router not initialized")
 	}
-	match, ok := rt.MatchSubmit(router.MatchInput{
+	matchInput := router.MatchInput{
 		To:       env.To,
 		From:     env.From,
 		SystemID: env.Source.SMPPSystemID,
 		ClientID: env.ClientID,
 		Tags:     filterDecision.Tags,
 		Now:      env.ReceivedAt,
-	})
+	}
+	route, ok := rt.MatchRoute(matchInput)
 	if !ok {
 		d.emitCDR(cdr.Event{
 			Kind:     "rejected",
@@ -265,7 +266,10 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		})
 		return Receipt{}, fmt.Errorf("%w %q", ErrNoRoute, env.To)
 	}
-	route := match.Route
+	providerHint := ""
+	if hint, found := rt.SelectProvider(route, ""); found {
+		providerHint = hint.Provider
+	}
 	if route.AddrRewrite != (config.AddrRewriteConfig{}) {
 		env.To = rewriteDestAddr(env.To, route.AddrRewrite)
 	}
@@ -288,7 +292,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 				SystemID: env.Source.SMPPSystemID,
 				Source:   env.Source.Kind.String(),
 				Route:    route.Name,
-				Provider: match.Provider,
+				Provider: providerHint,
 				Reason:   "bad_dest",
 			})
 			return Receipt{}, err
@@ -298,6 +302,23 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 	gatewayID, err := d.newGatewayID(ctx)
 	if err != nil {
 		return Receipt{}, err
+	}
+	match, ok := rt.SelectProvider(route, gatewayID)
+	if !ok {
+		d.emitCDR(cdr.Event{
+			Kind:      "rejected",
+			GatewayID: gatewayID,
+			From:      env.From,
+			To:        env.To,
+			TextLen:   len([]rune(env.Text)),
+			TextHash:  cdr.TextHash(env.Text),
+			ClientID:  env.ClientID,
+			SystemID:  env.Source.SMPPSystemID,
+			Source:    env.Source.Kind.String(),
+			Route:     route.Name,
+			Reason:    "no_provider",
+		})
+		return Receipt{}, fmt.Errorf("%w for route %q", ErrNoRoute, route.Name)
 	}
 	encoding := env.Encoding
 	if encoding == "" {

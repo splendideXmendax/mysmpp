@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/http"
@@ -169,6 +170,104 @@ func TestGatewayIDFitsVendorCOctetLimit(t *testing.T) {
 	}
 }
 
+func TestDispatcherWeightedRoutingUsesGatewayID(t *testing.T) {
+	reg := provider.NewRegistry()
+	mockA := provider.NewNamedMock(context.Background(), "mock-a")
+	mockB := provider.NewNamedMock(context.Background(), "mock-b")
+	reg.Replace(map[string]provider.Provider{"mock-a": mockA, "mock-b": mockB})
+	defer reg.CloseAll()
+
+	providers := []config.ProviderConfig{{Name: "mock-a", Enabled: true}, {Name: "mock-b", Enabled: true}}
+	routes := []config.RouteConfig{{
+		Name: "weighted",
+		Weighted: []config.WeightedProvider{
+			{Provider: "mock-a", Weight: 1},
+			{Provider: "mock-b", Weight: 1},
+		},
+		Priority: 1,
+	}}
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.ReloadRoutes(routes, providers)
+
+	seen := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		receipt, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(receipt.GatewayID))
+		expectedProvider := "mock-a"
+		if h.Sum64()%2 == 1 {
+			expectedProvider = "mock-b"
+		}
+		if receipt.Provider != expectedProvider {
+			t.Fatalf("gateway id %q selected %q, want %q", receipt.GatewayID, receipt.Provider, expectedProvider)
+		}
+		seen[receipt.Provider] = true
+	}
+	if !seen["mock-a"] || !seen["mock-b"] {
+		t.Fatalf("same destination was not distributed by gateway id: %v", seen)
+	}
+}
+
+func TestDispatcherWeightedRoutingPersistsSelectedProvider(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{
+		"mock-a": provider.NewNamedMock(context.Background(), "mock-a"),
+		"mock-b": provider.NewNamedMock(context.Background(), "mock-b"),
+	})
+	defer reg.CloseAll()
+
+	st := store.NewMemory()
+	cfg := testDispatcherConfig()
+	cfg.PollIntervalMS = 60_000
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{
+		Name: "weighted",
+		Weighted: []config.WeightedProvider{
+			{Provider: "mock-a", Weight: 1},
+			{Provider: "mock-b", Weight: 1},
+		},
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}, {Name: "mock-b", Enabled: true}})
+
+	receipts := map[string]Receipt{}
+	for i := 0; i < 10; i++ {
+		receipt, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts[receipt.GatewayID] = receipt
+		msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+		if err != nil || !ok {
+			t.Fatalf("message %q not stored: ok=%v err=%v", receipt.GatewayID, ok, err)
+		}
+		if msg.Provider != receipt.Provider || msg.Route != receipt.Route {
+			t.Fatalf("message routing differs from receipt: receipt=%+v message=%+v", receipt, msg)
+		}
+	}
+
+	items, err := st.ClaimOutbox(context.Background(), "inspect", len(receipts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != len(receipts) {
+		t.Fatalf("expected %d outbox items, got %d", len(receipts), len(items))
+	}
+	for _, item := range items {
+		receipt, ok := receipts[item.GatewayID]
+		if !ok {
+			t.Fatalf("unexpected outbox gateway id %q", item.GatewayID)
+		}
+		if item.Provider != receipt.Provider || item.Payload.Provider != receipt.Provider || item.Payload.GatewayID != receipt.GatewayID {
+			t.Fatalf("outbox routing differs from receipt: receipt=%+v item=%+v", receipt, item)
+		}
+	}
+}
+
 func TestDispatcherRejectsUnassignedCountryCode(t *testing.T) {
 	reg := provider.NewRegistry()
 	st := store.NewMemory()
@@ -189,6 +288,62 @@ func TestDispatcherRejectsUnassignedCountryCode(t *testing.T) {
 		t.Fatal(err)
 	} else if depth != 0 {
 		t.Fatalf("invalid destination should not enter outbox, depth=%d", depth)
+	}
+}
+
+func TestDispatcherRejectedSubmissionsDoNotConsumeGatewayIDs(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	providers := []config.ProviderConfig{{Name: "mock-a", Enabled: true}}
+	d.ReloadRoutes([]config.RouteConfig{{Name: "only-cn", Prefix: []string{"86"}, Provider: "mock-a", Priority: 1}}, providers)
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "441234567890", Text: "hello"}); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("expected no route rejection, got %v", err)
+	}
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "285032768252", Text: "hello"}); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("expected prefix rejection before validation, got %v", err)
+	}
+
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, providers)
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "285032768252", Text: "hello"}); !errors.Is(err, ErrInvalidDestAddr) {
+		t.Fatalf("expected invalid destination rejection, got %v", err)
+	}
+	receipt, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.GatewayID != "m0000001" {
+		t.Fatalf("rejected submissions consumed gateway ids, got first accepted id %q", receipt.GatewayID)
+	}
+}
+
+func TestDispatcherInvalidDestinationCDRKeepsSingleProvider(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+
+	sink := &captureCDR{}
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), store.NewMemory())
+	defer d.Close()
+	d.SetCDRSink(sink)
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "285032768252", Text: "hello"}); !errors.Is(err, ErrInvalidDestAddr) {
+		t.Fatalf("expected invalid destination rejection, got %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.events) != 1 {
+		t.Fatalf("expected one rejected CDR, got %+v", sink.events)
+	}
+	event := sink.events[0]
+	if event.Kind != "rejected" || event.Reason != "bad_dest" || event.Route != "default" || event.Provider != "mock-a" || event.GatewayID != "" {
+		t.Fatalf("unexpected invalid destination CDR: %+v", event)
 	}
 }
 
@@ -309,9 +464,12 @@ func TestDispatcherCanRewriteTrunkZeroAfterCountryCode(t *testing.T) {
 func TestDispatcherConcurrentIdempotencyQueuesOnce(t *testing.T) {
 	reg := provider.NewRegistry()
 	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mockB := provider.NewNamedMock(context.Background(), "mock-b")
 	mock.DelayMin = time.Hour
 	mock.DelayMax = time.Hour
-	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	mockB.DelayMin = time.Hour
+	mockB.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock, "mock-b": mockB})
 	defer reg.CloseAll()
 
 	st := store.NewMemory()
@@ -321,11 +479,14 @@ func TestDispatcherConcurrentIdempotencyQueuesOnce(t *testing.T) {
 	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
 	defer d.Close()
 	d.ReloadRoutes([]config.RouteConfig{{
-		Name:     "default",
-		Prefix:   []string{},
-		Provider: "mock-a",
+		Name:   "default",
+		Prefix: []string{},
+		Weighted: []config.WeightedProvider{
+			{Provider: "mock-a", Weight: 1},
+			{Provider: "mock-b", Weight: 1},
+		},
 		Priority: 1,
-	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}, {Name: "mock-b", Enabled: true}})
 
 	const submissions = 20
 	receipts := make(chan Receipt, submissions)
@@ -356,15 +517,32 @@ func TestDispatcherConcurrentIdempotencyQueuesOnce(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
-	var first string
+	var firstID, firstProvider string
 	for receipt := range receipts {
-		if first == "" {
-			first = receipt.GatewayID
+		if firstID == "" {
+			firstID = receipt.GatewayID
+			firstProvider = receipt.Provider
 			continue
 		}
-		if receipt.GatewayID != first {
-			t.Fatalf("expected same gateway id for duplicate submits, got %q and %q", first, receipt.GatewayID)
+		if receipt.GatewayID != firstID || receipt.Provider != firstProvider {
+			t.Fatalf("expected duplicate submits to return the same routing, first=%q/%q got=%q/%q", firstID, firstProvider, receipt.GatewayID, receipt.Provider)
 		}
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(firstID))
+	expectedProvider := "mock-a"
+	if h.Sum64()%2 == 1 {
+		expectedProvider = "mock-b"
+	}
+	if firstProvider != expectedProvider {
+		t.Fatalf("gateway id %q returned provider %q, want %q", firstID, firstProvider, expectedProvider)
+	}
+	msg, ok, err := st.GetMessage(context.Background(), firstID)
+	if err != nil || !ok {
+		t.Fatalf("idempotent message not stored: ok=%v err=%v", ok, err)
+	}
+	if msg.Provider != firstProvider {
+		t.Fatalf("stored provider %q differs from receipt provider %q", msg.Provider, firstProvider)
 	}
 	if depth, err := st.OutboxDepth(context.Background(), ""); err != nil {
 		t.Fatal(err)

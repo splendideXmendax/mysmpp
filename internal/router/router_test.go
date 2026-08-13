@@ -1,6 +1,8 @@
 package router
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -28,9 +30,10 @@ func TestMatchSubmitUsesContentTagsAndFromPrefix(t *testing.T) {
 		{Name: "default", Prefix: []string{"138"}, Provider: "b", Priority: 1},
 	}, []config.ProviderConfig{{Name: "a", Enabled: true}, {Name: "b", Enabled: true}})
 	res, ok := r.MatchSubmit(MatchInput{
-		To:   "13800138000",
-		From: "10690001",
-		Tags: map[string]struct{}{"marketing": {}},
+		GatewayID: "m0000001",
+		To:        "13800138000",
+		From:      "10690001",
+		Tags:      map[string]struct{}{"marketing": {}},
 	})
 	if !ok || res.Route.Name != "mkt" || res.Provider != "a" {
 		t.Fatalf("expected marketing route, got ok=%v res=%+v", ok, res)
@@ -41,28 +44,90 @@ func TestMatchSubmitUsesContentTagsAndFromPrefix(t *testing.T) {
 	}
 }
 
-func TestMatchSubmitWeightedIsStableForSameTo(t *testing.T) {
+func TestMatchSubmitWeightedUsesGatewayID(t *testing.T) {
 	r := NewWithProviders([]config.RouteConfig{{
-		Name:   "weighted",
-		Prefix: []string{"138"},
+		Name: "weighted",
 		Weighted: []config.WeightedProvider{
 			{Provider: "a", Weight: 7},
 			{Provider: "b", Weight: 3},
 		},
 		Priority: 1,
 	}}, []config.ProviderConfig{{Name: "a", Enabled: true}, {Name: "b", Enabled: true}})
-	first := ""
-	for i := 0; i < 100; i++ {
-		res, ok := r.MatchSubmit(MatchInput{To: "13800138000"})
+	first, ok := r.MatchSubmit(MatchInput{GatewayID: "m0000001", To: "13800138000"})
+	if !ok {
+		t.Fatal("expected route")
+	}
+	sameID, ok := r.MatchSubmit(MatchInput{GatewayID: "m0000001", To: "13900139000"})
+	if !ok {
+		t.Fatal("expected route for same gateway id")
+	}
+	if sameID.Provider != first.Provider {
+		t.Fatalf("provider changed for gateway id %q: %q then %q", "m0000001", first.Provider, sameID.Provider)
+	}
+
+	counts := map[string]int{}
+	for i := 0; i < 1000; i++ {
+		gatewayID := fmt.Sprintf("m%07s", strconv.FormatUint(uint64(i+1), 36))
+		res, ok := r.MatchSubmit(MatchInput{GatewayID: gatewayID, To: "13800138000"})
 		if !ok {
 			t.Fatal("expected route")
 		}
-		if first == "" {
-			first = res.Provider
+		counts[res.Provider]++
+	}
+	if counts["a"] < 650 || counts["a"] > 750 {
+		t.Fatalf("expected 7:3 weighted routing to stay near configured ratio, got %v", counts)
+	}
+}
+
+func TestMatchSubmitWeightedRequiresGatewayID(t *testing.T) {
+	r := NewWithProviders([]config.RouteConfig{{
+		Name:     "weighted",
+		Weighted: []config.WeightedProvider{{Provider: "a", Weight: 1}},
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "a", Enabled: true}})
+	if _, ok := r.MatchSubmit(MatchInput{To: "13800138000"}); ok {
+		t.Fatal("weighted routing should require gateway id")
+	}
+}
+
+func TestMatchSubmitWeightedIgnoresDisabledProviders(t *testing.T) {
+	r := NewWithProviders([]config.RouteConfig{{
+		Name: "weighted",
+		Weighted: []config.WeightedProvider{
+			{Provider: "disabled", Weight: 99},
+			{Provider: "enabled", Weight: 1},
+		},
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "disabled", Enabled: false}, {Name: "enabled", Enabled: true}})
+	for i := 0; i < 100; i++ {
+		gatewayID := fmt.Sprintf("m%07s", strconv.FormatUint(uint64(i+1), 36))
+		res, ok := r.MatchSubmit(MatchInput{GatewayID: gatewayID, To: "13800138000"})
+		if !ok || res.Provider != "enabled" {
+			t.Fatalf("disabled provider selected for %q: ok=%v result=%+v", gatewayID, ok, res)
 		}
-		if res.Provider != first {
-			t.Fatalf("provider changed for same to: %q then %q", first, res.Provider)
-		}
+	}
+}
+
+func TestMatchSubmitWeightedRejectsInvalidRuntimeWeight(t *testing.T) {
+	r := NewWithProviders([]config.RouteConfig{{
+		Name:     "weighted",
+		Weighted: []config.WeightedProvider{{Provider: "a", Weight: -1}},
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "a", Enabled: true}})
+	if _, ok := r.MatchSubmit(MatchInput{GatewayID: "m0000001", To: "13800138000"}); ok {
+		t.Fatal("weighted routing should reject a non-positive runtime weight")
+	}
+}
+
+func TestMatchSubmitFailoverDoesNotRequireGatewayID(t *testing.T) {
+	r := NewWithProviders([]config.RouteConfig{{
+		Name:     "failover",
+		Failover: []string{"disabled", "enabled"},
+		Priority: 1,
+	}}, []config.ProviderConfig{{Name: "disabled", Enabled: false}, {Name: "enabled", Enabled: true}})
+	res, ok := r.MatchSubmit(MatchInput{To: "13800138000"})
+	if !ok || res.Provider != "enabled" || len(res.FailoverChain) != 1 || res.FailoverChain[0] != "enabled" {
+		t.Fatalf("unexpected failover result without gateway id: ok=%v result=%+v", ok, res)
 	}
 }
 

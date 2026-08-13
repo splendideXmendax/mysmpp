@@ -97,12 +97,13 @@ func (r *Router) MatchPhone(to string) (config.RouteConfig, bool) {
 }
 
 type MatchInput struct {
-	To       string
-	From     string
-	SystemID string
-	ClientID string
-	Tags     map[string]struct{}
-	Now      time.Time
+	GatewayID string
+	To        string
+	From      string
+	SystemID  string
+	ClientID  string
+	Tags      map[string]struct{}
+	Now       time.Time
 }
 
 type MatchResult struct {
@@ -112,6 +113,14 @@ type MatchResult struct {
 }
 
 func (r *Router) MatchSubmit(input MatchInput) (MatchResult, bool) {
+	route, ok := r.MatchRoute(input)
+	if !ok {
+		return MatchResult{}, false
+	}
+	return r.SelectProvider(route, input.GatewayID)
+}
+
+func (r *Router) MatchRoute(input MatchInput) (config.RouteConfig, bool) {
 	if input.Now.IsZero() {
 		input.Now = time.Now()
 	}
@@ -135,13 +144,20 @@ func (r *Router) MatchSubmit(input MatchInput) (MatchResult, bool) {
 		}
 	}
 	if !found {
+		return config.RouteConfig{}, false
+	}
+	return best, true
+}
+
+func (r *Router) SelectProvider(route config.RouteConfig, gatewayID string) (MatchResult, bool) {
+	if len(route.Weighted) > 0 && gatewayID == "" {
 		return MatchResult{}, false
 	}
-	provider, chain := r.selectProvider(best, input.To)
+	provider, chain := r.selectProvider(route, gatewayID)
 	if provider == "" {
 		return MatchResult{}, false
 	}
-	return MatchResult{Route: best, Provider: provider, FailoverChain: chain}, true
+	return MatchResult{Route: route, Provider: provider, FailoverChain: chain}, true
 }
 
 func routeSelectable(route config.RouteConfig, enabled map[string]bool) bool {
@@ -221,24 +237,32 @@ func contains(values []string, want string) bool {
 
 func (r *Router) selectProvider(route config.RouteConfig, key string) (string, []string) {
 	if len(route.Weighted) > 0 {
-		total := 0
+		var total uint64
 		for _, wp := range route.Weighted {
 			if r.providerEnabled(wp.Provider) {
-				total += wp.Weight
+				if wp.Weight <= 0 {
+					return "", nil
+				}
+				weight := uint64(wp.Weight)
+				if total > ^uint64(0)-weight {
+					return "", nil
+				}
+				total += weight
 			}
 		}
 		if total <= 0 {
 			return "", nil
 		}
-		n := int(stableHash(key) % uint32(total))
+		n := stableHash(key) % total
 		for _, wp := range route.Weighted {
 			if !r.providerEnabled(wp.Provider) {
 				continue
 			}
-			if n < wp.Weight {
+			weight := uint64(wp.Weight)
+			if n < weight {
 				return wp.Provider, nil
 			}
-			n -= wp.Weight
+			n -= weight
 		}
 		return "", nil
 	}
@@ -267,10 +291,10 @@ func (r *Router) providerEnabled(name string) bool {
 	return r.enabledProviders[name]
 }
 
-func stableHash(value string) uint32 {
-	h := fnv.New32a()
+func stableHash(value string) uint64 {
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(value))
-	return h.Sum32()
+	return h.Sum64()
 }
 
 func inAnyWindow(now time.Time, windows []config.TimeWindow) bool {

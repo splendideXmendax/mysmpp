@@ -209,6 +209,26 @@ Destination validation is intentionally minimal: optional leading `+`, digits on
 | `provider` | 上游 provider 名称 |
 | `priority` | 优先级 |
 
+### 权重配比
+
+同一条路由可以使用 `weighted` 按消息分配多个上游。`weight` 是相对权重，例如 `7:3` 表示大量新消息整体上约 70% 选择 `provider-a`、约 30% 选择 `provider-b`：
+
+```json
+{
+  "name": "default-weighted",
+  "prefix": [],
+  "priority": 1,
+  "weighted": [
+    {"provider": "provider-a", "weight": 7},
+    {"provider": "provider-b", "weight": 3}
+  ]
+}
+```
+
+权重选择使用每条消息的 `gateway_id` 做稳定哈希，不使用目标号码。因此同一号码的多条消息也会参与配比；同一个 `gateway_id` 的选择保持稳定。只有 enabled provider 会进入权重计算，某个 provider 被禁用后，其余 provider 会按剩余权重重新分配新消息。
+
+`weighted` 和 `failover` 不能在同一路由中同时配置。当前 `failover` 只选择第一个 enabled provider，发送失败后自动切换到下一 provider 尚未实现。
+
 Optional route-level address rewrite:
 
 ```json
