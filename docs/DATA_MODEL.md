@@ -32,13 +32,13 @@
 | `gateway_id` | 对应 messages.gateway_id |
 | `provider` | 目标 provider |
 | `payload` | 发送上游所需完整 JSON |
-| `state` | `pending`、`claimed`、`done`、`failed` |
+| `state` | `pending`、`claimed`、`sending`、`done`、`failed`、`uncertain` |
 | `claimed_by` / `claimed_at` | worker claim 信息 |
 | `next_retry_at` | 下次重试时间 |
 | `attempt` / `max_attempts` | 尝试次数 |
 | `last_error` | 最近失败原因 |
 
-If an item remains in `claimed` longer than `dispatcher.claim_timeout`, the dispatcher requeues it to `pending`. This protects Postgres deployments from rows getting stuck after a process crash between claim and ack/fail.
+If an item remains in `claimed` longer than `dispatcher.claim_timeout`, the dispatcher requeues it to `pending`. Before calling a provider, the worker persists `sending`. Neither `sending` nor `uncertain` is automatically requeued: these states require reconciliation because the upstream may already have accepted the message.
 
 ## pending
 

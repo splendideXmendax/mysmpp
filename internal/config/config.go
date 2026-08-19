@@ -31,6 +31,7 @@ type Config struct {
 	Server         ServerConfig     `json:"server"`
 	SMPP           SMPPConfig       `json:"smpp"`
 	Dispatcher     DispatcherConfig `json:"dispatcher"`
+	Tenants        []TenantConfig   `json:"tenants,omitempty"`
 	ESMEs          []ESMECred       `json:"esmes"`
 	Routes         []RouteConfig    `json:"routes"`
 	Providers      []ProviderConfig `json:"providers"`
@@ -76,13 +77,29 @@ type DispatcherConfig struct {
 type ESMECred struct {
 	SystemID string `json:"system_id"`
 	Password string `json:"password"`
+	TenantID string `json:"tenant_id,omitempty"`
+	Enabled  *bool  `json:"enabled,omitempty"`
 }
 
 type ClientAuth struct {
 	ClientID   string   `json:"client_id"`
 	Token      string   `json:"token"`
 	Enabled    bool     `json:"enabled"`
+	TenantID   string   `json:"tenant_id,omitempty"`
 	AllowedIPs []string `json:"allowed_ips"`
+}
+
+type TenantConfig struct {
+	TenantID string       `json:"tenant_id"`
+	Enabled  *bool        `json:"enabled,omitempty"`
+	Limits   TenantLimits `json:"limits,omitempty"`
+}
+
+type TenantLimits struct {
+	TPS           int    `json:"tps,omitempty"`
+	Burst         int    `json:"burst,omitempty"`
+	DailySegments int    `json:"daily_segments,omitempty"`
+	Timezone      string `json:"timezone,omitempty"`
 }
 
 type RiskConfig struct {
@@ -511,9 +528,6 @@ func (c Config) validate(allowAutoGenerate bool) error {
 	if _, err := time.ParseDuration(c.Dispatcher.PendingSweepInterval); c.Dispatcher.PendingSweepInterval != "" && err != nil {
 		return fmt.Errorf("dispatcher.pending_sweep_interval is invalid: %w", err)
 	}
-	if err := validateClaimTimeoutInvariant(c); err != nil {
-		return err
-	}
 	for _, proxy := range c.TrustedProxies {
 		if _, err := netip.ParsePrefix(proxy); err == nil {
 			continue
@@ -627,6 +641,30 @@ func (c Config) validate(allowAutoGenerate bool) error {
 	if err := validateCDR(c.CDR); err != nil {
 		return err
 	}
+	tenantNames := map[string]struct{}{}
+	for _, tenant := range c.Tenants {
+		if tenant.TenantID == "" {
+			return fmt.Errorf("tenant tenant_id is required")
+		}
+		if !validName(tenant.TenantID) || len(tenant.TenantID) > 64 {
+			return fmt.Errorf("tenant %q has invalid tenant_id", tenant.TenantID)
+		}
+		if _, ok := tenantNames[tenant.TenantID]; ok {
+			return fmt.Errorf("duplicate tenant %q", tenant.TenantID)
+		}
+		tenantNames[tenant.TenantID] = struct{}{}
+		if tenant.Limits.TPS < 0 || tenant.Limits.Burst < 0 || tenant.Limits.DailySegments < 0 {
+			return fmt.Errorf("tenant %q limits must be non-negative", tenant.TenantID)
+		}
+		if tenant.Limits.TPS == 0 && tenant.Limits.Burst > 0 {
+			return fmt.Errorf("tenant %q limits.burst requires limits.tps", tenant.TenantID)
+		}
+		if tenant.Limits.Timezone != "" {
+			if _, err := time.LoadLocation(tenant.Limits.Timezone); err != nil {
+				return fmt.Errorf("tenant %q limits.timezone is invalid: %w", tenant.TenantID, err)
+			}
+		}
+	}
 	esmeNames := map[string]struct{}{}
 	for _, esme := range c.ESMEs {
 		if esme.SystemID == "" {
@@ -650,6 +688,11 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		if _, ok := esmeNames[esme.SystemID]; ok {
 			return fmt.Errorf("duplicate esme %q", esme.SystemID)
 		}
+		if esme.TenantID != "" {
+			if _, ok := tenantNames[esme.TenantID]; !ok {
+				return fmt.Errorf("esme %q references unknown tenant %q", esme.SystemID, esme.TenantID)
+			}
+		}
 		esmeNames[esme.SystemID] = struct{}{}
 	}
 	clientNames := map[string]struct{}{}
@@ -668,6 +711,11 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 		if _, ok := clientNames[client.ClientID]; ok {
 			return fmt.Errorf("duplicate client %q", client.ClientID)
+		}
+		if client.TenantID != "" {
+			if _, ok := tenantNames[client.TenantID]; !ok {
+				return fmt.Errorf("client %q references unknown tenant %q", client.ClientID, client.TenantID)
+			}
 		}
 		clientNames[client.ClientID] = struct{}{}
 	}
@@ -890,6 +938,14 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func (c ESMECred) EnabledValue() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+func (c TenantConfig) EnabledValue() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 func (c DispatcherConfig) ValidateDestAddrEnabled() bool {
 	return c.ValidateDestAddr == nil || *c.ValidateDestAddr
 }
@@ -899,58 +955,6 @@ func (c DestAddrConfig) ValidateEnabled(global bool) bool {
 		return global
 	}
 	return *c.Validate
-}
-
-func validateClaimTimeoutInvariant(c Config) error {
-	claimTimeout, err := time.ParseDuration(c.Dispatcher.ClaimTimeout)
-	if err != nil || claimTimeout <= 0 {
-		return nil
-	}
-	perWorker := c.Dispatcher.PerWorkerConcurrency
-	if perWorker <= 0 {
-		perWorker = 10
-	}
-	claimLimit := c.Dispatcher.ClaimLimit
-	if claimLimit <= 0 {
-		claimLimit = 20
-	}
-	maxProviderTimeout := maxConfiguredProviderTimeout(c.Providers)
-	if maxProviderTimeout <= 0 {
-		maxProviderTimeout = 5 * time.Second
-	}
-	batches := (claimLimit + perWorker - 1) / perWorker
-	required := time.Duration(batches) * maxProviderTimeout
-	if claimTimeout <= required {
-		return fmt.Errorf("dispatcher.claim_timeout (%s) must be greater than ceil(claim_limit/per_worker_concurrency) * max provider response timeout (%s); upstream delivery is at-least-once and stale-claim recovery may redeliver", claimTimeout, required)
-	}
-	return nil
-}
-
-func maxConfiguredProviderTimeout(providers []ProviderConfig) time.Duration {
-	var maxTimeout time.Duration
-	for _, p := range providers {
-		var timeout time.Duration
-		switch strings.ToLower(p.Protocol) {
-		case "smpp":
-			if p.SMPP != nil && p.SMPP.ResponseTimeoutMS > 0 {
-				timeout = time.Duration(p.SMPP.ResponseTimeoutMS) * time.Millisecond
-			} else {
-				timeout = 5 * time.Second
-			}
-		case "http", "https":
-			if p.HTTPTimeoutMS > 0 {
-				timeout = time.Duration(p.HTTPTimeoutMS) * time.Millisecond
-			} else {
-				timeout = 3 * time.Second
-			}
-		default:
-			timeout = 4 * time.Second
-		}
-		if timeout > maxTimeout {
-			maxTimeout = timeout
-		}
-	}
-	return maxTimeout
 }
 
 func validateRoutePrefixes(routes []RouteConfig) error {

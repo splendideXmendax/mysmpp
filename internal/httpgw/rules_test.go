@@ -57,6 +57,35 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	}
 }
 
+func TestMessageSubmitReturns429WhenTenantDailyQuotaExceeded(t *testing.T) {
+	cfg := config.Default()
+	enableClientAuth(&cfg)
+	cfg.Clients[0].TenantID = "customer-a"
+	cfg.Tenants = []config.TenantConfig{{TenantID: "customer-a", Limits: config.TenantLimits{DailySegments: 1, Timezone: "UTC"}}}
+	cfg.Routes = []config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}
+	cfg.Providers = []config.ProviderConfig{{Name: "mock-a", Enabled: true}}
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"mock-a": provider.NewNamedMock(context.Background(), "mock-a")})
+	defer reg.CloseAll()
+	st := store.NewMemory()
+	dispatcher := dispatch.New(nil, reg, nil, testDispatcherConfig(), st)
+	defer dispatcher.Close()
+	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
+	gateway := NewWithDispatcher(cfg, st, dispatcher)
+
+	for i, want := range []int{http.StatusAccepted, http.StatusTooManyRequests} {
+		body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"order-` + string(rune('1'+i)) + `"}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+		req.Header.Set("Content-Type", "application/json")
+		addClientAuth(req)
+		rec := httptest.NewRecorder()
+		gateway.Handler().ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("submit %d status=%d want=%d body=%s", i+1, rec.Code, want, rec.Body.String())
+		}
+	}
+}
+
 func TestMessagesGETUsesPagination(t *testing.T) {
 	st := store.NewMemory()
 	for i := 0; i < 3; i++ {
@@ -566,8 +595,8 @@ func TestDynamicInboundRuleRejectsDLRProviderMismatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if dispatcher.PendingSize() != 1 {
 		t.Fatalf("provider mismatch should keep pending record, got %d", dispatcher.PendingSize())
@@ -906,16 +935,24 @@ func (s failingStore) ListMessagesPage(context.Context, store.ListOptions) ([]me
 	return nil, s.err
 }
 func (s failingStore) SavePending(context.Context, store.Pending) error { return s.err }
-func (s failingStore) GetPending(context.Context, string) (store.Pending, bool, error) {
+func (s failingStore) GetPending(context.Context, string, string) (store.Pending, bool, error) {
 	return store.Pending{}, false, s.err
 }
-func (s failingStore) MarkDLRReady(context.Context, string, string, int, time.Time) error {
+func (s failingStore) ListPendingByGatewayID(context.Context, string) ([]store.Pending, error) {
+	return nil, s.err
+}
+func (s failingStore) UpdatePendingDLR(context.Context, string, string, string, int, time.Time) error {
 	return s.err
 }
+func (s failingStore) MarkDLRReady(context.Context, string, string, string, int, time.Time) error {
+	return s.err
+}
+func (s failingStore) MarkDLRDelivered(context.Context, string, string) error { return s.err }
 func (s failingStore) ListReadyDLR(context.Context, string, int) ([]store.Pending, error) {
 	return nil, s.err
 }
-func (s failingStore) DeletePending(context.Context, string) error { return s.err }
+func (s failingStore) DeletePending(context.Context, string, string) error    { return s.err }
+func (s failingStore) DeletePendingByGatewayID(context.Context, string) error { return s.err }
 func (s failingStore) SweepExpiredPending(context.Context, time.Time) (int, error) {
 	return 0, s.err
 }
@@ -928,6 +965,13 @@ func (s failingStore) EnqueueOutbox(context.Context, store.OutboxItem) (int64, e
 }
 func (s failingStore) ClaimOutbox(context.Context, string, int) ([]store.OutboxItem, error) {
 	return nil, s.err
+}
+func (s failingStore) MarkOutboxSending(context.Context, int64, string) error { return s.err }
+func (s failingStore) CompleteOutboxSend(context.Context, int64, string, []store.Pending) error {
+	return s.err
+}
+func (s failingStore) MarkOutboxUncertain(context.Context, int64, string, string) error {
+	return s.err
 }
 func (s failingStore) RequeueStaleOutbox(context.Context, time.Time, int) (int, error) {
 	return 0, s.err
@@ -943,6 +987,6 @@ func (s failingStore) CheckIdempotency(context.Context, string, string) (string,
 func (s failingStore) SaveIdempotency(context.Context, string, string, string, time.Duration) error {
 	return s.err
 }
-func (s failingStore) SubmitAtomic(context.Context, message.Message, store.OutboxItem, string, string, time.Duration) (int64, string, bool, error) {
+func (s failingStore) SubmitAtomic(context.Context, message.Message, store.OutboxItem, store.SubmitOptions) (int64, string, bool, error) {
 	return 0, "", false, s.err
 }

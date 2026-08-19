@@ -40,7 +40,7 @@ pending lookup -> messages state update -> SMPP deliver_sm back to ESME
 关键原则:
 
 - 下游提交成功不等于上游最终送达。提交成功表示消息已经通过路由校验并写入队列。
-- 上游发送由 dispatcher worker 异步完成，失败后按 outbox 重试策略处理。
+- 上游发送由 dispatcher worker 异步完成；调用上游前持久化 `sending`，结果不确定时停止自动重发。
 - DLR 通过 `provider_id` 匹配 `pending`，再找回 `gateway_id` 和原始下游来源。
 - HTTP 来源当前只记录 DLR 状态；SMPP 来源如果请求了 DLR，会通过 `deliver_sm` 回推给可接收的 RX/TRX 会话。
 
@@ -109,15 +109,15 @@ pending lookup -> messages state update -> SMPP deliver_sm back to ESME
 发送路径:
 
 1. worker 周期性 claim `pending` outbox。
-2. 每个 worker 使用有界并发调用 provider。
-3. 发送成功后更新 message 为 `sent`，保存 pending DLR 映射，然后 ack outbox。
-4. 发送失败后按指数退避设置 `next_retry_at`。
-5. 达到最大尝试次数或遇到永久错误时，message 标记为 `failed`，outbox 标记为 `failed`。
+2. worker 将 `claimed` 原子更新为 `sending`，持久化成功后才调用 provider。
+3. 发送成功后，Store 在一次原子操作内更新 message 为 `sent`、保存全部 pending DLR 映射并把 outbox 置为 `done`。
+4. provider 明确返回永久拒绝时，message/outbox 标记为失败；超时、断链或发送结果落库失败等模糊结果进入 `UNKNOWN`/`uncertain`，不得自动重发。
+5. provider 调用前的可重试失败仍使用 outbox 退避和 `max_attempts`。
 
 可靠性要点:
 
 - Postgres claim 使用 `FOR UPDATE SKIP LOCKED`，适合多 worker 和多实例并发消费。
-- `claim_timeout` 会把超时未 ack/fail 的 `claimed` outbox 退回 `pending`，避免进程崩溃后任务卡死。
+- `claim_timeout` 只回收尚未进入 provider 调用的 `claimed` outbox。`sending` 和 `uncertain` 永不自动回队，避免崩溃或提交响应丢失后重复投递。
 - HTTP 幂等提交使用 `(client_id, client_msg_id)`，并在 store 事务里先插入幂等记录。
 - gateway_id 通过 store 的 `ReserveGatewayIDRange` 分段分配。Postgres 使用 `id_alloc` 表，file store 会落盘；memory store 重启后仍会丢失状态。
 
@@ -152,7 +152,7 @@ driver 区别:
 5. 重建 dispatcher router。
 6. 如果配置了 `configPath`，原子写回配置文件。
 
-注意: 热更新 provider 时，旧 SMPP 上游连接会被关闭；正在发送的 in-flight 请求可能失败并进入 outbox 重试。因此生产环境建议在低峰期变更关键上游配置。
+注意: 热更新 provider 时，旧 SMPP 上游连接会被关闭；正在发送的 in-flight 请求可能进入 `uncertain`。为避免需要人工核查，生产环境建议在低峰期变更关键上游配置。
 
 ## HTTP API 和入站规则
 

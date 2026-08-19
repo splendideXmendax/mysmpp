@@ -28,6 +28,19 @@ Docker 首次启动仍可使用 `configs/docker.json`，程序会生成真实凭
 
 ## 存储迁移
 
+### vNext 租户额度与分片 DLR
+
+升级 PostgreSQL 时，在停止旧版本写入后依次执行：
+
+```bash
+psql "$MYSMPP_DSN" -f migrations/006_pending_segments_and_provider_key.up.sql
+psql "$MYSMPP_DSN" -f migrations/007_tenant_quota.up.sql
+```
+
+`006` 将 pending 主键改为 `(provider, provider_id)` 并增加分片/DLR 投递字段；`007` 增加消息租户字段和 `tenant_quota_usage`。应用程序会在启动时校验这些结构，缺少迁移会拒绝启动，而不会在不完整 schema 上继续运行。
+
+旧配置无需立刻增加 `tenants` 或 `tenant_id`：未绑定账号仍按协议和账号生成独立兼容租户，且默认不限流、不限额。要让 HTTP 与 SMPP 子账号共享额度，必须显式把二者绑定到同一个 `tenants[].tenant_id`。
+
 ### memory -> file
 
 无法迁移历史内存数据。停止服务后改：
@@ -51,5 +64,7 @@ Docker 首次启动仍可使用 `configs/docker.json`，程序会生成真实凭
 4. 切换 `storage.driver=postgres`。
 
 ```bash
-psql "$MYSMPP_DSN" -f migrations/001_init.up.sql
+for migration in migrations/*.up.sql; do
+  psql -v ON_ERROR_STOP=1 "$MYSMPP_DSN" -f "$migration" || exit 1
+done
 ```

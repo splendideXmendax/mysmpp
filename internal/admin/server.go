@@ -599,7 +599,7 @@ func ternary(ok bool, a, b string) string {
 
 func isSectionPage(path string) bool {
 	switch path {
-	case "/providers", "/esmes", "/clients", "/inbound", "/outbound", "/risk", "/smpp":
+	case "/providers", "/tenants", "/esmes", "/clients", "/inbound", "/outbound", "/risk", "/smpp":
 		return true
 	default:
 		return false
@@ -610,6 +610,8 @@ func sectionTitle(name string) string {
 	switch name {
 	case "providers":
 		return "上游供应商"
+	case "tenants":
+		return "租户与额度"
 	case "esmes":
 		return "下游 ESME"
 	case "clients":
@@ -632,6 +634,8 @@ func sectionJSON(cfg config.Config, section string) (string, error) {
 	switch section {
 	case "providers":
 		value = cfg.Providers
+	case "tenants":
+		value = cfg.Tenants
 	case "esmes":
 		value = cfg.ESMEs
 	case "clients":
@@ -662,6 +666,12 @@ func applySectionJSON(cfg *config.Config, section, body string) error {
 			return fmt.Errorf("JSON 无效: %w", err)
 		}
 		cfg.Providers = value
+	case "tenants":
+		var value []config.TenantConfig
+		if err := json.Unmarshal([]byte(body), &value); err != nil {
+			return fmt.Errorf("JSON 无效: %w", err)
+		}
+		cfg.Tenants = value
 	case "esmes":
 		var value []config.ESMECred
 		if err := json.Unmarshal([]byte(body), &value); err != nil {

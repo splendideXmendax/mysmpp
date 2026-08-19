@@ -22,6 +22,39 @@ func TestValidateInboundRequiresFieldMapping(t *testing.T) {
 	}
 }
 
+func TestValidateTenantBindingsAndLimits(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Tenants = []TenantConfig{{
+		TenantID: "customer-a",
+		Limits:   TenantLimits{TPS: 20, Burst: 40, DailySegments: 1000, Timezone: "Asia/Shanghai"},
+	}}
+	cfg.Clients = []ClientAuth{{ClientID: "http-a", Token: "secret", Enabled: true, TenantID: "customer-a"}}
+	cfg.ESMEs = []ESMECred{{SystemID: "smpp-a", Password: "secret", TenantID: "customer-a"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid tenant config rejected: %v", err)
+	}
+
+	cfg.Clients[0].TenantID = "missing"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown tenant reference was accepted")
+	}
+	cfg.Clients[0].TenantID = "customer-a"
+	cfg.Tenants[0].Limits.Timezone = "Mars/Olympus"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("invalid tenant timezone was accepted")
+	}
+}
+
+func TestESMEEnabledDefaultsToTrue(t *testing.T) {
+	if !(ESMECred{}).EnabledValue() {
+		t.Fatal("omitted enabled must preserve legacy enabled behavior")
+	}
+	disabled := false
+	if (ESMECred{Enabled: &disabled}).EnabledValue() {
+		t.Fatal("explicitly disabled ESME was enabled")
+	}
+}
+
 func TestValidateInboundRequiresAuth(t *testing.T) {
 	cfg := validConfigForTest()
 	cfg.Inbound = []HTTPRuleConfig{{

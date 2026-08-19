@@ -63,6 +63,9 @@ func New(cfg config.Config, st store.Store) *Gateway {
 
 func NewWithDispatcher(cfg config.Config, st store.Store, dispatcher *dispatch.Dispatcher, extras ...any) *Gateway {
 	g := &Gateway{cfg: cfg, store: st, dispatcher: dispatcher, ctx: context.Background(), mux: http.NewServeMux(), riskCounts: map[string]rateWindow{}}
+	if dispatcher != nil {
+		dispatcher.ReloadTenants(cfg)
+	}
 	for _, extra := range extras {
 		switch v := extra.(type) {
 		case *provider.Registry:
@@ -218,7 +221,9 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			})
 			if err != nil {
 				status := http.StatusBadGateway
-				if errors.Is(err, dispatch.ErrBlocked) {
+				if errors.Is(err, dispatch.ErrRateExceeded) || errors.Is(err, dispatch.ErrQuotaExceeded) {
+					status = http.StatusTooManyRequests
+				} else if errors.Is(err, dispatch.ErrTenantDisabled) || errors.Is(err, dispatch.ErrBlocked) {
 					status = http.StatusForbidden
 				} else if errors.Is(err, dispatch.ErrInvalidDestAddr) {
 					status = http.StatusBadRequest
@@ -439,6 +444,7 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 	if g.dispatcher != nil {
 		g.dispatcher.ReloadRoutes(routes, providerCfgs)
 		g.dispatcher.ReloadFilter(filterEngine)
+		g.dispatcher.ReloadTenants(cfg)
 		g.dispatcher.SetCDRSink(newCDR)
 	}
 	oldCDR := g.cdrWriter

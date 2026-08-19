@@ -447,7 +447,7 @@ go run ./cmd/mysmpp -config configs/dr-flow-test.local.json
 | `dispatcher.claim_limit` | `16` | 每次从 outbox 取出的最大任务数。 | 通常设置为不小于单 worker 并发。 |
 | `dispatcher.poll_interval_ms` | `20` | worker 轮询 outbox 的间隔，单位毫秒。 | 越小延迟越低，但空转更多。 |
 | `dispatcher.pending_ttl` | `30m` | provider_id 到 gateway_id 的 DLR 映射保留时间。 | 必须大于 provider stub 的 `--dlr-delay`，否则 DLR 回调会 404。 |
-| `dispatcher.max_attempts` | `3` | 上游发送失败最大重试次数。 | provider stub 停掉或地址写错时会重试到这个次数后 failed。 |
+| `dispatcher.max_attempts` | `3` | 进入 `sending` 前可重试失败的最大次数。 | 结果不确定的发送进入 `uncertain`，不得自动重发。 |
 
 #### 6.3.4 `esmes`
 
@@ -974,7 +974,7 @@ mysmpp pending_size 暂时不归零。
 ```text
 mysmpp 日志出现 provider connection refused 或 timeout。
 outbox_depth 会增加。
-重试达到 max_attempts 后消息状态变 failed。
+发送前重试达到 max_attempts 后消息状态变 failed；已进入 `sending` 的模糊结果应为 `UNKNOWN`，且 outbox 为 `uncertain`。
 ```
 
 检查：
@@ -1054,8 +1054,10 @@ CREATE DATABASE mysmpp OWNER mysmpp;
 执行迁移：
 
 ```bash
-psql 'postgres://mysmpp:mysmpp_pg_pass@127.0.0.1:5432/mysmpp?sslmode=disable' \
-  -f migrations/001_init.up.sql
+for migration in migrations/*.up.sql; do
+  psql -v ON_ERROR_STOP=1 'postgres://mysmpp:mysmpp_pg_pass@127.0.0.1:5432/mysmpp?sslmode=disable' \
+    -f "$migration" || exit 1
+done
 ```
 
 配置：
@@ -1067,7 +1069,7 @@ psql 'postgres://mysmpp:mysmpp_pg_pass@127.0.0.1:5432/mysmpp?sslmode=disable' \
 }
 ```
 
-注意：当前 `gateway_id` 是进程内递增，重启后可能从 `g0000000001` 重新开始。生产前建议改为数据库序列或 UUID；测试时如果用 Postgres 重复跑，建议清空表或换库。
+`gateway_id` 号段由存储层的 `id_alloc` 持久化分配；测试重复执行时仍建议使用独立数据库或 schema，避免历史消息和额度计数影响结果。
 
 ## 16. Windows PowerShell 命令
 

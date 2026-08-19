@@ -23,10 +23,24 @@
     "pending_sweep_interval": "1m",
     "validate_dest_addr": true
   },
+  "tenants": [
+    {
+      "tenant_id": "customer-a",
+      "enabled": true,
+      "limits": {
+        "tps": 50,
+        "burst": 100,
+        "daily_segments": 100000,
+        "timezone": "Asia/Shanghai"
+      }
+    }
+  ],
   "esmes": [
     {
       "system_id": "esme1",
-      "password": "CHANGE_ME_BEFORE_DEPLOY"
+      "password": "CHANGE_ME_BEFORE_DEPLOY",
+      "tenant_id": "customer-a",
+      "enabled": true
     },
     {
       "system_id": "load-tester",
@@ -137,6 +151,7 @@
       "client_id": "demo-client",
       "token": "CHANGE_ME_BEFORE_DEPLOY",
       "enabled": true,
+      "tenant_id": "customer-a",
       "allowed_ips": ["127.0.0.1/32", "::1/128"]
     }
   ],

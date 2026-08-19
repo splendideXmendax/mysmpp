@@ -226,6 +226,30 @@ func TestAdminSectionSavePersistsProviders(t *testing.T) {
 	}
 }
 
+func TestAdminTenantSectionRoundTripsLimits(t *testing.T) {
+	cfgPath := t.TempDir() + "/config.json"
+	srv := New(newFakeGateway(), cfgPath, nil)
+	defer srv.Close()
+	cookie := loginCookie(t, srv)
+	csrf := csrfFromPage(t, srv, cookie, "/admin/tenants")
+	form := url.Values{
+		"_csrf":  {csrf},
+		"config": {`[{"tenant_id":"customer-a","limits":{"tps":25,"burst":50,"daily_segments":10000,"timezone":"Asia/Shanghai"}}]`},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/tenants", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/tenants" {
+		t.Fatalf("tenant save failed: status=%d location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	got := srv.gateway.Config().Tenants
+	if len(got) != 1 || got[0].TenantID != "customer-a" || got[0].Limits.DailySegments != 10000 {
+		t.Fatalf("tenant limits not applied: %+v", got)
+	}
+}
+
 func TestAdminConnectionsRenderSMPPStatus(t *testing.T) {
 	gateway := &fakeStatusGateway{
 		fakeGateway: newFakeGateway(),

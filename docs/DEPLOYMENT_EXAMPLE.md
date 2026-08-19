@@ -485,7 +485,9 @@ CREATE DATABASE mysmpp OWNER mysmpp;
 
 ```bash
 export MYSMPP_DSN='postgres://mysmpp:CHANGE_ME_STRONG_PASSWORD@127.0.0.1:5432/mysmpp?sslmode=disable'
-psql "$MYSMPP_DSN" -f migrations/001_init.up.sql
+for migration in migrations/*.up.sql; do
+  psql -v ON_ERROR_STOP=1 "$MYSMPP_DSN" -f "$migration" || exit 1
+done
 ```
 
 配置:

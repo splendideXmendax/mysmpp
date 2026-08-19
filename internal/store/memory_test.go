@@ -2,13 +2,137 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/splendideXmendax/mysmpp/internal/message"
 )
+
+func TestMemoryStorePendingUsesProviderCompositeKey(t *testing.T) {
+	st := NewMemory()
+	for _, provider := range []string{"provider-a", "provider-b"} {
+		if err := st.SavePending(context.Background(), Pending{
+			Provider: provider, ProviderID: "same-id", GatewayID: "g-" + provider,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, ok, err := st.GetPending(context.Background(), "provider-a", "same-id")
+	if err != nil || !ok || first.GatewayID != "g-provider-a" {
+		t.Fatalf("provider-a lookup failed: ok=%v pending=%+v err=%v", ok, first, err)
+	}
+	second, ok, err := st.GetPending(context.Background(), "provider-b", "same-id")
+	if err != nil || !ok || second.GatewayID != "g-provider-b" {
+		t.Fatalf("provider-b lookup failed: ok=%v pending=%+v err=%v", ok, second, err)
+	}
+}
+
+func TestMemoryStoreDailyQuotaIsExactUnderConcurrency(t *testing.T) {
+	st := NewMemory()
+	const attempts = 100
+	const limit = 25
+	var accepted int
+	var rejected int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("g-%03d", i)
+			msg := message.New(id, message.DirectionMT, "1069", "13800138000", "hello")
+			_, _, _, err := st.SubmitAtomic(context.Background(), msg, OutboxItem{
+				GatewayID: id, Provider: "mock", Payload: OutboxPayload{GatewayID: id, Provider: "mock"},
+			}, SubmitOptions{Quota: &DailyQuotaDebit{TenantID: "tenant-a", Date: "2026-08-19", Segments: 1, Limit: limit}})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				accepted++
+			case errors.Is(err, ErrQuotaExceeded):
+				rejected++
+			default:
+				t.Errorf("unexpected submit error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if accepted != limit || rejected != attempts-limit {
+		t.Fatalf("quota boundary violated: accepted=%d rejected=%d", accepted, rejected)
+	}
+	if got := st.quotaUsage[quotaKey{tenantID: "tenant-a", date: "2026-08-19"}]; got != limit {
+		t.Fatalf("used segments = %d, want %d", got, limit)
+	}
+}
+
+func TestMemoryStoreIdempotentDuplicateDoesNotDebitQuota(t *testing.T) {
+	st := NewMemory()
+	opts := SubmitOptions{
+		Idempotency: IdempotencyOptions{ClientID: "client-a", Key: "order-1", TTL: time.Hour},
+		Quota:       &DailyQuotaDebit{TenantID: "tenant-a", Date: "2026-08-19", Segments: 1, Limit: 1},
+	}
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	item := OutboxItem{GatewayID: "g1", Provider: "mock", Payload: OutboxPayload{GatewayID: "g1", Provider: "mock"}}
+	if _, _, duplicate, err := st.SubmitAtomic(context.Background(), msg, item, opts); err != nil || duplicate {
+		t.Fatalf("first submit failed: duplicate=%v err=%v", duplicate, err)
+	}
+	msg.ID = "g2"
+	item.GatewayID = "g2"
+	item.Payload.GatewayID = "g2"
+	if _, gatewayID, duplicate, err := st.SubmitAtomic(context.Background(), msg, item, opts); err != nil || !duplicate || gatewayID != "g1" {
+		t.Fatalf("duplicate did not return original: gateway=%q duplicate=%v err=%v", gatewayID, duplicate, err)
+	}
+	opts.Idempotency.Key = "order-2"
+	if _, _, _, err := st.SubmitAtomic(context.Background(), msg, item, opts); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("new work should exceed quota, got %v", err)
+	}
+}
+
+func TestFileStorePersistsQuotaUsage(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	opts := SubmitOptions{Quota: &DailyQuotaDebit{TenantID: "tenant-a", Date: "2026-08-19", Segments: 1, Limit: 1}}
+	if _, _, _, err := st.SubmitAtomic(context.Background(), msg, OutboxItem{
+		GatewayID: "g1", Provider: "mock", Payload: OutboxPayload{GatewayID: "g1", Provider: "mock"},
+	}, opts); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg.ID = "g2"
+	if _, _, _, err := reopened.SubmitAtomic(context.Background(), msg, OutboxItem{
+		GatewayID: "g2", Provider: "mock", Payload: OutboxPayload{GatewayID: "g2", Provider: "mock"},
+	}, opts); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("persisted quota was not enforced after reopen: %v", err)
+	}
+}
+
+func TestFileStoreRebuildsLegacyPendingKeys(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	snapshot := fmt.Sprintf(`{"pending":{"legacy-provider-id":{"ProviderID":"same-id","GatewayID":"g1","Provider":"mock-a","ExpiresAt":%q}}}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(snapshot), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, ok, err := st.GetPending(context.Background(), "mock-a", "same-id")
+	if err != nil || !ok || pending.GatewayID != "g1" {
+		t.Fatalf("legacy pending key was not rebuilt: ok=%v pending=%+v err=%v", ok, pending, err)
+	}
+}
 
 func TestMemoryStoreSweepsExpiredPending(t *testing.T) {
 	st := NewMemory()
@@ -20,7 +144,7 @@ func TestMemoryStoreSweepsExpiredPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok, err := st.GetPending(context.Background(), "p1"); err != nil {
+	if _, ok, err := st.GetPending(context.Background(), "", "p1"); err != nil {
 		t.Fatal(err)
 	} else if ok {
 		t.Fatal("expected expired pending record to be removed")
@@ -51,7 +175,7 @@ func TestMemoryStoreKeepsReadyDLRWhenExpired(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("expected ready DLR to be kept, swept %d", n)
 	}
-	if _, ok, err := st.GetPending(context.Background(), "p1"); err != nil {
+	if _, ok, err := st.GetPending(context.Background(), "", "p1"); err != nil {
 		t.Fatal(err)
 	} else if !ok {
 		t.Fatal("expected ready DLR to remain pending")
@@ -149,7 +273,7 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 			RawPayloadSet: true,
 			SARRefNum:     []byte{0x12, 0x34}, SARTotalSegments: []byte{0x02}, SARSegmentSeqnum: []byte{0x01}, SARSet: true,
 		},
-	}, "client-a", "m1", time.Hour)
+	}, SubmitOptions{Idempotency: IdempotencyOptions{ClientID: "client-a", Key: "m1", TTL: time.Hour}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +320,7 @@ func TestMemoryStoreSubmitAtomicStoresMessageOutboxAndIdempotency(t *testing.T) 
 		GatewayID: "g2",
 		Provider:  "mock",
 		Payload:   OutboxPayload{GatewayID: "g2", Provider: "mock", To: "13800138000", Text: "hello"},
-	}, "client-a", "m1", time.Hour)
+	}, SubmitOptions{Idempotency: IdempotencyOptions{ClientID: "client-a", Key: "m1", TTL: time.Hour}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +369,124 @@ func TestMemoryStoreRequeuesStaleOutbox(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ClaimedBy != "worker-b" {
 		t.Fatalf("expected requeued item to be claimable, got %+v", items)
+	}
+}
+
+func TestMemoryStoreDoesNotRequeueSendingOrUncertainOutbox(t *testing.T) {
+	st := NewMemory()
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.EnqueueOutbox(context.Background(), OutboxItem{
+		GatewayID: "g1", Provider: "mock", Payload: OutboxPayload{GatewayID: "g1", Provider: "mock"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.ClaimOutbox(context.Background(), "worker-a", 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("claim failed: items=%+v err=%v", items, err)
+	}
+	if err := st.MarkOutboxSending(context.Background(), id, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.RequeueStaleOutbox(context.Background(), time.Now().Add(time.Hour), 10); err != nil || n != 0 {
+		t.Fatalf("sending outbox was requeued: count=%d err=%v", n, err)
+	}
+	if err := st.FailOutbox(context.Background(), id, "ambiguous", time.Now().Add(time.Second)); err == nil {
+		t.Fatal("sending outbox accepted a retry transition")
+	}
+	if err := st.MarkOutboxUncertain(context.Background(), id, "worker-a", "ambiguous"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.RequeueStaleOutbox(context.Background(), time.Now().Add(time.Hour), 10); err != nil || n != 0 {
+		t.Fatalf("uncertain outbox was requeued: count=%d err=%v", n, err)
+	}
+	if depth, _ := st.OutboxDepth(context.Background(), "uncertain"); depth != 1 {
+		t.Fatalf("uncertain depth=%d want=1", depth)
+	}
+	stored, ok, err := st.GetMessage(context.Background(), "g1")
+	if err != nil || !ok || stored.State != "UNKNOWN" {
+		t.Fatalf("unexpected message after uncertain transition: ok=%v msg=%+v err=%v", ok, stored, err)
+	}
+}
+
+func TestMemoryStoreCompletesOutboxAndPendingAtomically(t *testing.T) {
+	st := NewMemory()
+	msg := message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.EnqueueOutbox(context.Background(), OutboxItem{
+		GatewayID: "g1", Provider: "mock", Payload: OutboxPayload{GatewayID: "g1", Provider: "mock", RawPayload: []byte("secret"), RawPayloadSet: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items, err := st.ClaimOutbox(context.Background(), "worker-a", 1); err != nil || len(items) != 1 {
+		t.Fatalf("claim failed: items=%+v err=%v", items, err)
+	}
+	if err := st.MarkOutboxSending(context.Background(), id, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	pending := []Pending{
+		{Provider: "mock", ProviderID: "p1", GatewayID: "g1", SegmentIndex: 1, SegmentCount: 2, ExpiresAt: time.Now().Add(time.Hour)},
+		{Provider: "mock", ProviderID: "p2", GatewayID: "g1", SegmentIndex: 2, SegmentCount: 2, ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	if err := st.CompleteOutboxSend(context.Background(), id, "worker-a", pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteOutboxSend(context.Background(), id, "worker-a", pending); err != nil {
+		t.Fatalf("completion retry must be idempotent: %v", err)
+	}
+	stored, ok, err := st.GetMessage(context.Background(), "g1")
+	if err != nil || !ok || stored.State != "sent" || stored.ProviderID != "p1" {
+		t.Fatalf("unexpected completed message: ok=%v msg=%+v err=%v", ok, stored, err)
+	}
+	if rows, err := st.ListPendingByGatewayID(context.Background(), "g1"); err != nil || len(rows) != 2 {
+		t.Fatalf("pending rows=%+v err=%v", rows, err)
+	}
+	if depth, _ := st.OutboxDepth(context.Background(), "done"); depth != 1 {
+		t.Fatalf("done depth=%d want=1", depth)
+	}
+	if st.outbox[id].Payload.RawPayload != nil || st.outbox[id].Payload.RawPayloadSet {
+		t.Fatal("completed outbox retained raw payload")
+	}
+}
+
+func TestFileStoreKeepsSendingOutboxFailClosedAfterRestart(t *testing.T) {
+	path := t.TempDir() + "/store.json"
+	st, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveMessage(context.Background(), message.New("g1", message.DirectionMT, "1069", "13800138000", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.EnqueueOutbox(context.Background(), OutboxItem{GatewayID: "g1", Provider: "mock", Payload: OutboxPayload{GatewayID: "g1", Provider: "mock"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items, err := st.ClaimOutbox(context.Background(), "worker-a", 1); err != nil || len(items) != 1 {
+		t.Fatalf("claim failed: items=%+v err=%v", items, err)
+	}
+	if err := st.MarkOutboxSending(context.Background(), id, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if depth, _ := reopened.OutboxDepth(context.Background(), "sending"); depth != 1 {
+		t.Fatalf("sending depth after restart=%d want=1", depth)
+	}
+	if n, err := reopened.RequeueStaleOutbox(context.Background(), time.Now().Add(time.Hour), 10); err != nil || n != 0 {
+		t.Fatalf("sending outbox was recovered after restart: count=%d err=%v", n, err)
+	}
+	if items, err := reopened.ClaimOutbox(context.Background(), "worker-b", 1); err != nil || len(items) != 0 {
+		t.Fatalf("sending outbox became claimable after restart: items=%+v err=%v", items, err)
 	}
 }
 
@@ -299,7 +541,7 @@ func TestFileStorePersistsMessagesOutboxPendingAndIdempotency(t *testing.T) {
 	} else if !ok || got.Text != "hello" {
 		t.Fatalf("message was not persisted: ok=%v msg=%+v", ok, got)
 	}
-	if _, ok, err := reopened.GetPending(context.Background(), "p1"); err != nil {
+	if _, ok, err := reopened.GetPending(context.Background(), "mock", "p1"); err != nil {
 		t.Fatal(err)
 	} else if !ok {
 		t.Fatal("pending record was not persisted")

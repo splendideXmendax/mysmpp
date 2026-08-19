@@ -28,6 +28,7 @@ type fileSnapshot struct {
 	NextOutbox  int64                   `json:"next_outbox"`
 	GatewaySeq  uint64                  `json:"gateway_seq"`
 	Idempotency []fileIdempotencyRecord `json:"idempotency"`
+	QuotaUsage  []fileQuotaUsage        `json:"quota_usage,omitempty"`
 	SavedAt     time.Time               `json:"saved_at"`
 }
 
@@ -36,6 +37,12 @@ type fileIdempotencyRecord struct {
 	Key       string    `json:"key"`
 	GatewayID string    `json:"gateway_id"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type fileQuotaUsage struct {
+	TenantID     string `json:"tenant_id"`
+	Date         string `json:"date"`
+	UsedSegments int    `json:"used_segments"`
 }
 
 func NewFile(path string) (*FileStore, error) {
@@ -70,8 +77,9 @@ func (s *FileStore) load() error {
 		s.messageByID[msg.ID] = i
 	}
 	s.pending = map[string]Pending{}
-	for k, v := range snap.Pending {
-		s.pending[k] = v
+	for _, v := range snap.Pending {
+		v = normalizePending(v)
+		s.pending[pendingKey(v.Provider, v.ProviderID)] = v
 	}
 	s.outbox = map[int64]OutboxItem{}
 	for id, item := range snap.Outbox {
@@ -101,6 +109,10 @@ func (s *FileStore) load() error {
 			expiresAt: rec.ExpiresAt,
 		}
 	}
+	s.quotaUsage = map[quotaKey]int{}
+	for _, rec := range snap.QuotaUsage {
+		s.quotaUsage[quotaKey{tenantID: rec.TenantID, date: rec.Date}] = rec.UsedSegments
+	}
 	return nil
 }
 
@@ -115,6 +127,7 @@ func (s *FileStore) persist() error {
 		NextOutbox:  s.nextOutbox,
 		GatewaySeq:  s.gatewaySeq,
 		Idempotency: make([]fileIdempotencyRecord, 0, len(s.idempotency)),
+		QuotaUsage:  make([]fileQuotaUsage, 0, len(s.quotaUsage)),
 		SavedAt:     time.Now().UTC(),
 	}
 	for i, msg := range s.messages {
@@ -132,6 +145,11 @@ func (s *FileStore) persist() error {
 			Key:       key.key,
 			GatewayID: rec.gatewayID,
 			ExpiresAt: rec.expiresAt,
+		})
+	}
+	for key, used := range s.quotaUsage {
+		snap.QuotaUsage = append(snap.QuotaUsage, fileQuotaUsage{
+			TenantID: key.tenantID, Date: key.date, UsedSegments: used,
 		})
 	}
 	s.mu.RUnlock()
@@ -199,15 +217,36 @@ func (s *FileStore) SavePending(ctx context.Context, p Pending) error {
 	return s.persist()
 }
 
-func (s *FileStore) MarkDLRReady(ctx context.Context, providerID, state string, errCode int, doneAt time.Time) error {
-	if err := s.MemoryStore.MarkDLRReady(ctx, providerID, state, errCode, doneAt); err != nil {
+func (s *FileStore) UpdatePendingDLR(ctx context.Context, provider, providerID, state string, errCode int, doneAt time.Time) error {
+	if err := s.MemoryStore.UpdatePendingDLR(ctx, provider, providerID, state, errCode, doneAt); err != nil {
 		return err
 	}
 	return s.persist()
 }
 
-func (s *FileStore) DeletePending(ctx context.Context, providerID string) error {
-	if err := s.MemoryStore.DeletePending(ctx, providerID); err != nil {
+func (s *FileStore) MarkDLRReady(ctx context.Context, provider, providerID, state string, errCode int, doneAt time.Time) error {
+	if err := s.MemoryStore.MarkDLRReady(ctx, provider, providerID, state, errCode, doneAt); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
+func (s *FileStore) MarkDLRDelivered(ctx context.Context, provider, providerID string) error {
+	if err := s.MemoryStore.MarkDLRDelivered(ctx, provider, providerID); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
+func (s *FileStore) DeletePending(ctx context.Context, provider, providerID string) error {
+	if err := s.MemoryStore.DeletePending(ctx, provider, providerID); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
+func (s *FileStore) DeletePendingByGatewayID(ctx context.Context, gatewayID string) error {
+	if err := s.MemoryStore.DeletePendingByGatewayID(ctx, gatewayID); err != nil {
 		return err
 	}
 	return s.persist()
@@ -245,6 +284,27 @@ func (s *FileStore) ClaimOutbox(ctx context.Context, workerID string, limit int)
 	return items, s.persist()
 }
 
+func (s *FileStore) MarkOutboxSending(ctx context.Context, id int64, workerID string) error {
+	if err := s.MemoryStore.MarkOutboxSending(ctx, id, workerID); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
+func (s *FileStore) CompleteOutboxSend(ctx context.Context, id int64, workerID string, pending []Pending) error {
+	if err := s.MemoryStore.CompleteOutboxSend(ctx, id, workerID, pending); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
+func (s *FileStore) MarkOutboxUncertain(ctx context.Context, id int64, workerID, errMsg string) error {
+	if err := s.MemoryStore.MarkOutboxUncertain(ctx, id, workerID, errMsg); err != nil {
+		return err
+	}
+	return s.persist()
+}
+
 func (s *FileStore) RequeueStaleOutbox(ctx context.Context, before time.Time, limit int) (int, error) {
 	n, err := s.MemoryStore.RequeueStaleOutbox(ctx, before, limit)
 	if err != nil || n == 0 {
@@ -274,8 +334,8 @@ func (s *FileStore) SaveIdempotency(ctx context.Context, clientID, key, gatewayI
 	return s.persist()
 }
 
-func (s *FileStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, string, bool, error) {
-	id, gatewayID, duplicate, err := s.MemoryStore.SubmitAtomic(ctx, msg, item, clientID, key, ttl)
+func (s *FileStore) SubmitAtomic(ctx context.Context, msg message.Message, item OutboxItem, opts SubmitOptions) (int64, string, bool, error) {
+	id, gatewayID, duplicate, err := s.MemoryStore.SubmitAtomic(ctx, msg, item, opts)
 	if err != nil || duplicate {
 		return id, gatewayID, duplicate, err
 	}

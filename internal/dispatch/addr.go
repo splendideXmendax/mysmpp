@@ -5,11 +5,15 @@ import (
 	"strings"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/store"
 )
 
 var ErrInvalidDestAddr = errors.New("invalid destination address")
 var ErrBlocked = errors.New("message blocked by content filter")
 var ErrNoRoute = errors.New("no route matched")
+var ErrTenantDisabled = errors.New("tenant is disabled")
+var ErrRateExceeded = errors.New("tenant rate limit exceeded")
+var ErrQuotaExceeded = store.ErrQuotaExceeded
 
 type destAddrOptions struct {
 	AllowShortCode    bool

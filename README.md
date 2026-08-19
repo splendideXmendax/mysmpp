@@ -38,7 +38,7 @@ SMPP ESME / HTTP client a
 - 存储: memory、file、Postgres 三种 driver。Postgres outbox 使用 `FOR UPDATE SKIP LOCKED` 并发 claim。
 - Dispatcher: 可配置 worker、单 worker 并发、claim 数量、轮询间隔、pending TTL、最大重试次数和 stale claim 回收。
 - 管理后台: `/admin/`，用户名密码登录、登录限流、CSRF、防止占位符凭据上线、运行时热更新并写回配置。
-- 可靠性辅助: outbox 重试、指数退避、幂等提交、pending DLR 补投、简单风控、健康检查。
+- 可靠性辅助: outbox fail-closed 发送状态、发送前重试、幂等提交、pending DLR 补投、简单风控、健康检查。
 
 ## 当前边界
 

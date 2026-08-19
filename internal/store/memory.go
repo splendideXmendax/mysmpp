@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -19,22 +20,29 @@ type Store interface {
 	ListMessages(context.Context) ([]message.Message, error)
 	ListMessagesPage(context.Context, ListOptions) ([]message.Message, error)
 	SavePending(context.Context, Pending) error
-	GetPending(context.Context, string) (Pending, bool, error)
-	MarkDLRReady(context.Context, string, string, int, time.Time) error
+	GetPending(context.Context, string, string) (Pending, bool, error)
+	ListPendingByGatewayID(context.Context, string) ([]Pending, error)
+	UpdatePendingDLR(context.Context, string, string, string, int, time.Time) error
+	MarkDLRReady(context.Context, string, string, string, int, time.Time) error
+	MarkDLRDelivered(context.Context, string, string) error
 	ListReadyDLR(context.Context, string, int) ([]Pending, error)
-	DeletePending(context.Context, string) error
+	DeletePending(context.Context, string, string) error
+	DeletePendingByGatewayID(context.Context, string) error
 	SweepExpiredPending(context.Context, time.Time) (int, error)
 	PendingSize(context.Context) (int, error)
 	ReserveGatewayIDRange(context.Context, uint64) (uint64, uint64, error)
 	EnqueueOutbox(context.Context, OutboxItem) (int64, error)
 	ClaimOutbox(context.Context, string, int) ([]OutboxItem, error)
+	MarkOutboxSending(context.Context, int64, string) error
+	CompleteOutboxSend(context.Context, int64, string, []Pending) error
+	MarkOutboxUncertain(context.Context, int64, string, string) error
 	RequeueStaleOutbox(context.Context, time.Time, int) (int, error)
 	AckOutbox(context.Context, int64) error
 	FailOutbox(context.Context, int64, string, time.Time) error
 	OutboxDepth(context.Context, string) (int, error)
 	CheckIdempotency(context.Context, string, string) (string, bool, error)
 	SaveIdempotency(context.Context, string, string, string, time.Duration) error
-	SubmitAtomic(context.Context, message.Message, OutboxItem, string, string, time.Duration) (int64, string, bool, error)
+	SubmitAtomic(context.Context, message.Message, OutboxItem, SubmitOptions) (int64, string, bool, error)
 }
 
 type ListOptions struct {
@@ -46,6 +54,11 @@ type ListOptions struct {
 type Pending struct {
 	ProviderID         string
 	GatewayID          string
+	TenantID           string
+	AccountID          string
+	ClientMsgID        string
+	SegmentIndex       int
+	SegmentCount       int
 	SourceKind         string
 	SourceSession      string
 	SourceSystem       string
@@ -61,6 +74,7 @@ type Pending struct {
 	ReceivedAt         time.Time
 	ExpiresAt          time.Time
 	DLRReady           bool
+	DLRDelivered       bool
 	DLRState           string
 	DLRErrorCode       int
 	DLRDoneAt          time.Time
@@ -68,6 +82,9 @@ type Pending struct {
 
 type OutboxPayload struct {
 	GatewayID          string            `json:"gateway_id"`
+	TenantID           string            `json:"tenant_id,omitempty"`
+	AccountID          string            `json:"account_id,omitempty"`
+	ClientMsgID        string            `json:"client_msg_id,omitempty"`
 	Provider           string            `json:"provider"`
 	Route              string            `json:"route"`
 	From               string            `json:"from"`
@@ -108,6 +125,25 @@ type OutboxItem struct {
 }
 
 var ErrNotFound = errors.New("not found")
+var ErrQuotaExceeded = errors.New("daily segment quota exceeded")
+
+type IdempotencyOptions struct {
+	ClientID string
+	Key      string
+	TTL      time.Duration
+}
+
+type DailyQuotaDebit struct {
+	TenantID string
+	Date     string
+	Segments int
+	Limit    int
+}
+
+type SubmitOptions struct {
+	Idempotency IdempotencyOptions
+	Quota       *DailyQuotaDebit
+}
 
 type MemoryStore struct {
 	mu          sync.RWMutex
@@ -117,6 +153,7 @@ type MemoryStore struct {
 	outbox      map[int64]OutboxItem
 	nextOutbox  int64
 	idempotency map[idempotencyKey]idempotencyRecord
+	quotaUsage  map[quotaKey]int
 	gatewaySeq  uint64
 	lastSweep   time.Time
 	maxMessages int
@@ -132,12 +169,18 @@ type idempotencyRecord struct {
 	expiresAt time.Time
 }
 
+type quotaKey struct {
+	tenantID string
+	date     string
+}
+
 func NewMemory() *MemoryStore {
 	return &MemoryStore{
 		messageByID: map[string]int{},
 		pending:     map[string]Pending{},
 		outbox:      map[int64]OutboxItem{},
 		idempotency: map[idempotencyKey]idempotencyRecord{},
+		quotaUsage:  map[quotaKey]int{},
 		maxMessages: 10000,
 	}
 }
@@ -242,22 +285,55 @@ func (s *MemoryStore) SavePending(_ context.Context, p Pending) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(time.Now().UTC())
-	s.pending[p.ProviderID] = p
+	p = normalizePending(p)
+	s.pending[pendingKey(p.Provider, p.ProviderID)] = p
 	return nil
 }
 
-func (s *MemoryStore) MarkDLRReady(_ context.Context, providerID, state string, errCode int, doneAt time.Time) error {
+func (s *MemoryStore) UpdatePendingDLR(_ context.Context, provider, providerID, state string, errCode int, doneAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.pending[providerID]
+	key := pendingKey(provider, providerID)
+	p, ok := s.pending[key]
+	if !ok {
+		return ErrNotFound
+	}
+	p.DLRDelivered = false
+	p.DLRState = state
+	p.DLRErrorCode = errCode
+	p.DLRDoneAt = doneAt
+	s.pending[key] = p
+	return nil
+}
+
+func (s *MemoryStore) MarkDLRReady(_ context.Context, provider, providerID, state string, errCode int, doneAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := pendingKey(provider, providerID)
+	p, ok := s.pending[key]
 	if !ok {
 		return ErrNotFound
 	}
 	p.DLRReady = true
+	p.DLRDelivered = false
 	p.DLRState = state
 	p.DLRErrorCode = errCode
 	p.DLRDoneAt = doneAt
-	s.pending[providerID] = p
+	s.pending[key] = p
+	return nil
+}
+
+func (s *MemoryStore) MarkDLRDelivered(_ context.Context, provider, providerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := pendingKey(provider, providerID)
+	p, ok := s.pending[key]
+	if !ok {
+		return ErrNotFound
+	}
+	p.DLRReady = false
+	p.DLRDelivered = true
+	s.pending[key] = p
 	return nil
 }
 
@@ -285,23 +361,57 @@ func (s *MemoryStore) ListReadyDLR(_ context.Context, systemID string, limit int
 	return out, nil
 }
 
-func (s *MemoryStore) GetPending(_ context.Context, providerID string) (Pending, bool, error) {
+func (s *MemoryStore) GetPending(_ context.Context, provider, providerID string) (Pending, bool, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
-	p, ok := s.pending[providerID]
+	key := pendingKey(provider, providerID)
+	p, ok := s.pending[key]
 	if ok && !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
-		delete(s.pending, providerID)
+		delete(s.pending, key)
 		return Pending{}, false, nil
 	}
 	return p, ok, nil
 }
 
-func (s *MemoryStore) DeletePending(_ context.Context, providerID string) error {
+func (s *MemoryStore) ListPendingByGatewayID(_ context.Context, gatewayID string) ([]Pending, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.pending, providerID)
+	s.sweepLocked(time.Now().UTC())
+	out := make([]Pending, 0)
+	for _, p := range s.pending {
+		if p.GatewayID == gatewayID {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SegmentIndex == out[j].SegmentIndex {
+			if out[i].Provider == out[j].Provider {
+				return out[i].ProviderID < out[j].ProviderID
+			}
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].SegmentIndex < out[j].SegmentIndex
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) DeletePending(_ context.Context, provider, providerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, pendingKey(provider, providerID))
+	return nil
+}
+
+func (s *MemoryStore) DeletePendingByGatewayID(_ context.Context, gatewayID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, p := range s.pending {
+		if p.GatewayID == gatewayID {
+			delete(s.pending, key)
+		}
+	}
 	return nil
 }
 
@@ -392,6 +502,86 @@ func (s *MemoryStore) ClaimOutbox(_ context.Context, workerID string, limit int)
 	return out, nil
 }
 
+func (s *MemoryStore) MarkOutboxSending(_ context.Context, id int64, workerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if item.State == "sending" && item.ClaimedBy == workerID {
+		return nil
+	}
+	if item.State != "claimed" || item.ClaimedBy != workerID {
+		return fmt.Errorf("outbox %d is not claimed by %q", id, workerID)
+	}
+	item.State = "sending"
+	s.outbox[id] = item
+	return nil
+}
+
+func (s *MemoryStore) CompleteOutboxSend(_ context.Context, id int64, workerID string, pending []Pending) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if item.State == "done" {
+		return nil
+	}
+	if item.State != "sending" || item.ClaimedBy != workerID {
+		return fmt.Errorf("outbox %d is not sending for worker %q", id, workerID)
+	}
+	pending, err := validateOutboxCompletion(item, pending)
+	if err != nil {
+		return err
+	}
+	idx, ok := s.messageByID[item.GatewayID]
+	if !ok {
+		return ErrNotFound
+	}
+
+	msg := s.messages[idx]
+	msg.ProviderID = pending[0].ProviderID
+	msg.State = "sent"
+	msg.SentAt = time.Now().UTC()
+	s.messages[idx] = msg
+	for _, rec := range pending {
+		s.pending[pendingKey(rec.Provider, rec.ProviderID)] = rec
+	}
+	item.State = "done"
+	scrubOutboxPayload(&item.Payload)
+	s.outbox[id] = item
+	return nil
+}
+
+func (s *MemoryStore) MarkOutboxUncertain(_ context.Context, id int64, workerID, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if item.State != "sending" && item.State != "uncertain" {
+		return fmt.Errorf("outbox %d is not sending", id)
+	}
+	if item.ClaimedBy != workerID {
+		return fmt.Errorf("outbox %d is not owned by worker %q", id, workerID)
+	}
+	item.State = "uncertain"
+	item.LastError = errMsg
+	s.outbox[id] = item
+	if idx, ok := s.messageByID[item.GatewayID]; ok {
+		msg := s.messages[idx]
+		msg.State = "UNKNOWN"
+		msg.ErrorCode = 1
+		msg.DoneAt = time.Now().UTC()
+		s.messages[idx] = msg
+	}
+	return nil
+}
+
 func (s *MemoryStore) RequeueStaleOutbox(_ context.Context, before time.Time, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 1000
@@ -425,14 +615,11 @@ func (s *MemoryStore) AckOutbox(_ context.Context, id int64) error {
 	if !ok {
 		return ErrNotFound
 	}
+	if item.State != "claimed" {
+		return fmt.Errorf("outbox %d is not claimed", id)
+	}
 	item.State = "done"
-	item.Payload.UDH = nil
-	item.Payload.RawPayload = nil
-	item.Payload.RawPayloadSet = false
-	item.Payload.SARRefNum = nil
-	item.Payload.SARTotalSegments = nil
-	item.Payload.SARSegmentSeqnum = nil
-	item.Payload.SARSet = false
+	scrubOutboxPayload(&item.Payload)
 	s.outbox[id] = item
 	return nil
 }
@@ -446,8 +633,14 @@ func (s *MemoryStore) FailOutbox(_ context.Context, id int64, errMsg string, nex
 	}
 	item.LastError = errMsg
 	if nextRetryAt.IsZero() || item.Attempt >= item.MaxAttempts {
+		if item.State != "claimed" && item.State != "sending" {
+			return fmt.Errorf("outbox %d cannot fail from state %q", id, item.State)
+		}
 		item.State = "failed"
 	} else {
+		if item.State != "claimed" {
+			return fmt.Errorf("outbox %d cannot retry from state %q", id, item.State)
+		}
 		item.State = "pending"
 		item.NextRetryAt = nextRetryAt
 		item.ClaimedBy = ""
@@ -506,8 +699,11 @@ func (s *MemoryStore) SaveIdempotency(_ context.Context, clientID, key, gatewayI
 	return nil
 }
 
-func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item OutboxItem, clientID, key string, ttl time.Duration) (int64, string, bool, error) {
+func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item OutboxItem, opts SubmitOptions) (int64, string, bool, error) {
 	now := time.Now().UTC()
+	clientID := opts.Idempotency.ClientID
+	key := opts.Idempotency.Key
+	ttl := opts.Idempotency.TTL
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
@@ -520,7 +716,21 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 		if rec, ok := s.idempotency[k]; ok && rec.expiresAt.After(now) {
 			return 0, rec.gatewayID, true, nil
 		}
-		s.idempotency[k] = idempotencyRecord{
+	}
+
+	if quota := opts.Quota; quota != nil && quota.Limit > 0 {
+		if err := validateDailyQuotaDebit(quota); err != nil {
+			return 0, "", false, err
+		}
+		usageKey := quotaKey{tenantID: quota.TenantID, date: quota.Date}
+		if quota.Segments > quota.Limit || s.quotaUsage[usageKey] > quota.Limit-quota.Segments {
+			return 0, "", false, ErrQuotaExceeded
+		}
+		s.quotaUsage[usageKey] += quota.Segments
+	}
+
+	if clientID != "" && key != "" {
+		s.idempotency[idempotencyKey{clientID: clientID, key: key}] = idempotencyRecord{
 			gatewayID: msg.ID,
 			expiresAt: now.Add(ttl),
 		}
@@ -553,6 +763,58 @@ func (s *MemoryStore) SubmitAtomic(_ context.Context, msg message.Message, item 
 	s.outbox[item.ID] = item
 
 	return item.ID, msg.ID, false, nil
+}
+
+func pendingKey(provider, providerID string) string {
+	return provider + "\x00" + providerID
+}
+
+func normalizePending(p Pending) Pending {
+	if p.SegmentIndex <= 0 {
+		p.SegmentIndex = 1
+	}
+	if p.SegmentCount <= 0 {
+		p.SegmentCount = 1
+	}
+	return p
+}
+
+func validateOutboxCompletion(item OutboxItem, pending []Pending) ([]Pending, error) {
+	if len(pending) == 0 {
+		return nil, errors.New("outbox completion requires at least one pending record")
+	}
+	out := make([]Pending, len(pending))
+	for i, rec := range pending {
+		rec = normalizePending(rec)
+		if rec.ProviderID == "" {
+			return nil, fmt.Errorf("outbox completion pending record %d has empty provider id", i)
+		}
+		if rec.GatewayID != item.GatewayID || rec.Provider != item.Provider {
+			return nil, fmt.Errorf("outbox completion pending record %d does not match outbox", i)
+		}
+		out[i] = rec
+	}
+	return out, nil
+}
+
+func scrubOutboxPayload(payload *OutboxPayload) {
+	payload.UDH = nil
+	payload.RawPayload = nil
+	payload.RawPayloadSet = false
+	payload.SARRefNum = nil
+	payload.SARTotalSegments = nil
+	payload.SARSegmentSeqnum = nil
+	payload.SARSet = false
+}
+
+func validateDailyQuotaDebit(quota *DailyQuotaDebit) error {
+	if quota == nil || quota.TenantID == "" || quota.Segments <= 0 || quota.Limit <= 0 {
+		return errors.New("invalid daily quota debit")
+	}
+	if _, err := time.Parse(time.DateOnly, quota.Date); err != nil {
+		return fmt.Errorf("invalid daily quota date: %w", err)
+	}
+	return nil
 }
 
 func (s *MemoryStore) sweepLocked(now time.Time) {

@@ -27,6 +27,9 @@ const (
 type Message struct {
 	ID          string
 	ProviderID  string
+	TenantID    string
+	AccountID   string
+	ClientMsgID string
 	Direction   Direction
 	From        string
 	To          string

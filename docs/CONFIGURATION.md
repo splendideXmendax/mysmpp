@@ -116,7 +116,7 @@ Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到
 | `claim_limit` | 每次最多 claim 的 outbox 数量 | `20` |
 | `poll_interval_ms` | worker 轮询间隔 | `20` |
 | `pending_ttl` | provider_id 到 gateway_id 的 DLR 映射保留时间 | `30m` |
-| `max_attempts` | 上游发送失败最大尝试次数 | `5` |
+| `max_attempts` | 进入 `sending` 前可重试失败的最大尝试次数 | `5` |
 
 总上游并发:
 
@@ -142,13 +142,13 @@ Additional dispatcher fields:
 
 | Field | Default | Description |
 |---|---:|---|
-| `claim_timeout` | `60s` | Stale `claimed` outbox reclaim threshold. If a worker crashes after claim but before ack/fail, the row is moved back to `pending` after this duration. |
+| `claim_timeout` | `60s` | Stale `claimed` outbox reclaim threshold. Only work that has not entered `sending` is moved back to `pending`. |
 | `pending_sweep_interval` | `1m` | Background interval for deleting expired pending DLR mappings. |
 | `validate_dest_addr` | `true` | Validate destination address before route match. Invalid E.164 or unassigned country code returns SMPP `ESME_RINVDSTADR` and does not enter outbox. |
 
 Destination validation is intentionally minimal: optional leading `+`, digits only, total E.164 length `4..15`, and an assigned 1-3 digit country calling code. It does not validate each country's full national numbering plan.
 
-`claim_timeout` must be greater than `ceil(claim_limit / per_worker_concurrency) * max_provider_response_timeout`. mysmpp validates this at startup/config save because stale-claim recovery can otherwise requeue slow but still active work.
+`claim_timeout` only controls work that has not entered `sending`. A short value may cause harmless claim churn under a saturated worker pool, but Store ownership checks prevent two workers from entering `sending` for the same row.
 
 ## esmes
 
@@ -158,7 +158,9 @@ Destination validation is intentionally minimal: optional leading `+`, digits on
 [
   {
     "system_id": "dev-esme",
-    "password": "esmepw1"
+    "password": "esmepw1",
+    "tenant_id": "customer-a",
+    "enabled": true
   }
 ]
 ```
@@ -169,8 +171,40 @@ Destination validation is intentionally minimal: optional leading `+`, digits on
 |---|---|
 | `system_id` | ESME bind 用户名，必须唯一 |
 | `password` | ESME bind 密码 |
+| `tenant_id` | 可选，关联 `tenants[].tenant_id`；省略时该 ESME 是独立兼容租户 |
+| `enabled` | 可选；省略表示启用，显式 `false` 禁止 bind |
 
 生产环境不要使用示例密码。配置校验会拒绝 `CHANGE_ME_BEFORE_DEPLOY` 占位符。
+
+## tenants
+
+`tenants` 定义主租户。一个主租户可同时关联多个 HTTP client 和 SMPP ESME，两种协议共同使用 TPS 和单日短信分片额度。
+
+```json
+[
+  {
+    "tenant_id": "customer-a",
+    "enabled": true,
+    "limits": {
+      "tps": 50,
+      "burst": 100,
+      "daily_segments": 100000,
+      "timezone": "Asia/Shanghai"
+    }
+  }
+]
+```
+
+| 字段 | 说明 |
+|---|---|
+| `tenant_id` | 主租户唯一 ID，最长 64 字节 |
+| `enabled` | 可选；省略表示启用，`false` 时拒绝该租户的新提交 |
+| `limits.tps` | 每实例令牌桶速率；`0` 表示不限制 |
+| `limits.burst` | 瞬时突发容量；`tps>0` 且省略时等于 `tps` |
+| `limits.daily_segments` | 按实际短信分片计数的自然日硬上限；`0` 表示不限制 |
+| `limits.timezone` | 自然日时区，IANA 名称；省略时使用 `UTC` |
+
+日额度在 `SubmitAtomic` 内与幂等键、消息、outbox 原子写入。重复 `client_msg_id` 不重复扣减。消息一旦受理入队即按网关编码器计算的理论分片数计入额度，后续上游异步失败不会返还，以免通过失败重试绕过硬上限。PostgreSQL 使用 `(tenant_id, quota_date)` 单行原子计数；file 存储会把计数写入快照；memory 存储重启会清零计数。TPS 是进程内限制，多实例部署时总 TPS 约等于配置值乘以实例数。
 
 ## routes
 
@@ -380,11 +414,11 @@ SMPP 字段:
 | `validity_period` | 空 | submit_sm validity_period |
 | `registered_delivery` | `-1` | `-1` 透传下游；`0` 强制关闭；`1` 强制请求 DLR |
 | `gsm7_packing` | `unpacked` | `unpacked` 或 `packed` |
-| `long_message` | `udh` | `udh`、`payload` 或 `sar` |
+| `long_message` | `udh` | `udh`、`payload` 或 `sar`。`payload` 使用 `message_payload` 只发一个 PDU，但日额度仍按受理时的理论分片数扣减，因此是保守多扣。 |
 | `message_id_resp_format` | `auto` | `submit_sm_resp` message_id 格式:`auto`、`dec`、`hex` |
 | `message_id_dlr_format` | `auto` | DLR receipt message_id 格式:`auto`、`dec`、`hex` |
 | `dlr_id_source` | `auto` | DLR ID 来源:`auto`、`tlv`、`text` |
-| `retry_on_timeout` | `false` | `submit_sm_resp` 超时时是否允许重试；开启可能导致重复下发 |
+| `retry_on_timeout` | `false` | 兼容字段。严格 fail-closed 出站流程不会在 `sending` 后自动重发；开启时 timeout 记录为 `uncertain`，关闭时按终态失败记录。 |
 | `tls` | `false` | 预留字段，当前未实现，配置为 `true` 会被拒绝 |
 
 建议 SMPP 中继部署把 `dispatcher.pending_ttl` 调到 `48h`，避免上游 DLR 晚到时 pending 映射已过期。
@@ -527,6 +561,7 @@ DLR 规则要求:
     "client_id": "demo-client",
     "token": "replace-with-token",
     "enabled": true,
+    "tenant_id": "customer-a",
     "allowed_ips": ["127.0.0.1/32", "::1/128"]
   }
 ]
@@ -539,6 +574,7 @@ DLR 规则要求:
 | `client_id` | HTTP 客户端 ID |
 | `token` | 请求头 `X-Token` |
 | `enabled` | 是否启用 |
+| `tenant_id` | 可选，关联 `tenants[].tenant_id`；省略时该 HTTP client 是独立兼容租户 |
 | `allowed_ips` | 允许访问的客户端 IP/CIDR；为空表示不限制 |
 
 请求示例:
@@ -623,7 +659,7 @@ file 模式:
 Postgres 模式:
 
 1. 创建数据库和用户。
-2. 按编号顺序执行 `migrations/001~004_*.up.sql`。
+2. 按编号顺序执行全部 `migrations/*.up.sql`（当前到 `007`）。
 3. 配置 `storage.driver=postgres` 和 DSN。
 4. 确保连接池足够，例如 `pool_max_conns=50`。
 

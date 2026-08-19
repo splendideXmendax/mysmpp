@@ -1,12 +1,31 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/splendideXmendax/mysmpp/internal/config"
+	"github.com/splendideXmendax/mysmpp/internal/dispatch"
 	"github.com/splendideXmendax/mysmpp/internal/smpp"
 	"github.com/splendideXmendax/mysmpp/internal/smppclient"
 )
+
+func TestSMPPSubmitQuotaErrorsMapToThrottled(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want uint32
+	}{
+		{err: dispatch.ErrRateExceeded, want: smpp.StatusThrottled},
+		{err: dispatch.ErrQuotaExceeded, want: smpp.StatusThrottled},
+		{err: errors.New("other"), want: smpp.StatusSubmitFailed},
+	} {
+		got := smppSubmitErrorStatus(tc.err)
+		want := tc.want
+		if got != want {
+			t.Fatalf("status for %v = 0x%08x, want 0x%08x", tc.err, got, want)
+		}
+	}
+}
 
 func TestSMPPClientMsgIDIncludesRawPayload(t *testing.T) {
 	base := smpp.SubmitSM{

@@ -34,6 +34,8 @@ type Envelope struct {
 	Text               string
 	ClientID           string
 	ClientMsgID        string
+	TenantID           string
+	AccountID          string
 	DataCoding         uint8
 	Encoding           string
 	RegisteredDelivery uint8

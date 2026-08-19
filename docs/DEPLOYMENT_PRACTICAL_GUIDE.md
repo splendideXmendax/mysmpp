@@ -652,7 +652,7 @@ submitted msg_id=g0000000001
 | `claim_limit` | 20 | 单次从 outbox 拿多少条 |
 | `poll_interval_ms` | 20 | 轮询 outbox 间隔(毫秒) |
 | `pending_ttl` | `30m` | pending DLR 记录的过期时间 |
-| `max_attempts` | 5 | 上游失败最多重试几次,之后标 failed |
+| `max_attempts` | 5 | 进入 `sending` 前可重试失败的最大次数；结果不确定的发送不会自动重试 |
 
 **并发估算公式**:
 
@@ -930,7 +930,9 @@ submitted msg_id=g0000000001
 Postgres 启动前必须建 schema:
 
 ```bash
-psql "$DSN" -f migrations/001_init.up.sql
+for migration in migrations/*.up.sql; do
+  psql -v ON_ERROR_STOP=1 "$DSN" -f "$migration" || exit 1
+done
 ```
 
 ### 5.13 `admin`(管理后台凭据)
@@ -967,8 +969,8 @@ docker run -d --name pg \
   postgres:15
 
 # 建 schema
-docker cp ./migrations/001_init.up.sql pg:/tmp/init.sql
-docker exec pg psql -U mysmpp -d mysmpp -f /tmp/init.sql
+docker cp ./migrations pg:/tmp/migrations
+docker exec pg sh -c 'for f in /tmp/migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -U mysmpp -d mysmpp -f "$f" || exit 1; done'
 
 # 改 mysmpp 配置
 docker cp mysmpp:/app/data/config.json ./config.json
@@ -1159,6 +1161,7 @@ curl -u admin:PASS 'http://127.0.0.1:19087/v1/messages?limit=20' | python3 -m js
 | `UNDELIV` | 未送达 |
 | `EXPIRED` | 超时 |
 | `failed` | 重试用尽 |
+| `UNKNOWN` | 上游发送结果不确定，为防重复投递停止自动重试 |
 | `blocked` | 被风控拦截 |
 
 ### 7.4 重启容器

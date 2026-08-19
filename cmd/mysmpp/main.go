@@ -48,7 +48,7 @@ func main() {
 		logger.Info("generated startup credentials", "config", boot.ConfigPath, "credentials", boot.CredentialsPath)
 	}
 	if strings.EqualFold(cfg.Storage.Driver, "memory") {
-		logger.Warn("memory storage is volatile; messages, outbox, pending DLR mappings, and idempotency keys are lost on restart")
+		logger.Warn("memory storage is volatile; messages, outbox, pending DLR mappings, idempotency keys, and daily quota usage are lost on restart")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,6 +65,7 @@ func main() {
 	registry := provider.NewRegistry()
 	registry.Replace(provider.BuildProviders(ctx, cfg))
 	dispatcher := dispatch.New(logger, registry, nil, cfg.Dispatcher, st)
+	dispatcher.ReloadTenants(cfg)
 	defer registry.CloseAll()
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 	filterEngine, err := filter.Compile(cfg.Filter)
@@ -103,7 +104,7 @@ func main() {
 	auth := func(systemID, password string) bool {
 		current := httpGateway.Config()
 		for _, esme := range current.ESMEs {
-			if authutil.ConstantTimeEqual(esme.SystemID, systemID) && authutil.ConstantTimeEqual(esme.Password, password) {
+			if esme.EnabledValue() && authutil.ConstantTimeEqual(esme.SystemID, systemID) && authutil.ConstantTimeEqual(esme.Password, password) {
 				return true
 			}
 		}
@@ -128,13 +129,7 @@ func main() {
 				SequenceID: submit.SequenceID,
 			}
 			if err != nil {
-				if errors.Is(err, dispatch.ErrInvalidDestAddr) {
-					resp.Status = smpp.StatusInvalidDestAddr
-				} else if errors.Is(err, dispatch.ErrBlocked) {
-					resp.Status = smpp.StatusSubmitFailed
-				} else {
-					resp.Status = smpp.StatusSubmitFailed
-				}
+				resp.Status = smppSubmitErrorStatus(err)
 			} else {
 				resp.Body = smpp.CString(receipt.GatewayID)
 			}
@@ -175,6 +170,17 @@ func main() {
 	}
 	if err := dispatcher.Close(); err != nil {
 		logger.Warn("dispatcher shutdown failed", "err", err)
+	}
+}
+
+func smppSubmitErrorStatus(err error) uint32 {
+	switch {
+	case errors.Is(err, dispatch.ErrRateExceeded), errors.Is(err, dispatch.ErrQuotaExceeded):
+		return smpp.StatusThrottled
+	case errors.Is(err, dispatch.ErrInvalidDestAddr):
+		return smpp.StatusInvalidDestAddr
+	default:
+		return smpp.StatusSubmitFailed
 	}
 }
 

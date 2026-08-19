@@ -3,12 +3,14 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +42,13 @@ type errorProvider struct {
 	err error
 }
 
+type countingProvider struct {
+	mu    sync.Mutex
+	calls int
+	id    string
+	err   error
+}
+
 func (p captureProvider) Send(msg provider.OutboundMessage) (string, error) {
 	p.messages <- msg
 	return "provider-id", nil
@@ -52,6 +61,21 @@ func (p errorProvider) Send(provider.OutboundMessage) (string, error) {
 }
 
 func (p errorProvider) OnDLR(provider.DLRCallback) {}
+
+func (p *countingProvider) Send(provider.OutboundMessage) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return p.id, p.err
+}
+
+func (p *countingProvider) OnDLR(provider.DLRCallback) {}
+
+func (p *countingProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
 
 func (p multiIDProvider) Send(provider.OutboundMessage) (string, error) {
 	if len(p.ids) == 0 {
@@ -66,8 +90,14 @@ func (p multiIDProvider) SendAll(provider.OutboundMessage) ([]string, error) {
 
 func (p multiIDProvider) OnDLR(provider.DLRCallback) {}
 
-type failPendingStore struct {
+type failCompleteStore struct {
 	*store.MemoryStore
+}
+
+type ambiguousCompleteStore struct {
+	*store.MemoryStore
+	mu    sync.Mutex
+	calls int
 }
 
 type captureCDR struct {
@@ -95,8 +125,19 @@ func (s *captureCDR) count(kind string) int {
 	return n
 }
 
-func (s failPendingStore) SavePending(context.Context, store.Pending) error {
+func (s failCompleteStore) CompleteOutboxSend(context.Context, int64, string, []store.Pending) error {
 	return errors.New("boom")
+}
+
+func (s *ambiguousCompleteStore) CompleteOutboxSend(ctx context.Context, id int64, workerID string, pending []store.Pending) error {
+	err := s.MemoryStore.CompleteOutboxSend(ctx, id, workerID, pending)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.calls == 1 && err == nil {
+		return errors.New("commit result lost")
+	}
+	return err
 }
 
 func (s fakeSMPPServer) Session(id string) (*smpp.Session, bool) {
@@ -108,6 +149,159 @@ func (s fakeSMPPServer) Session(id string) (*smpp.Session, bool) {
 
 func (s fakeSMPPServer) ReceiversBySystemID(systemID string) []*smpp.Session {
 	return append([]*smpp.Session(nil), s.receivers...)
+}
+
+func TestDispatcherSharesDailyQuotaAcrossHTTPAndSMPPAccounts(t *testing.T) {
+	reg := provider.NewRegistry()
+	mock := provider.NewNamedMock(context.Background(), "mock-a")
+	mock.DelayMin = time.Hour
+	mock.DelayMax = time.Hour
+	reg.Replace(map[string]provider.Provider{"mock-a": mock})
+	defer reg.CloseAll()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	d.ReloadTenants(config.Config{
+		Tenants: []config.TenantConfig{{TenantID: "customer-a", Limits: config.TenantLimits{DailySegments: 2, Timezone: "Asia/Shanghai"}}},
+		Clients: []config.ClientAuth{{ClientID: "http-a", TenantID: "customer-a"}},
+		ESMEs:   []config.ESMECred{{SystemID: "smpp-a", TenantID: "customer-a"}},
+	})
+
+	receipt, err := d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: strings.Repeat("a", 161), ClientID: "http-a", ClientMsgID: "order-1",
+		Source: SubmitSource{Kind: SourceHTTPAPI},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+	if err != nil || !ok {
+		t.Fatalf("message missing: ok=%v err=%v", ok, err)
+	}
+	if msg.TenantID != "customer-a" || msg.AccountID != "http-a" || msg.ClientMsgID != "order-1" || len(msg.Segments) != 2 {
+		t.Fatalf("tenant identity or segment count not persisted: %+v", msg)
+	}
+	_, err = d.Submit(context.Background(), Envelope{
+		From: "1069", To: "8613800138000", Text: "hello", ClientID: "smpp:smpp-a", ClientMsgID: "smpp-request-1",
+		Source: SubmitSource{Kind: SourceSMPP, SMPPSystemID: "smpp-a"},
+	})
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("shared tenant quota was not enforced for SMPP: %v", err)
+	}
+}
+
+func TestDispatcherRateLimitReturnsExistingIdempotentReceipt(t *testing.T) {
+	reg := provider.NewRegistry()
+	reg.Replace(map[string]provider.Provider{"mock-a": multiIDProvider{ids: []string{"up-1"}}})
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+	d.ReloadTenants(config.Config{
+		Tenants: []config.TenantConfig{{TenantID: "customer-a", Limits: config.TenantLimits{TPS: 1, Burst: 1}}},
+		Clients: []config.ClientAuth{{ClientID: "http-a", TenantID: "customer-a"}},
+		ESMEs:   []config.ESMECred{{SystemID: "smpp-a", TenantID: "customer-a"}},
+	})
+	env := Envelope{From: "1069", To: "8613800138000", Text: "hello", ClientID: "http-a", ClientMsgID: "order-1", Source: SubmitSource{Kind: SourceHTTPAPI}}
+	first, err := d.Submit(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := d.Submit(context.Background(), env)
+	if err != nil || duplicate.GatewayID != first.GatewayID {
+		t.Fatalf("rate-limited duplicate did not return original receipt: first=%+v duplicate=%+v err=%v", first, duplicate, err)
+	}
+	smppEnv := Envelope{
+		From: "1069", To: "8613800138000", Text: "hello", ClientID: "smpp:smpp-a", ClientMsgID: "smpp-order-2",
+		Source: SubmitSource{Kind: SourceSMPP, SMPPSystemID: "smpp-a"},
+	}
+	if _, err := d.Submit(context.Background(), smppEnv); !errors.Is(err, ErrRateExceeded) {
+		t.Fatalf("new SMPP work should share the HTTP tenant rate limit, got %v", err)
+	}
+}
+
+func TestDispatcherAggregatesOutOfOrderSegmentDLRs(t *testing.T) {
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), provider.NewRegistry(), nil, testDispatcherConfig(), st)
+	defer d.Close()
+	msg := testMessage("g-segments")
+	msg.State = "sent"
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 3; i++ {
+		if err := st.SavePending(context.Background(), store.Pending{
+			Provider: "mock-a", ProviderID: "up-" + string(rune('0'+i)), GatewayID: msg.ID,
+			SegmentIndex: i, SegmentCount: 3, SourceKind: SourceHTTPAPI.String(),
+			ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dlr := range []provider.DLR{
+		{Provider: "mock-a", ProviderID: "up-2", State: "UNDELIV", ErrorCode: 42},
+		{Provider: "mock-a", ProviderID: "up-1", State: "DELIVRD"},
+	} {
+		if err := d.HandleDLR(context.Background(), dlr); err != nil {
+			t.Fatal(err)
+		}
+		got, _, _ := st.GetMessage(context.Background(), msg.ID)
+		if got.State != "sent" {
+			t.Fatalf("message became final before all segments completed: %+v", got)
+		}
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-3", State: "DELIVRD"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := st.GetMessage(context.Background(), msg.ID)
+	if got.State != "UNDELIV" || got.ErrorCode != 42 {
+		t.Fatalf("unexpected aggregate final state: %+v", got)
+	}
+	segments, err := st.ListPendingByGatewayID(context.Background(), msg.ID)
+	if err != nil || len(segments) != 0 {
+		t.Fatalf("completed segment mappings were not cleaned up: count=%d err=%v", len(segments), err)
+	}
+}
+
+func TestDispatcherHTTPCallbackIncludesSegmentAggregation(t *testing.T) {
+	payloads := make(chan map[string]any, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode callback: %v", err)
+		}
+		payloads <- payload
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	st := store.NewMemory()
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), provider.NewRegistry(), nil, testDispatcherConfig(), st)
+	d.httpClient = srv.Client()
+	defer d.Close()
+	msg := testMessage("g-callback-segments")
+	if err := st.SaveMessage(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := st.SavePending(context.Background(), store.Pending{
+			Provider: "mock-a", ProviderID: "cb-" + string(rune('0'+i)), GatewayID: msg.ID,
+			ClientMsgID: "order-42", SegmentIndex: i, SegmentCount: 2, SourceKind: SourceHTTPAPI.String(),
+			CallbackURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "cb-2", State: "DELIVRD"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := <-payloads
+	if payload["client_msg_id"] != "order-42" || payload["segment_index"] != float64(2) || payload["segment_count"] != float64(2) {
+		t.Fatalf("callback segment metadata missing: %+v", payload)
+	}
+	if payload["message_state"] != "PENDING" || payload["final"] != false {
+		t.Fatalf("callback aggregate state is incorrect: %+v", payload)
+	}
 }
 
 func TestDispatcherRoutesAndSubmits(t *testing.T) {
@@ -743,7 +937,7 @@ func TestDispatcherDefersSMPPDLRUntilReceiverBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, ok, err := st.GetPending(context.Background(), "up-1")
+	pending, ok, err := st.GetPending(context.Background(), "mock-a", "up-1")
 	if err != nil || !ok {
 		t.Fatalf("pending not kept: ok=%v err=%v", ok, err)
 	}
@@ -796,7 +990,7 @@ func TestDispatcherWaitsForPendingWhenDLRArrivesEarly(t *testing.T) {
 	if msg.State != "DELIVRD" {
 		t.Fatalf("message state = %q", msg.State)
 	}
-	if _, ok, err := st.GetPending(context.Background(), providerID); err != nil || ok {
+	if _, ok, err := st.GetPending(context.Background(), "mock-a", providerID); err != nil || ok {
 		t.Fatalf("pending should be deleted after http dlr: ok=%v err=%v", ok, err)
 	}
 }
@@ -827,13 +1021,13 @@ func TestDispatcherKeepsPendingForIntermediateDLR(t *testing.T) {
 	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "ENROUTE"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || !ok {
+	if _, ok, err := st.GetPending(context.Background(), "mock-a", "up-1"); err != nil || !ok {
 		t.Fatalf("pending should remain for intermediate dlr: ok=%v err=%v", ok, err)
 	}
 	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "up-1", State: "DELIVRD"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || ok {
+	if _, ok, err := st.GetPending(context.Background(), "mock-a", "up-1"); err != nil || ok {
 		t.Fatalf("pending should be deleted for final dlr: ok=%v err=%v", ok, err)
 	}
 }
@@ -896,16 +1090,17 @@ func TestDispatcherCreatesPendingForEachProviderID(t *testing.T) {
 	}
 	waitForPending(t, d, 3)
 	for _, id := range []string{"p1", "p2", "p3"} {
-		if _, ok, err := st.GetPending(context.Background(), id); err != nil || !ok {
+		if _, ok, err := st.GetPending(context.Background(), "multi", id); err != nil || !ok {
 			t.Fatalf("pending %s missing: ok=%v err=%v", id, ok, err)
 		}
 	}
 }
 
-func TestDispatcherRequeuesWhenSavePendingFails(t *testing.T) {
+func TestDispatcherDoesNotRequeueWhenCompletionFailsAfterSend(t *testing.T) {
 	reg := provider.NewRegistry()
-	reg.Replace(map[string]provider.Provider{"mock-a": multiIDProvider{ids: []string{"p1"}}})
-	st := failPendingStore{MemoryStore: store.NewMemory()}
+	upstream := &countingProvider{id: "p1"}
+	reg.Replace(map[string]provider.Provider{"mock-a": upstream})
+	st := failCompleteStore{MemoryStore: store.NewMemory()}
 	cfg := testDispatcherConfig()
 	cfg.MaxAttempts = 3
 	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
@@ -915,15 +1110,30 @@ func TestDispatcherRequeuesWhenSavePendingFails(t *testing.T) {
 	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello", Source: SubmitSource{Kind: SourceHTTPAPI}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if depth, _ := st.OutboxDepth(context.Background(), "pending"); depth == 1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForOutboxDepth(t, st, "uncertain", 1)
+	if count := upstream.callCount(); count != 1 {
+		t.Fatalf("provider calls = %d, want 1", count)
 	}
-	if depth, _ := st.OutboxDepth(context.Background(), "pending"); depth != 1 {
-		t.Fatalf("outbox should be requeued, pending depth=%d", depth)
+	if n, err := st.RequeueStaleOutbox(context.Background(), time.Now().Add(time.Hour), 10); err != nil || n != 0 {
+		t.Fatalf("uncertain outbox must not be requeued: count=%d err=%v", n, err)
+	}
+}
+
+func TestDispatcherRetriesCompletionWithoutResending(t *testing.T) {
+	reg := provider.NewRegistry()
+	upstream := &countingProvider{id: "p1"}
+	reg.Replace(map[string]provider.Provider{"mock-a": upstream})
+	st := &ambiguousCompleteStore{MemoryStore: store.NewMemory()}
+	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
+	defer d.Close()
+	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "mock-a", Priority: 1}}, []config.ProviderConfig{{Name: "mock-a", Enabled: true}})
+
+	if _, err := d.Submit(context.Background(), Envelope{From: "1069", To: "8613800138000", Text: "hello", Source: SubmitSource{Kind: SourceHTTPAPI}}); err != nil {
+		t.Fatal(err)
+	}
+	waitForOutboxDepth(t, st, "done", 1)
+	if count := upstream.callCount(); count != 1 {
+		t.Fatalf("provider calls = %d, want 1", count)
 	}
 }
 
@@ -1038,9 +1248,10 @@ func TestDispatcherSkipsTerminalFailureDLRWhenNotRequested(t *testing.T) {
 	}
 }
 
-func TestDispatcherDoesNotSendFailureDLRBeforeRetriesExhausted(t *testing.T) {
+func TestDispatcherDoesNotRetryAmbiguousProviderError(t *testing.T) {
 	reg := provider.NewRegistry()
-	reg.Replace(map[string]provider.Provider{"temporary": errorProvider{err: errors.New("temporary upstream error")}})
+	upstream := &countingProvider{err: errors.New("temporary upstream error")}
+	reg.Replace(map[string]provider.Provider{"temporary": upstream})
 	st := store.NewMemory()
 	cfg := testDispatcherConfig()
 	cfg.MaxAttempts = 3
@@ -1048,41 +1259,23 @@ func TestDispatcherDoesNotSendFailureDLRBeforeRetriesExhausted(t *testing.T) {
 	defer d.Close()
 	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "temporary", Priority: 1}}, []config.ProviderConfig{{Name: "temporary", Enabled: true}})
 
-	if _, err := d.Submit(context.Background(), Envelope{
+	receipt, err := d.Submit(context.Background(), Envelope{
 		From: "1069", To: "8613800138000", Text: "hello", RegisteredDelivery: 1,
 		Source: SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitForOutboxDepth(t, st, "pending", 1)
-	if size := d.PendingSize(); size != 0 {
-		t.Fatalf("pending size = %d before retries exhausted, want 0", size)
-	}
-}
-
-func TestDispatcherPersistsUndeliverableDLRWhenRetriesExhausted(t *testing.T) {
-	reg := provider.NewRegistry()
-	reg.Replace(map[string]provider.Provider{"temporary": errorProvider{err: errors.New("temporary upstream error")}})
-	st := store.NewMemory()
-	cfg := testDispatcherConfig()
-	cfg.MaxAttempts = 1
-	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, cfg, st)
-	defer d.Close()
-	d.ReloadRoutes([]config.RouteConfig{{Name: "default", Provider: "temporary", Priority: 1}}, []config.ProviderConfig{{Name: "temporary", Enabled: true}})
-
-	if _, err := d.Submit(context.Background(), Envelope{
-		From: "1069", To: "8613800138000", Text: "hello", RegisteredDelivery: 1,
-		Source: SubmitSource{Kind: SourceSMPP, SMPPSessionID: "tx-1", SMPPSystemID: "esme-a"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitForOutboxDepth(t, st, "failed", 1)
-	items, err := st.ListReadyDLR(context.Background(), "esme-a", 10)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].DLRState != "UNDELIV" || items[0].DLRErrorCode != 1 {
-		t.Fatalf("unexpected exhausted-retry dlr: %+v", items)
+	waitForOutboxDepth(t, st, "uncertain", 1)
+	if count := upstream.callCount(); count != 1 {
+		t.Fatalf("provider calls = %d, want 1", count)
+	}
+	if size := d.PendingSize(); size != 0 {
+		t.Fatalf("pending size = %d, want 0", size)
+	}
+	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
+	if err != nil || !ok || msg.State != "UNKNOWN" {
+		t.Fatalf("unexpected uncertain message: ok=%v msg=%+v err=%v", ok, msg, err)
 	}
 }
 
@@ -1146,7 +1339,7 @@ func TestDispatcherFlushesSMPPDLRToReceiverBySystemID(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("flush did not finish after deliver_sm_resp")
 	}
-	if _, ok, err := st.GetPending(context.Background(), "up-1"); err != nil || ok {
+	if _, ok, err := st.GetPending(context.Background(), "mock-a", "up-1"); err != nil || ok {
 		t.Fatalf("pending should be deleted after flush: ok=%v err=%v", ok, err)
 	}
 }

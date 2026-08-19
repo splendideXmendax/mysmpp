@@ -2,21 +2,20 @@
 
 本文面向通过 HTTP 调用 mysmpp、再由网关转换为 SMPP `submit_sm` 的接入方。
 
-## 1. 当前部署信息
+## 1. 部署与接口
 
-截至 2026-08-14，服务器 `8.219.56.23` 的部署情况如下：
+以下地址均为占位示例；真实主机、账号和凭据应通过受控渠道下发，不应提交到代码仓库。
 
 | 项目 | 当前值 |
 |---|---|
-| HTTP API | `http://8.219.56.23:19087` |
+| HTTP API | `https://<gateway-host>` |
 | HTTP 提交接口 | `POST /v1/messages` |
 | HTTP 查询接口 | `GET /v1/messages` |
 | 上游协议 | SMPP 3.4 |
-| HTTP 客户端 | `tenant-a`、`tenant-b`、`tenant-c` |
-| 上游 provider | `ap2-upstream`、`stub-2777`、`stub-2778`、`stub-2779`、`stub-2780` |
-| HTTP 路由 | 按已鉴权 `client_id` 匹配租户，再按 `gateway_id` 加权选择 provider |
-| 上游连接 | 5 个 transceiver bind，当前均可提交 |
-| 存储 | PostgreSQL |
+| HTTP 客户端 | 由 `clients[]` 配置 |
+| SMPP 客户端 | 由 `esmes[]` 配置 |
+| 主租户 | 由 `tenants[]` 配置，并可同时关联 HTTP/SMPP 子账号 |
+| 存储 | file 或 PostgreSQL；生产建议 PostgreSQL |
 
 HTTP 请求进入 `POST /v1/messages` 后会经过字段校验、风控、内容过滤和路由选择，成功受理后进入 outbox，由 worker 转换为 SMPP `submit_sm` 异步发送至上游。
 
@@ -24,7 +23,7 @@ HTTP 请求进入 `POST /v1/messages` 后会经过字段校验、风控、内容
 
 ## 2. 鉴权
 
-当前部署已配置三个独立 HTTP client。请求必须携带对应租户的两个请求头：
+配置了 HTTP client 后，请求必须携带对应账号的两个请求头：
 
 ```http
 X-Client-ID: tenant-a
@@ -38,15 +37,11 @@ export MYSMPP_CLIENT_ID='tenant-a'
 export MYSMPP_TOKEN='<tenant-a-token>'
 ```
 
-三个租户的 token 保存在服务器 root-only 文件中：
-
-```text
-/root/mysmpp-backups/http-tenant-credentials-v1.0.2.txt
-```
+Token 应由部署方通过密码管理系统或其他受控渠道下发，不要在仓库、日志或工单中记录真实值。
 
 当 `clients` 为空时，接口才回退到管理员 HTTP Basic Auth。该兼容模式没有 HTTP 租户身份，不适合 A/B/C 配比或按租户幂等。
 
-当前端口提供的是明文 HTTP。Token 必须通过 HTTPS 才能避免在传输途中泄露；对公网开放前应在网关前部署 HTTPS 反向代理，并限制源 IP，不建议让调用方长期直连公网 `19087`。
+Token 必须通过 HTTPS 才能避免在传输途中泄露；对公网开放前应在网关前部署 HTTPS 反向代理，并限制源 IP。
 
 ## 3. 提交短信
 
@@ -54,7 +49,7 @@ export MYSMPP_TOKEN='<tenant-a-token>'
 
 ```http
 POST /v1/messages HTTP/1.1
-Host: 8.219.56.23:19087
+Host: <gateway-host>
 X-Client-ID: tenant-a
 X-Token: <tenant-a-token>
 Content-Type: application/json
@@ -82,12 +77,12 @@ Content-Type: application/json
 | `from` | 是 | 源地址或签名，1-32 个 Unicode 字符；还需符合上游允许的 source address 规则 |
 | `to` | 是 | 11 位纯数字，或 `+` 开头的 E.164 号码；路由前会去掉开头的 `+` |
 | `text` | 是 | 非空；自动识别 GSM-7 或 UCS-2，最多拆分为 20 个短信分片 |
-| `client_msg_id` | 否 | 1-64 个非空白字符；配置独立 client 后，同一 client 下 24 小时内用作幂等键 |
+| `client_msg_id` | 否 | 客户系统传入的业务消息 ID，1-64 个非空白字符；同一 HTTP `client_id` 下 24 小时内用作幂等键 |
 | `callback_url` | 否 | DLR 回调地址，只允许完整的 `https://` URL |
 | `callback_rule` | 否 | 调用方自定义标识；配置后会原样返回在 DLR 回调中 |
 | `meta` | 否 | 最多 10 个键；键不能为空，每个值最多 200 个 Unicode 字符 |
 
-当前部署使用独立 HTTP client，同一 `X-Client-ID` 下重复提交相同 `client_msg_id`，24 小时内会返回原 `gateway_id`，不会重复入队。不同租户可使用相同的 `client_msg_id`，互不冲突。
+同一 `X-Client-ID` 下重复提交相同 `client_msg_id`，24 小时内会返回原 `gateway_id`，不会重复入队，也不会重复扣减日额度。不同 HTTP client 可使用相同的 `client_msg_id`，互不冲突。SMPP 没有对应的客户业务 ID 字段，网关会为 SMPP 请求生成内部幂等键。
 
 ### curl 示例
 
@@ -102,7 +97,7 @@ curl --fail-with-body \
     "text": "test message",
     "client_msg_id": "order-20260813-000001"
   }' \
-  'http://8.219.56.23:19087/v1/messages'
+  'https://<gateway-host>/v1/messages'
 ```
 
 这是真实发送接口。不要使用未授权的号码测试；请求成功后可能产生费用并实际送达。
@@ -137,7 +132,7 @@ HTTP 状态为 `202 Accepted`：
 curl --fail-with-body \
   --header "X-Client-ID: $MYSMPP_CLIENT_ID" \
   --header "X-Token: $MYSMPP_TOKEN" \
-  'http://8.219.56.23:19087/v1/messages?limit=100&offset=0'
+  'https://<gateway-host>/v1/messages?limit=100&offset=0'
 ```
 
 | 参数 | 默认值 | 规则 |
@@ -154,6 +149,9 @@ curl --fail-with-body \
   {
     "ID": "m0000abc",
     "ProviderID": "123456789",
+    "TenantID": "customer-a",
+    "AccountID": "tenant-a",
+    "ClientMsgID": "order-20260813-000001",
     "Direction": "mt",
     "From": "YourBrand",
     "To": "8613800138000",
@@ -183,6 +181,7 @@ curl --fail-with-body \
 | `EXPIRED` | 短信过期 |
 | `REJECTD` | 被上游或下游网络拒绝 |
 | `failed` | 网关向上游提交失败，且重试已结束 |
+| `UNKNOWN` | 已开始调用上游但结果不确定；为避免重复投递不会自动重发，需要人工核查 |
 
 ## 5. DLR 回调
 
@@ -196,15 +195,22 @@ Content-Type: application/json
 ```json
 {
   "gateway_id": "m0000abc",
+  "client_msg_id": "order-20260813-000001",
   "provider_id": "123456789",
   "provider": "stub-2778",
   "route": "tenant-a-http-weighted",
+  "segment_index": 2,
+  "segment_count": 3,
   "state": "DELIVRD",
+  "message_state": "PENDING",
+  "final": false,
   "error_code": 0,
   "done_at": "2026-08-13T01:00:02.123456789Z",
   "callback_rule": "order-service"
 }
 ```
+
+`state` 是当前上游分片状态；`message_state` 是同一 `gateway_id` 下所有上游分片的聚合状态；只有所有分片都进入最终态时 `final=true`。聚合范围不包含客户预先拆成多个独立 `submit_sm` 的 SMPP 长短信，因为这些请求各自拥有独立 `gateway_id`。
 
 回调接收端应返回任意 `2xx` 状态。代码会对收到的每条上游 DLR 触发回调，因此接收端应允许中间状态和重复事件，并以 `gateway_id`、`provider_id`、`state` 做幂等处理。当前回调没有签名或自定义鉴权头，接收端不应仅凭请求体来源执行敏感操作。
 
@@ -219,7 +225,7 @@ Content-Type: application/json
 | `400 Bad Request` | JSON 无效、字段校验失败、目标号码校验失败、短信超过 20 个分片 |
 | `401 Unauthorized` | 缺少或错误的 Basic Auth / client 凭据 |
 | `403 Forbidden` | client 来源 IP 不在白名单，或内容过滤规则拒绝 |
-| `429 Too Many Requests` | 命中号码或 client 维度的风控限流 |
+| `429 Too Many Requests` | 命中号码/client 风控、主租户 TPS 或主租户单日分片额度 |
 | `502 Bad Gateway` | 没有可用路由、入队失败或调度器提交失败 |
 | `405 Method Not Allowed` | 对 `/v1/messages` 使用了 GET/POST 之外的方法 |
 
@@ -228,7 +234,7 @@ Content-Type: application/json
 ## 7. 健康检查
 
 ```bash
-curl --fail-with-body 'http://8.219.56.23:19087/healthz'
+curl --fail-with-body 'https://<gateway-host>/healthz'
 ```
 
 ```json
