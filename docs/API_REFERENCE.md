@@ -69,7 +69,7 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 | `callback_rule` | 否 | 可选回调规则标识，会原样出现在回调 JSON 的 `callback_rule` 字段 |
 | `meta` | 否 | 最多 10 个键，每个值最多 200 字符 |
 
-成功响应 `202 Accepted`：
+成功响应 `200 OK`：
 
 ```json
 {

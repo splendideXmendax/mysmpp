@@ -39,8 +39,8 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	messages, err := st.ListMessages(context.Background())
 	if err != nil {
@@ -73,7 +73,7 @@ func TestMessageSubmitReturns429WhenTenantDailyQuotaExceeded(t *testing.T) {
 	dispatcher.ReloadRoutes(cfg.Routes, cfg.Providers)
 	gateway := NewWithDispatcher(cfg, st, dispatcher)
 
-	for i, want := range []int{http.StatusAccepted, http.StatusTooManyRequests} {
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		body := strings.NewReader(`{"from":"1069","to":"13800138000","text":"hello","client_msg_id":"order-` + string(rune('1'+i)) + `"}`)
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
 		req.Header.Set("Content-Type", "application/json")
@@ -141,8 +141,8 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"provider":"mock-a"`) {
 		t.Fatalf("dispatcher receipt not returned: %s", rec.Body.String())
@@ -246,8 +246,8 @@ func TestMessageSubmitRequiresConfiguredClient(t *testing.T) {
 	req.Header.Set("X-Token", "token-a")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 with client credentials, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with client credentials, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -272,9 +272,9 @@ func TestMessageSubmitLimitsTextByEncodedSegments(t *testing.T) {
 		text string
 		want int
 	}{
-		{name: "gsm7 max 20 segments", text: strings.Repeat("a", message.DefaultGSM7ConcatLimit*maxHTTPSubmitSegments), want: http.StatusAccepted},
+		{name: "gsm7 max 20 segments", text: strings.Repeat("a", message.DefaultGSM7ConcatLimit*maxHTTPSubmitSegments), want: http.StatusOK},
 		{name: "gsm7 over 20 segments", text: strings.Repeat("a", message.DefaultGSM7ConcatLimit*maxHTTPSubmitSegments+1), want: http.StatusBadRequest},
-		{name: "ucs2 max 20 segments", text: strings.Repeat("你", message.DefaultUCS2ConcatLimit*maxHTTPSubmitSegments), want: http.StatusAccepted},
+		{name: "ucs2 max 20 segments", text: strings.Repeat("你", message.DefaultUCS2ConcatLimit*maxHTTPSubmitSegments), want: http.StatusOK},
 		{name: "ucs2 over 20 segments", text: strings.Repeat("你", message.DefaultUCS2ConcatLimit*maxHTTPSubmitSegments+1), want: http.StatusBadRequest},
 	}
 
@@ -348,8 +348,8 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var first dispatch.Receipt
 	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
@@ -361,8 +361,8 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	addClientAuth(req)
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var second dispatch.Receipt
 	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
@@ -392,8 +392,8 @@ func TestMessageSubmitRiskKeywordsAreIgnoredWithoutDispatcher(t *testing.T) {
 	addClientAuth(req)
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	messages, err := st.ListMessages(context.Background())
 	if err != nil {
@@ -757,8 +757,8 @@ func TestConfigAPIReloadsDispatcherRoutesAndProviders(t *testing.T) {
 	req.SetBasicAuth("admin", "secret")
 	rec = httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"provider":"mock-b"`) || !strings.Contains(rec.Body.String(), `"route":"new"`) {
 		t.Fatalf("dispatcher did not use reloaded config: %s", rec.Body.String())

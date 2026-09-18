@@ -57,7 +57,7 @@ func TestCallbackAdmissionCompatibilityAndIdempotency(t *testing.T) {
 				g.Handler().ServeHTTP(rec, req)
 				want := http.StatusBadRequest
 				if tc.accepted {
-					want = http.StatusAccepted
+					want = http.StatusOK
 				}
 				if rec.Code != want {
 					t.Fatalf("status=%d want=%d: %s", rec.Code, want, rec.Body.String())

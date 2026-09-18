@@ -502,7 +502,7 @@ curl -X POST https://<你的域名>/v1/messages \
 
 | 状态 | 含义 |
 |---|---|
-| 202 Accepted | 提交成功,已入队 |
+| 200 OK | 提交成功,已入队 |
 | 400 Bad Request | 参数错(看响应文本) |
 | 401 Unauthorized | client_id/token 错或缺失 |
 | 403 Forbidden | IP 不在白名单 |

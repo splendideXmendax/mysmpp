@@ -706,7 +706,7 @@ python3 tools/dr_flow_stub.py http-submit \
 预期输出：
 
 ```text
-[http-submit] submit status=202 body={"gateway_id":"g0000000001",...}
+[http-submit] submit status=200 body={"gateway_id":"g0000000001",...}
 [http-submit] states {'g0000000001': 'queued'}
 [http-submit] states {'g0000000001': 'DELIVRD'}
 [http-submit] PASS
@@ -839,7 +839,7 @@ python3 tools/dr_flow_stub.py smpp-esme \
 必须同时满足：
 
 ```text
-HTTP submit 返回 202。
+HTTP submit 返回 200。
 provider stub /requests 能看到请求。
 provider stub 日志显示 DLR callback status=200。
 /v1/messages 中对应 gateway_id 的 State 变为 DELIVRD。

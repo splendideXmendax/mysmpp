@@ -232,7 +232,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), status)
 				return
 			}
-			writeJSON(w, http.StatusAccepted, receipt)
+			writeJSON(w, http.StatusOK, receipt)
 			return
 		}
 		cfg := g.Config()
@@ -253,7 +253,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusAccepted, msg)
+		writeJSON(w, http.StatusOK, msg)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

@@ -19,7 +19,7 @@
 
 HTTP 请求进入 `POST /v1/messages` 后会经过字段校验、风控、内容过滤和路由选择，成功受理后进入 outbox，由 worker 转换为 SMPP `submit_sm` 异步发送至上游。
 
-> 注意：`202 Accepted` 只表示网关已受理并排队，不表示上游已接受，也不表示短信已经送达。最终结果应通过查询接口或 DLR 回调确认。
+> 注意：`200 OK` 只表示网关已受理并排队，不表示上游已接受，也不表示短信已经送达。最终结果应通过查询接口或 DLR 回调确认。
 
 ## 2. 鉴权
 
@@ -104,7 +104,7 @@ curl --fail-with-body \
 
 ### 成功响应
 
-HTTP 状态为 `202 Accepted`：
+HTTP 状态为 `200 OK`：
 
 ```json
 {
@@ -229,7 +229,7 @@ Content-Type: application/json
 | `502 Bad Gateway` | 没有可用路由、入队失败或调度器提交失败 |
 | `405 Method Not Allowed` | 对 `/v1/messages` 使用了 GET/POST 之外的方法 |
 
-上游在异步发送阶段拒绝 `submit_sm` 不会改写已经返回的 HTTP `202`；调用方需通过查询或 DLR 判断后续结果。
+上游在异步发送阶段拒绝 `submit_sm` 不会改写已经返回的 HTTP `200`；调用方需通过查询或 DLR 判断后续结果。
 
 ## 7. 健康检查
 
