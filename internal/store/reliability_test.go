@@ -29,7 +29,7 @@ func testReliabilityStore(t *testing.T, st Store) {
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	t.Run("provider-id-collision", func(t *testing.T) {
-		p := Pending{Provider: "collision-provider", ProviderID: "same-id", GatewayID: "original", ExpiresAt: now.Add(time.Hour), UpstreamStatus: 0xffffffff}
+		p := Pending{Provider: "collision-provider", ProviderID: "collision-shared-id", GatewayID: "original", ExpiresAt: now.Add(time.Hour), UpstreamStatus: 0xffffffff}
 		if err := st.SavePending(ctx, p); err != nil {
 			t.Fatal(err)
 		}

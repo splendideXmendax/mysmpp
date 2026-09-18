@@ -123,14 +123,18 @@ func TestGatewayWireQuotaLengthAndDelayedReceipt(t *testing.T) {
 		}
 	}
 	send(2, m)
+	first, err := smpp.ReadPDU(conn)
+	if err != nil || first.CommandID != smpp.CommandSubmitSMResp || first.SequenceID != 2 || first.Status != 0 {
+		t.Fatalf("initial submit=%+v %v", first, err)
+	}
 	send(3, m)
 	m.SARSet = true
 	m.SARRefNum = []byte{0, 1}
 	m.SARTotalSegments = []byte{21}
 	m.SARSegmentSeqnum = []byte{1}
 	send(4, m)
-	want := map[uint32]uint32{2: 0, 3: smpp.StatusThrottled, 4: 0x00000001}
-	id := ""
+	want := map[uint32]uint32{3: smpp.StatusThrottled, 4: 0x00000001}
+	id := string(bytes.TrimRight(first.Body, "\x00"))
 	gotDR := false
 	for len(want) > 0 || !gotDR {
 		pdu, err := smpp.ReadPDU(conn)
