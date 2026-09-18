@@ -111,7 +111,8 @@ Docker 中必须监听 `0.0.0.0:19087`，否则宿主机端口映射访问不到
 
 | 字段 | 说明 | 默认值 |
 |---|---|---:|
-| `workers` | outbox claim worker 数量 | `10` |
+| `workers` | outbox claim worker 数量；v1.2.0 还各启动同数量的 inbox 和客户回执 worker | `10` |
+| `max_message_segments` | HTTP/SMPP 单次提交或客户预拆片声明的最大总段数，1–255；省略或 0 使用 20 | `20` |
 | `per_worker_concurrency` | 每个 worker 同时调用上游的并发数 | `10` |
 | `claim_limit` | 每次最多 claim 的 outbox 数量 | `20` |
 | `poll_interval_ms` | worker 轮询间隔 | `20` |
@@ -149,6 +150,8 @@ Additional dispatcher fields:
 Destination validation is intentionally minimal: optional leading `+`, digits only, total E.164 length `4..15`, and an assigned 1-3 digit country calling code. It does not validate each country's full national numbering plan.
 
 `claim_timeout` only controls work that has not entered `sending`. A short value may cause harmless claim churn under a saturated worker pool, but Store ownership checks prevent two workers from entering `sending` for the same row.
+
+回执任务基础轮询间隔为 100ms，空队列退避至 250ms；outbox 空队列也退避至 `max(poll_interval_ms,250ms)`，有任务后恢复配置间隔。每个空闲队列阶段可能增加最多约 250ms 的唤醒等待（不包含数据库和网络耗时）。客户投递保留 48h、最多 1000 次尝试、退避上限 5m；这些不是 `dispatcher.max_attempts` 的含义，也不能通过 `poll_interval_ms` 调整。v1.2.1 支持公网 HTTP/HTTPS 客户回调，不需要新增配置字段；v1.2.0 仅支持 HTTPS。清理与接收循环修复见 [2026-09-19 修复报告](修复报告-2026-09-19.md)。
 
 ## esmes
 

@@ -26,6 +26,7 @@ func TestReliabilityMemoryAndFile(t *testing.T) {
 
 func testReliabilityStore(t *testing.T, st Store) {
 	t.Helper()
+	t.Run("durable-inbox-before-expiry", func(t *testing.T) { testReceiptExpiryWaitsForInbox(t, st) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	t.Run("provider-id-collision", func(t *testing.T) {

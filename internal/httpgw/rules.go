@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -323,9 +322,8 @@ func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta
 		return fmt.Errorf("client_msg_id must be 1-64 non-space characters")
 	}
 	if callbackURL != "" {
-		u, err := url.Parse(callbackURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-			return fmt.Errorf("callback_url must be https")
+		if err := dispatch.ValidateCallbackURL(callbackURL); err != nil {
+			return fmt.Errorf("callback_url: %w", err)
 		}
 	}
 	if len(meta) > 10 {

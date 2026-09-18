@@ -63,9 +63,9 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 |---|---:|---|
 | `from` | 是 | 源地址，1-32 字符 |
 | `to` | 是 | 目标号码，支持 11 位数字或 E.164 |
-| `text` | 是 | 非空短信正文，自动按编码拆分，最多 20 个短信分片 |
+| `text` | 是 | 非空短信正文，自动按编码拆分，默认最多 20 段；由 `dispatcher.max_message_segments` 控制 |
 | `client_msg_id` | 否 | 幂等键，1-64 非空白字符 |
-| `callback_url` | 否 | HTTP 下游 DLR 回调 URL，必须为 `https://`；最终态 DLR 到达后网关会 POST JSON 回调 |
+| `callback_url` | 否 | 客户 DLR 回调 URL，v1.2.1 支持完整的公网 `http://` 或 `https://` 地址；POST JSON，可能包含中间状态与重试通知。v1.2.0 仅支持 HTTPS |
 | `callback_rule` | 否 | 可选回调规则标识，会原样出现在回调 JSON 的 `callback_rule` 字段 |
 | `meta` | 否 | 最多 10 个键，每个值最多 200 字符 |
 

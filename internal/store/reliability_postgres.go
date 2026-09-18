@@ -112,8 +112,27 @@ ON CONFLICT(key) DO UPDATE SET payload=EXCLUDED.payload,expires_at=EXCLUDED.expi
 
 func (s *PostgresStore) EnqueueReceipt(ctx context.Context, job ReceiptJob) error {
 	job = normalizeJob(job)
-	_, err := s.pool.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, job.ID, job.Kind, job.Payload, job.NextAt, job.ExpiresAt)
-	return err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if job.Kind == "inbox" {
+		var e ReceiptEvent
+		if err = json.Unmarshal(job.Payload, &e); err != nil {
+			return err
+		}
+		// Serialize durable receipt admission with expiry; after this commit a
+		// sweeper must see the inbox before deciding to synthesize EXPIRED.
+		if _, err = tx.Exec(ctx, `SELECT gateway_id FROM messages WHERE gateway_id IN (
+ SELECT gateway_id FROM pending WHERE provider=$1 AND provider_id=$2) FOR UPDATE`, e.Provider, e.ProviderID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, job.ID, job.Kind, job.Payload, job.NextAt, job.ExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) ClaimReceipt(ctx context.Context, kind string, now time.Time) (ReceiptJob, bool, error) {
@@ -168,16 +187,36 @@ func (s *PostgresStore) ReceiptCounts(ctx context.Context) (map[string]int, erro
 }
 
 func (s *PostgresStore) SweepReliability(ctx context.Context, now time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE receipt_jobs SET state='dead',last_error='delivery expired'
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	deadline := time.Now().Add(15 * time.Second)
+	_, err := s.drainMaintenance(ctx, `UPDATE receipt_jobs SET state='dead',last_error='delivery expired'
 WHERE id IN (SELECT id FROM receipt_jobs WHERE expires_at<$1 AND
-(state='pending' OR (state='claimed' AND lease_until<$1)) LIMIT 10000)`, now)
+(state='pending' OR (state='claimed' AND lease_until<$1)) LIMIT 10000)`, deadline, now)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `DELETE FROM receipt_jobs WHERE id IN (SELECT id FROM receipt_jobs WHERE expires_at<$1 OR (state='done' AND expires_at<$2) LIMIT 10000)`, now.Add(-7*24*time.Hour), now)
+	_, err = s.drainMaintenance(ctx, `DELETE FROM receipt_jobs WHERE id IN (SELECT id FROM receipt_jobs WHERE (expires_at<$1 OR (state='done' AND expires_at<$2)) AND (state<>'claimed' OR lease_until<$2) LIMIT 10000)`, deadline, now.Add(-7*24*time.Hour), now)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `DELETE FROM multipart_bindings WHERE key IN (SELECT key FROM multipart_bindings WHERE expires_at<$1 LIMIT 10000)`, now.Add(-7*24*time.Hour))
+	_, err = s.drainMaintenance(ctx, `DELETE FROM multipart_bindings WHERE key IN (SELECT key FROM multipart_bindings WHERE expires_at<$1 LIMIT 10000)`, deadline, now.Add(-7*24*time.Hour))
 	return err
+}
+
+// drainMaintenance continues bounded batches instead of imposing one batch
+// per minute. Each statement commits separately and shutdown cancels promptly.
+func (s *PostgresStore) drainMaintenance(ctx context.Context, sql string, deadline time.Time, args ...any) (int, error) {
+	total := 0
+	for time.Now().Before(deadline) {
+		tag, err := s.pool.Exec(ctx, sql, args...)
+		if err != nil {
+			return total, err
+		}
+		total += int(tag.RowsAffected())
+		if tag.RowsAffected() < 10000 {
+			break
+		}
+	}
+	return total, nil
 }

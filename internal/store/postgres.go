@@ -310,14 +310,16 @@ func (s *PostgresStore) DeletePendingByGatewayID(ctx context.Context, gatewayID 
 }
 
 func (s *PostgresStore) SweepExpiredPending(ctx context.Context, before time.Time) (int, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM pending WHERE ctid IN (
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	old, err := s.drainMaintenance(ctx, `DELETE FROM pending WHERE ctid IN (
 	SELECT ctid FROM pending WHERE reliability_managed=FALSE AND dlr_ready = FALSE AND expires_at < $1 ORDER BY expires_at LIMIT 10000
-)`, before)
+)`, time.Now().Add(5*time.Second), before)
 	if err != nil {
 		return 0, err
 	}
 	n, err := s.expireManaged(ctx, before)
-	return int(tag.RowsAffected()) + n, err
+	return old + n, err
 }
 
 func (s *PostgresStore) PendingSize(ctx context.Context) (int, error) {

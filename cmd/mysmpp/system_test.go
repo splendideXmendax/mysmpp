@@ -164,7 +164,7 @@ func TestGatewayWireQuotaLengthAndDelayedReceipt(t *testing.T) {
 		}
 	}
 	// Customer HTTP callback policy is still enforced at the real HTTP entry.
-	req, _ := http.NewRequest(http.MethodPost, "http://"+cfg.Server.HTTPAddr+"/v1/messages", bytes.NewBufferString(`{"from":"brand","to":"+8613800138000","text":"hi","callback_url":"http://example.com/dlr"}`))
+	req, _ := http.NewRequest(http.MethodPost, "http://"+cfg.Server.HTTPAddr+"/v1/messages", bytes.NewBufferString(`{"from":"brand","to":"+8613800138000","text":"hi","callback_url":"ftp://example.com/dlr"}`))
 	req.SetBasicAuth(cfg.Admin.Username, cfg.Admin.Password)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
@@ -173,6 +173,6 @@ func TestGatewayWireQuotaLengthAndDelayedReceipt(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("HTTP callback accepted: %d", resp.StatusCode)
+		t.Fatalf("unsupported callback scheme accepted: %d", resp.StatusCode)
 	}
 }

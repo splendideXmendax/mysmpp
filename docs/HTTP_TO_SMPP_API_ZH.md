@@ -78,7 +78,7 @@ Content-Type: application/json
 | `to` | 是 | 11 位纯数字，或 `+` 开头的 E.164 号码；路由前会去掉开头的 `+` |
 | `text` | 是 | 非空；自动识别 GSM-7 或 UCS-2，最多拆分为 20 个短信分片 |
 | `client_msg_id` | 否 | 客户系统传入的业务消息 ID，1-64 个非空白字符；同一 HTTP `client_id` 下 24 小时内用作幂等键 |
-| `callback_url` | 否 | DLR 回调地址，只允许完整的 `https://` URL |
+| `callback_url` | 否 | DLR 回调地址，v1.2.1 允许完整的公网 `http://` 或 `https://` URL；禁止跳转、内网地址和 URL 账号密码，HTTPS 验证证书。v1.2.0 仅支持 HTTPS |
 | `callback_rule` | 否 | 调用方自定义标识；配置后会原样返回在 DLR 回调中 |
 | `meta` | 否 | 最多 10 个键；键不能为空，每个值最多 200 个 Unicode 字符 |
 
@@ -212,7 +212,7 @@ Content-Type: application/json
 
 `state` 是当前上游分片状态；`message_state` 是同一 `gateway_id` 下所有上游分片的聚合状态；只有所有分片都进入最终态时 `final=true`。聚合范围不包含客户预先拆成多个独立 `submit_sm` 的 SMPP 长短信，因为这些请求各自拥有独立 `gateway_id`。
 
-回调接收端应返回任意 `2xx` 状态。代码会对收到的每条上游 DLR 触发回调，因此接收端应允许中间状态和重复事件，并以 `gateway_id`、`provider_id`、`state` 做幂等处理。当前回调没有签名或自定义鉴权头，接收端不应仅凭请求体来源执行敏感操作。
+回调接收端应返回任意 `2xx` 状态。持久化回执任务会重试，接收端应允许中间状态和重复投递，优先使用新增的 `delivery_id` 做幂等处理；不能用较迟收到的非终态覆盖终态。当前回调没有签名或自定义鉴权头，接收端不应仅凭请求体来源执行敏感操作。
 
 最终状态包括：`DELIVRD`、`EXPIRED`、`DELETED`、`UNDELIV`、`REJECTD`、`UNKNOWN`。
 

@@ -38,13 +38,11 @@ func (d *Dispatcher) EnqueueDLR(ctx context.Context, dlr provider.DLR) error {
 }
 
 func (d *Dispatcher) receiptWorker(ctx context.Context, kind string) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	const base = 100 * time.Millisecond
+	delay := base
 	for {
-		select {
-		case <-ctx.Done():
+		if !waitPoll(ctx, delay) {
 			return
-		case <-ticker.C:
 		}
 		for ctx.Err() == nil {
 			job, ok, err := d.store.ClaimReceipt(ctx, kind, time.Now().UTC())
@@ -52,11 +50,14 @@ func (d *Dispatcher) receiptWorker(ctx context.Context, kind string) {
 				if ctx.Err() == nil {
 					d.logger.Warn("claim receipt failed", "kind", kind, "err", err)
 				}
+				delay = idlePollDelay(delay, base)
 				break
 			}
 			if !ok {
+				delay = idlePollDelay(delay, base)
 				break
 			}
+			delay = base
 			workCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 			if kind == "inbox" {
 				var e store.ReceiptEvent

@@ -168,21 +168,73 @@ func TestReceiptInboxSurvivesRestartBeforeMappingAndCallbackRetries(t *testing.T
 	}
 }
 
-func TestCallbackHTTPSAndRedirectPolicy(t *testing.T) {
+func TestCallbackHTTPAndHTTPSCompatibility(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "http", true: "https"}[secure], func(t *testing.T) {
+			bodies := make(chan map[string]any, 1)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
+					t.Error("callback contract changed")
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				bodies <- body
+				w.WriteHeader(http.StatusNoContent)
+			})
+			srv := httptest.NewUnstartedServer(handler)
+			if secure {
+				srv.StartTLS()
+			} else {
+				srv.Start()
+			}
+			defer srv.Close()
+			// Trusted test transport permits only this local fixture; production
+			// continues to use the public-address dialer tested below.
+			d := &Dispatcher{httpClient: srv.Client()}
+			rec := store.Pending{CallbackURL: srv.URL, GatewayID: "gateway", ClientMsgID: "order", SegmentIndex: 1, SegmentCount: 2}
+			e := provider.DLR{Provider: "p", ProviderID: "up", State: "DELIVRD", DoneAt: time.Now().UTC()}
+			if err := d.sendHTTPCallback(context.Background(), rec, e, dlrAggregate{State: "PENDING"}); err != nil {
+				t.Fatal(err)
+			}
+			body := <-bodies
+			deliveryID, _ := body["delivery_id"].(string)
+			if body["client_msg_id"] != "order" || body["gateway_id"] != "gateway" || body["segment_count"] != float64(2) || body["final"] != false || deliveryID == "" {
+				t.Fatalf("callback fields changed: %v", body)
+			}
+		})
+	}
+}
+
+func TestCallbackRedirectAndAddressPolicy(t *testing.T) {
 	var leaked atomic.Int32
 	httpTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
 	defer httpTarget.Close()
 	tlsSource := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, httpTarget.URL, 302) }))
 	defer tlsSource.Close()
+	httpSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, httpTarget.URL, 307) }))
+	defer httpSource.Close()
 	d := &Dispatcher{httpClient: tlsSource.Client()}
-	for _, url := range []string{httpTarget.URL, tlsSource.URL, "https://user:pass@example.com/cb"} {
+	for _, url := range []string{httpSource.URL, tlsSource.URL, "https://user:pass@example.com/cb", "http://user:pass@example.com/cb", "ftp://example.com/cb"} {
 		err := d.sendHTTPCallback(context.Background(), store.Pending{CallbackURL: url}, provider.DLR{}, dlrAggregate{})
 		if !errors.Is(err, errUnsafeCallback) {
 			t.Fatalf("URL policy err=%v", err)
 		}
 	}
 	if leaked.Load() != 0 {
-		t.Fatal("callback leaked over HTTP")
+		t.Fatal("callback followed a redirect")
+	}
+	// Use the real production transport: both schemes must reject loopback
+	// before opening a connection, regardless of URL admission.
+	d.setHTTPClient(newCallbackClient())
+	for _, url := range []string{httpTarget.URL, tlsSource.URL} {
+		if err := d.sendHTTPCallback(context.Background(), store.Pending{CallbackURL: url}, provider.DLR{}, dlrAggregate{}); !errors.Is(err, errUnsafeCallback) {
+			t.Fatalf("private callback address allowed: %v", err)
+		}
+	}
+	if leaked.Load() != 0 {
+		t.Fatal("callback reached a private address")
 	}
 	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1", "100.64.1.1", "fc00::1"} {
 		if publicCallbackIP(netip.MustParseAddr(ip)) {

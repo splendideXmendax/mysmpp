@@ -121,15 +121,19 @@ func (c *connection) connectAndServe(ctx context.Context) error {
 	attemptDone := make(chan struct{})
 	out := make(chan smpp.PDU, 128)
 	c.setOut(out)
+	var attemptWG sync.WaitGroup
 	defer func() {
 		close(attemptDone)
 		c.clearOut(out)
+		_ = conn.Close()
+		attemptWG.Wait() // no receipt worker survives into another connection
 	}()
 
 	errCh := make(chan error, 2)
-	go c.writeLoop(conn, out, attemptDone, errCh)
-	go c.readLoop(conn, attemptDone, errCh)
-	go c.enquireLoop(ctx, attemptDone)
+	attemptWG.Add(3)
+	go func() { defer attemptWG.Done(); c.writeLoop(conn, out, attemptDone, errCh) }()
+	go func() { defer attemptWG.Done(); c.readLoop(conn, attemptDone, errCh) }()
+	go func() { defer attemptWG.Done(); c.enquireLoop(ctx, attemptDone) }()
 
 	select {
 	case err := <-errCh:
@@ -192,6 +196,41 @@ func (c *connection) writeLoop(conn net.Conn, out <-chan smpp.PDU, done <-chan s
 }
 
 func (c *connection) readLoop(conn net.Conn, done <-chan struct{}, errCh chan<- error) {
+	// Scope both the work queue and response channel to this bind attempt.
+	// Slow persistence must not delay submit responses or enquire_link traffic.
+	c.outMu.RLock()
+	out := c.out
+	c.outMu.RUnlock()
+	stopped := make(chan struct{})
+	jobs := make(chan receiptRequest, 128)
+	var receipts sync.WaitGroup
+	receipts.Add(1)
+	go func() {
+		defer receipts.Done()
+		for {
+			select {
+			case <-stopped:
+				return
+			case <-done:
+				return
+			case job := <-jobs:
+				select {
+				case <-done:
+					return
+				case <-stopped:
+					return
+				default:
+				}
+				status := uint32(smpp.StatusOK)
+				if err := c.onDLR(job.dlr); err != nil {
+					c.setError(err)
+					status = 0x00000008
+				}
+				c.sendAttempt(out, done, stopped, smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: status, SequenceID: job.sequence, Body: smpp.CString("")})
+			}
+		}
+	}()
+	defer func() { close(stopped); receipts.Wait() }()
 	for {
 		pdu, err := smpp.ReadPDU(conn)
 		if err != nil {
@@ -216,28 +255,29 @@ func (c *connection) readLoop(conn net.Conn, done <-chan struct{}, errCh chan<- 
 			if isReceipt {
 				status = 0x00000008 // ESME_RSYSERR: upstream must retry until durable
 				if ok && c.onDLR != nil {
-					if err := c.onDLR(dlr); err == nil {
-						status = smpp.StatusOK
-					} else {
-						c.setError(err)
+					select {
+					case jobs <- receiptRequest{dlr: dlr, sequence: pdu.SequenceID}:
+						continue // worker acknowledges only after persistence
+					default: // bounded overload: NACK rather than drop or block reads
+						c.setError(errors.New("smpp upstream receipt queue full"))
 					}
 				}
 			}
-			c.send(smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: status, SequenceID: pdu.SequenceID, Body: smpp.CString("")})
+			c.sendAttempt(out, done, stopped, smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: status, SequenceID: pdu.SequenceID, Body: smpp.CString("")})
 			if !isReceipt {
 				slog.Warn("smpp upstream deliver_sm MO ignored", "provider", c.cfg.Name, "connection", c.id)
 				c.setError(errors.New("smpp upstream deliver_sm MO ignored"))
 				continue
 			}
 		case smpp.CommandEnquireLink:
-			c.send(smpp.PDU{CommandID: smpp.CommandEnquireLinkResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID})
+			c.sendAttempt(out, done, stopped, smpp.PDU{CommandID: smpp.CommandEnquireLinkResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID})
 		case smpp.CommandEnquireLinkResp:
 		case smpp.CommandUnbind:
-			c.send(smpp.PDU{CommandID: smpp.CommandUnbindResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID})
+			c.sendAttempt(out, done, stopped, smpp.PDU{CommandID: smpp.CommandUnbindResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID})
 			errCh <- errors.New("smpp upstream requested unbind")
 			return
 		default:
-			c.send(smpp.PDU{CommandID: smpp.CommandGenericNack, Status: smpp.StatusInvalidCmd, SequenceID: pdu.SequenceID})
+			c.sendAttempt(out, done, stopped, smpp.PDU{CommandID: smpp.CommandGenericNack, Status: smpp.StatusInvalidCmd, SequenceID: pdu.SequenceID})
 		}
 		select {
 		case <-done:
@@ -247,7 +287,35 @@ func (c *connection) readLoop(conn net.Conn, done <-chan struct{}, errCh chan<- 
 	}
 }
 
+type receiptRequest struct {
+	dlr      DLR
+	sequence uint32
+}
+
+func (c *connection) sendAttempt(out chan smpp.PDU, done, stopped <-chan struct{}, p smpp.PDU) bool {
+	select {
+	case <-done:
+		return false
+	case <-stopped:
+		return false
+	default:
+	}
+	select {
+	case out <- p:
+		return true
+	case <-done:
+		return false
+	case <-stopped:
+		return false
+	case <-c.closed:
+		return false
+	}
+}
+
 func (c *connection) enquireLoop(ctx context.Context, done <-chan struct{}) {
+	c.outMu.RLock()
+	out := c.out
+	c.outMu.RUnlock()
 	period, _ := time.ParseDuration(c.cfg.SMPP.EnquirePeriod)
 	if period <= 0 {
 		return
@@ -267,7 +335,7 @@ func (c *connection) enquireLoop(ctx context.Context, done <-chan struct{}) {
 				c.closeConn()
 				return
 			}
-			c.send(smpp.PDU{CommandID: smpp.CommandEnquireLink, Status: smpp.StatusOK, SequenceID: c.nextSeq()})
+			c.sendAttempt(out, done, done, smpp.PDU{CommandID: smpp.CommandEnquireLink, Status: smpp.StatusOK, SequenceID: c.nextSeq()})
 		case <-ctx.Done():
 			return
 		case <-done:

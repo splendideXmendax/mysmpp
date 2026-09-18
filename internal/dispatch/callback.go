@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var errUnsafeCallback = errors.New("callback requires a public HTTPS endpoint without credentials or redirects")
+var errUnsafeCallback = errors.New("callback requires a public HTTP or HTTPS endpoint without credentials or redirects")
 
 func (d *Dispatcher) setHTTPClient(client *http.Client) {
 	d.httpClientMu.Lock()
@@ -19,9 +19,11 @@ func (d *Dispatcher) setHTTPClient(client *http.Client) {
 	d.httpClient = client
 }
 
-func validateCallbackURL(raw string) error {
+// ValidateCallbackURL checks the shared admission and delivery URL policy.
+// Resolved destination addresses are checked separately by the callback dialer.
+func ValidateCallbackURL(raw string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return errUnsafeCallback
 	}
 	return nil

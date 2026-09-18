@@ -483,7 +483,7 @@ curl -X POST https://<你的域名>/v1/messages \
 | `to` | 是 | 11 位数字或 E.164(`+...`,8-16 位) | 被叫 |
 | `text` | 是 | 1-1000 字符 | 短信内容 |
 | `client_msg_id` | 否 | 1-64 非空白字符 | 客户端幂等键。**同一 client_id + 同一 client_msg_id 重复提交返回相同 gateway_id**,24 小时内 |
-| `callback_url` | 否 | 必须 `https://` | 上游最终态 DLR 到达后主动 POST JSON 回调 |
+| `callback_url` | 否 | 公网 `http://` 或 `https://`（v1.2.1 起；v1.2.0 仅 HTTPS） | 主动 POST JSON 回执；禁止跳转、内网地址及 URL 账号密码；HTTPS 验证证书 |
 | `meta` | 否 | 最多 10 键,值 ≤ 200 字符 | 客户业务元数据,可被 outbound rule 引用 |
 
 **响应**:

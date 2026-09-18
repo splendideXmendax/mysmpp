@@ -760,41 +760,44 @@ func (d *Dispatcher) sweepExpiredPending(ctx context.Context) {
 }
 
 func (d *Dispatcher) workerLoop(ctx context.Context, workerID string) {
-	ticker := time.NewTicker(d.pollInterval)
-	defer ticker.Stop()
+	delay := d.pollInterval
 	sem := make(chan struct{}, d.perWorkerConc)
 	var inFlight sync.WaitGroup
 	for {
-		select {
-		case <-ctx.Done():
+		if !waitPoll(ctx, delay) {
 			inFlight.Wait()
 			return
-		case <-ticker.C:
-			limit := d.claimLimit
-			if available := cap(sem) - len(sem); available <= 0 {
-				continue
-			} else if available < limit {
-				limit = available
+		}
+		limit := d.claimLimit
+		if available := cap(sem) - len(sem); available <= 0 {
+			continue
+		} else if available < limit {
+			limit = available
+		}
+		items, err := d.store.ClaimOutbox(ctx, workerID, limit)
+		if err != nil {
+			d.logger.Warn("claim outbox failed", "worker", workerID, "err", err)
+			delay = idlePollDelay(delay, d.pollInterval)
+			continue
+		}
+		if len(items) == 0 {
+			delay = idlePollDelay(delay, d.pollInterval)
+		} else {
+			delay = d.pollInterval
+		}
+		for _, item := range items {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				inFlight.Wait()
+				return
 			}
-			items, err := d.store.ClaimOutbox(ctx, workerID, limit)
-			if err != nil {
-				d.logger.Warn("claim outbox failed", "worker", workerID, "err", err)
-				continue
-			}
-			for _, item := range items {
-				select {
-				case sem <- struct{}{}:
-				case <-ctx.Done():
-					inFlight.Wait()
-					return
-				}
-				inFlight.Add(1)
-				go func(item store.OutboxItem) {
-					defer inFlight.Done()
-					defer func() { <-sem }()
-					d.processOutbox(ctx, item)
-				}(item)
-			}
+			inFlight.Add(1)
+			go func(item store.OutboxItem) {
+				defer inFlight.Done()
+				defer func() { <-sem }()
+				d.processOutbox(ctx, item)
+			}(item)
 		}
 	}
 }
@@ -1364,7 +1367,7 @@ func (d *Dispatcher) finishDLRDelivery(ctx context.Context, rec store.Pending) e
 }
 
 func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dlr provider.DLR, aggregate dlrAggregate) error {
-	if err := validateCallbackURL(rec.CallbackURL); err != nil {
+	if err := ValidateCallbackURL(rec.CallbackURL); err != nil {
 		return err
 	}
 	payload := map[string]any{
@@ -1406,7 +1409,7 @@ func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dl
 		if errors.Is(err, errUnsafeCallback) {
 			return errUnsafeCallback
 		}
-		return errors.New("HTTPS callback connection or response failed")
+		return errors.New("callback connection or response failed")
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
