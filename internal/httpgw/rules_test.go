@@ -542,8 +542,13 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if dispatcher.PendingSize() != 0 {
-		t.Fatalf("expected dlr to complete pending record, got %d", dispatcher.PendingSize())
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		counts, _ := st.ReceiptCounts(context.Background())
+		if counts["delivery:done"] == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	messages, err := st.ListMessages(context.Background())
 	if err != nil {
@@ -554,7 +559,7 @@ func TestDynamicInboundRuleCanHandleProviderDLR(t *testing.T) {
 	}
 }
 
-func TestDynamicInboundRuleRejectsDLRProviderMismatch(t *testing.T) {
+func TestDynamicInboundRuleQuarantinesDLRProviderMismatch(t *testing.T) {
 	cfg := config.Default()
 	cfg.Inbound = []config.HTTPRuleConfig{{
 		Name:       "dlr",
@@ -595,8 +600,11 @@ func TestDynamicInboundRuleRejectsDLRProviderMismatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected durable acceptance, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := st.PrepareReceipt(context.Background(), store.ReceiptEvent{Provider: "mock-b", ProviderID: "p1", State: "DELIVRD", DoneAt: time.Now()}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cross-provider resolution: %v", err)
 	}
 	if dispatcher.PendingSize() != 1 {
 		t.Fatalf("provider mismatch should keep pending record, got %d", dispatcher.PendingSize())
@@ -644,6 +652,27 @@ func TestConfigAPIUpdatesRuntimeConfig(t *testing.T) {
 	gateway.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected dynamic inbound to work, got %d", rec.Code)
+	}
+}
+
+func TestTenantReloadPreservesExistingProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Admin = config.AdminConfig{Username: "admin", Password: "test-only"}
+	cfg.Normalize()
+	reg := provider.NewRegistry()
+	providers := provider.BuildProviders(context.Background(), cfg)
+	reg.Replace(providers)
+	defer reg.CloseAll()
+	g := NewWithDispatcher(cfg, store.NewMemory(), nil, reg)
+	cfg.Tenants = []config.TenantConfig{{TenantID: "reload-only", Limits: config.TenantLimits{TPS: 25, Burst: 25, Timezone: "UTC"}}}
+	if err := g.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range providers {
+		got, ok := reg.Get(name)
+		if !ok || got != p {
+			t.Fatalf("unchanged provider %s was replaced", name)
+		}
 	}
 }
 
@@ -916,6 +945,7 @@ func TestBuildOutboundRequestJSON(t *testing.T) {
 }
 
 type failingStore struct {
+	store.Store
 	err error
 }
 

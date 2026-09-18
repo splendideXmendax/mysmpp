@@ -31,6 +31,11 @@ func BuildDLR(params DLRParams) PDU {
 }
 
 func FormatReceiptText(params DLRParams) string {
+	// SMPP receipt text has a three-digit error field. Full upstream status is
+	// retained in storage, CDR and HTTP receipts.
+	if params.ErrorCode < 0 || params.ErrorCode > 999 {
+		params.ErrorCode = 999
+	}
 	state := normalizeState(params.State)
 	delivered := 0
 	if state == "DELIVRD" {

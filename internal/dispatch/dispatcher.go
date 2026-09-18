@@ -64,11 +64,12 @@ type Dispatcher struct {
 	cancelWorkers  context.CancelFunc
 	wg             sync.WaitGroup
 	httpClient     *http.Client
-	dlrCh          chan provider.DLR
+	httpClientMu   sync.RWMutex
 	dlrLocks       [256]sync.Mutex
 	instanceID     atomic.Pointer[string]
 	tenantResolver atomic.Pointer[tenantResolverHolder]
 	rateLimiter    tenant.RateLimiter
+	maxSegments    atomic.Int64
 
 	mu      sync.RWMutex
 	smppSrv SMPPServer
@@ -128,11 +129,11 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 		dlrLookupWait: 2 * time.Second,
 		workerCtx:     ctx,
 		cancelWorkers: cancel,
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
-		dlrCh:         make(chan provider.DLR, 4096),
+		httpClient:    newCallbackClient(),
 		rateLimiter:   tenant.NewTokenBucket(),
 	}
 	d.tenantResolver.Store(&tenantResolverHolder{resolver: tenant.NewResolver(config.Config{})})
+	d.ReloadLimits(cfg)
 	reg.SetDLRHandler(d.OnDLR)
 	d.StartWorkers(d.workers)
 	return d
@@ -190,6 +191,7 @@ func (d *Dispatcher) ReloadFilter(e *filter.Engine) {
 
 func (d *Dispatcher) ReloadTenants(cfg config.Config) {
 	d.tenantResolver.Store(&tenantResolverHolder{resolver: tenant.NewResolver(cfg)})
+	d.ReloadLimits(cfg.Dispatcher)
 }
 
 func (d *Dispatcher) SetCDRSink(s CDRSink) {
@@ -281,6 +283,11 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 			env.DataCoding = 0
 		}
 	}
+	segments, err := d.validateMessageLength(env)
+	if err != nil {
+		d.emitSubmitRejected(env, "message_length")
+		return Receipt{}, err
+	}
 	rt := d.router.Load()
 	if rt == nil {
 		return Receipt{}, errors.New("router not initialized")
@@ -294,6 +301,10 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		Now:      env.ReceivedAt,
 	}
 	route, ok := rt.MatchRoute(matchInput)
+	route, pinnedProvider, ok, err := d.pinMultipart(ctx, env, rt, route, ok)
+	if err != nil {
+		return Receipt{}, err
+	}
 	if !ok {
 		d.emitCDR(cdr.Event{
 			Kind:        "rejected",
@@ -352,6 +363,10 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		return Receipt{}, err
 	}
 	match, ok := rt.SelectProvider(route, gatewayID)
+	if pinnedProvider != "" {
+		match.Provider = pinnedProvider
+		ok = true
+	}
 	if !ok {
 		d.emitCDR(cdr.Event{
 			Kind:        "rejected",
@@ -391,7 +406,7 @@ func (d *Dispatcher) Submit(ctx context.Context, env Envelope) (Receipt, error) 
 		}
 		msg.Metadata["client_id"] = env.ClientID
 	}
-	msg.Segments = message.Split(env.Text, message.SplitOptions{ForceEncoding: encoding})
+	msg.Segments = segments
 	msg.State = "queued"
 	payloadMeta := cloneMeta(env.Meta)
 	if env.ClientID != "" {
@@ -530,17 +545,10 @@ func (d *Dispatcher) emitSubmitRejected(env Envelope, reason string) {
 	})
 }
 
-func (d *Dispatcher) OnDLR(dlr provider.DLR) {
-	select {
-	case d.dlrCh <- dlr:
-	default:
-		d.logger.Warn("dlr channel full, handling in background", "provider", dlr.Provider, "provider_id", dlr.ProviderID)
-		go func() {
-			if err := d.HandleDLR(context.Background(), dlr); err != nil {
-				d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
-			}
-		}()
-	}
+func (d *Dispatcher) OnDLR(dlr provider.DLR) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return d.EnqueueDLR(ctx, dlr)
 }
 
 func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
@@ -666,8 +674,10 @@ func (d *Dispatcher) StartWorkers(n int) {
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
-			d.dlrWorker(d.workerCtx)
+			d.receiptWorker(d.workerCtx, "inbox")
 		}()
+		d.wg.Add(1)
+		go func() { defer d.wg.Done(); d.receiptWorker(d.workerCtx, "delivery") }()
 	}
 	d.wg.Add(1)
 	go func() {
@@ -679,19 +689,6 @@ func (d *Dispatcher) StartWorkers(n int) {
 		defer d.wg.Done()
 		d.pendingSweepLoop(d.workerCtx)
 	}()
-}
-
-func (d *Dispatcher) dlrWorker(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case dlr := <-d.dlrCh:
-			if err := d.HandleDLR(ctx, dlr); err != nil {
-				d.logger.Warn("dlr rejected", "provider", dlr.Provider, "provider_id", dlr.ProviderID, "err", err)
-			}
-		}
-	}
 }
 
 func (d *Dispatcher) requeueLoop(ctx context.Context) {
@@ -749,6 +746,9 @@ func (d *Dispatcher) pendingSweepLoop(ctx context.Context) {
 }
 
 func (d *Dispatcher) sweepExpiredPending(ctx context.Context) {
+	if err := d.store.SweepReliability(ctx, time.Now().UTC()); err != nil {
+		d.logger.Warn("receipt maintenance failed", "err", err)
+	}
 	n, err := d.store.SweepExpiredPending(ctx, time.Now().UTC())
 	if err != nil {
 		d.logger.Warn("sweep expired pending failed", "err", err)
@@ -831,14 +831,21 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		return
 	}
 	item.State = "sending"
-	providerIDs, err := sendProvider(ctx, p, msg)
-	if err != nil {
-		if isPermanent(err) {
-			d.failOutbox(ctx, item, err)
-		} else {
-			d.markOutboxUncertain(item, err)
+	providerIDs, sendErr := sendProvider(ctx, p, msg)
+	accepted := len(providerIDs)
+	if sendErr != nil {
+		total := accepted + 1
+		var progress interface{ TotalParts() int }
+		if errors.As(sendErr, &progress) && progress.TotalParts() > total {
+			total = progress.TotalParts()
 		}
-		return
+		for len(providerIDs) < total {
+			id := "local-failure:" + payload.GatewayID
+			if total > 1 {
+				id += fmt.Sprintf(":%d", len(providerIDs)+1)
+			}
+			providerIDs = append(providerIDs, id)
+		}
 	}
 	if len(providerIDs) == 0 {
 		providerIDs = []string{payload.GatewayID}
@@ -874,6 +881,24 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 			ReceivedAt:         payload.ReceivedAt,
 			ExpiresAt:          expiresAt,
 		})
+		if sendErr != nil && i >= accepted {
+			var statusErr smppStatusError
+			if i == accepted && errors.As(sendErr, &statusErr) {
+				pending[i].UpstreamStatus = statusErr.SMPPStatus()
+			}
+			state, code := terminalFailureDLR(sendErr)
+			if i == accepted && !isPermanent(sendErr) {
+				state = "UNKNOWN"
+			}
+			if i > accepted {
+				state = "UNDELIV"
+				code = 1
+			}
+			pending[i].DLRReady = true
+			pending[i].DLRState = state
+			pending[i].DLRErrorCode = code
+			pending[i].DLRDoneAt = time.Now().UTC()
+		}
 	}
 	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -885,6 +910,9 @@ func (d *Dispatcher) processOutbox(ctx context.Context, item store.OutboxItem) {
 		return
 	}
 	for i, providerID := range providerIDs {
+		if sendErr != nil && i >= accepted {
+			continue
+		}
 		d.emitCDR(cdr.Event{
 			Kind:         "sent",
 			GatewayID:    payload.GatewayID,
@@ -1033,7 +1061,7 @@ func terminalFailureDLR(err error) (string, int) {
 
 func (d *Dispatcher) queueTerminalFailureDLR(ctx context.Context, item store.OutboxItem, state string, errorCode int) (store.Pending, provider.DLR, bool) {
 	payload := item.Payload
-	if payload.SourceKind != SourceSMPP.String() || payload.RegisteredDelivery&0x03 == 0 {
+	if (payload.SourceKind == SourceSMPP.String() && payload.RegisteredDelivery&0x03 == 0) || (payload.SourceKind == SourceHTTPAPI.String() && payload.CallbackURL == "") {
 		return store.Pending{}, provider.DLR{}, false
 	}
 	doneAt := time.Now().UTC()
@@ -1053,6 +1081,8 @@ func (d *Dispatcher) queueTerminalFailureDLR(ctx context.Context, item store.Out
 		SourceKind:         payload.SourceKind,
 		SourceSession:      payload.SourceSession,
 		SourceSystem:       payload.SourceSystem,
+		CallbackURL:        payload.CallbackURL,
+		CallbackRule:       payload.CallbackRule,
 		From:               payload.From,
 		To:                 payload.To,
 		Text:               payload.Text,
@@ -1099,27 +1129,28 @@ func (d *Dispatcher) dlrEvent(ctx context.Context, rec store.Pending, dlr provid
 		clientID = msg.Metadata["client_id"]
 	}
 	return cdr.Event{
-		Kind:         "dlr",
-		GatewayID:    rec.GatewayID,
-		ProviderID:   dlr.ProviderID,
-		From:         rec.From,
-		To:           rec.To,
-		TextLen:      len([]rune(rec.Text)),
-		TextHash:     cdr.TextHash(rec.Text),
-		Route:        rec.Route,
-		Provider:     rec.Provider,
-		ClientID:     clientID,
-		TenantID:     rec.TenantID,
-		AccountID:    rec.AccountID,
-		ClientMsgID:  rec.ClientMsgID,
-		SegmentIndex: rec.SegmentIndex,
-		SegmentCount: rec.SegmentCount,
-		MessageState: aggregate.State,
-		Final:        aggregate.Final,
-		SystemID:     rec.SourceSystem,
-		Source:       rec.SourceKind,
-		State:        dlr.State,
-		ErrorCode:    dlr.ErrorCode,
+		UpstreamStatus: rec.UpstreamStatus,
+		Kind:           "dlr",
+		GatewayID:      rec.GatewayID,
+		ProviderID:     dlr.ProviderID,
+		From:           rec.From,
+		To:             rec.To,
+		TextLen:        len([]rune(rec.Text)),
+		TextHash:       cdr.TextHash(rec.Text),
+		Route:          rec.Route,
+		Provider:       rec.Provider,
+		ClientID:       clientID,
+		TenantID:       rec.TenantID,
+		AccountID:      rec.AccountID,
+		ClientMsgID:    rec.ClientMsgID,
+		SegmentIndex:   rec.SegmentIndex,
+		SegmentCount:   rec.SegmentCount,
+		MessageState:   aggregate.State,
+		Final:          aggregate.Final,
+		SystemID:       rec.SourceSystem,
+		Source:         rec.SourceKind,
+		State:          dlr.State,
+		ErrorCode:      dlr.ErrorCode,
 	}
 }
 
@@ -1169,13 +1200,20 @@ func (d *Dispatcher) pushSMPPDLR(rec store.Pending, dlr provider.DLR) error {
 		return errors.New("dlr has no smpp server")
 	}
 	var session *smpp.Session
-	if rec.SourceSession != "" {
-		if s, ok := srv.Session(rec.SourceSession); ok && s.CanReceive() {
+	if rec.SourceSession != "" && rec.SourceSystem != "" {
+		if s, ok := srv.Session(rec.SourceSession); ok && s.CanReceive() && s.SystemID() == rec.SourceSystem {
 			session = s
 		}
 	}
 	if session == nil && rec.SourceSystem != "" {
 		receivers := srv.ReceiversBySystemID(rec.SourceSystem)
+		owned := receivers[:0]
+		for _, s := range receivers {
+			if s != nil && s.CanReceive() && s.SystemID() == rec.SourceSystem {
+				owned = append(owned, s)
+			}
+		}
+		receivers = owned
 		if len(receivers) > 0 {
 			idx := int(d.dlrPick.Add(1)-1) % len(receivers)
 			session = receivers[idx]
@@ -1303,76 +1341,9 @@ func isFinalDLRState(state string) bool {
 	}
 }
 
-type dlrAggregate struct {
-	State        string
-	ErrorCode    int
-	Final        bool
-	AllDelivered bool
-}
+type dlrAggregate = store.ReceiptAggregate
 
-func aggregateDLR(segments []store.Pending) dlrAggregate {
-	result := dlrAggregate{State: "PENDING"}
-	if len(segments) == 0 {
-		return result
-	}
-	expected := 1
-	seen := make(map[int]struct{}, len(segments))
-	result.Final = true
-	result.AllDelivered = true
-	failureRank := 0
-	for _, segment := range segments {
-		if segment.SegmentCount > expected {
-			expected = segment.SegmentCount
-		}
-		if segment.SegmentIndex > 0 {
-			seen[segment.SegmentIndex] = struct{}{}
-		}
-		state := strings.ToUpper(strings.TrimSpace(segment.DLRState))
-		if !isFinalDLRState(state) {
-			result.Final = false
-		}
-		if !segment.DLRDelivered {
-			result.AllDelivered = false
-		}
-		rank := dlrFailureRank(state)
-		if rank > failureRank {
-			failureRank = rank
-			result.State = state
-			result.ErrorCode = segment.DLRErrorCode
-		}
-	}
-	if len(seen) < expected {
-		result.Final = false
-		result.AllDelivered = false
-	}
-	if !result.Final {
-		result.State = "PENDING"
-		result.ErrorCode = 0
-		return result
-	}
-	if failureRank == 0 {
-		result.State = "DELIVRD"
-		result.ErrorCode = 0
-	}
-	return result
-}
-
-func dlrFailureRank(state string) int {
-	switch state {
-	case "REJECTD":
-		return 6
-	case "UNDELIV":
-		return 5
-	case "EXPIRED":
-		return 4
-	case "DELETED":
-		return 3
-	case "UNKNOWN":
-		return 2
-	default:
-		return 0
-	}
-}
+func aggregateDLR(segments []store.Pending) dlrAggregate { return store.AggregateReceipt(segments) }
 
 func (d *Dispatcher) finishDLRDelivery(ctx context.Context, rec store.Pending) error {
 	if err := d.store.MarkDLRDelivered(ctx, rec.Provider, rec.ProviderID); err != nil {
@@ -1393,7 +1364,11 @@ func (d *Dispatcher) finishDLRDelivery(ctx context.Context, rec store.Pending) e
 }
 
 func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dlr provider.DLR, aggregate dlrAggregate) error {
+	if err := validateCallbackURL(rec.CallbackURL); err != nil {
+		return err
+	}
 	payload := map[string]any{
+		"delivery_id":   store.ReceiptKey("delivery", store.ReceiptEvent{Provider: dlr.Provider, ProviderID: dlr.ProviderID, State: dlr.State, ErrorCode: dlr.ErrorCode, DoneAt: dlr.DoneAt}),
 		"gateway_id":    rec.GatewayID,
 		"client_msg_id": rec.ClientMsgID,
 		"provider_id":   dlr.ProviderID,
@@ -1410,6 +1385,9 @@ func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dl
 	if rec.CallbackRule != "" {
 		payload["callback_rule"] = rec.CallbackRule
 	}
+	if rec.UpstreamStatus != 0 {
+		payload["submit_status"] = rec.UpstreamStatus
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -1419,9 +1397,16 @@ func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dl
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := d.httpClient.Do(req)
+	d.httpClientMu.RLock()
+	client := *d.httpClient
+	d.httpClientMu.RUnlock()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errUnsafeCallback }
+	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		if errors.Is(err, errUnsafeCallback) {
+			return errUnsafeCallback
+		}
+		return errors.New("HTTPS callback connection or response failed")
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))

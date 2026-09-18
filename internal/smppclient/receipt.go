@@ -67,9 +67,6 @@ func ParseDeliverSM(body []byte, idSource, idFormat string) (DLR, bool, bool) {
 	}
 	errCode, _ := strconv.Atoi(firstSubmatch(receiptErrRe, text))
 	doneAt := parseDoneAt(firstSubmatch(receiptDoneRe, text))
-	if doneAt.IsZero() {
-		doneAt = time.Now().UTC()
-	}
 	return DLR{ProviderID: NormalizeID(id, idFormat), State: state, ErrorCode: errCode, DoneAt: doneAt}, true, true
 }
 

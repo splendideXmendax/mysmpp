@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 )
 
 type Gateway struct {
+	updateMu   sync.Mutex
 	mu         sync.RWMutex
 	cfg        config.Config
 	store      store.Store
@@ -194,7 +196,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		clientID := clientIDFromRequest(r)
-		if err := validateSubmitRequest(req.From, req.To, req.Text, req.ClientMsgID, req.CallbackURL, req.Meta); err != nil {
+		if err := validateSubmitRequest(req.From, req.To, req.Text, req.ClientMsgID, req.CallbackURL, req.Meta, g.Config().Dispatcher.MaxMessageSegments); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -225,7 +227,7 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 					status = http.StatusTooManyRequests
 				} else if errors.Is(err, dispatch.ErrTenantDisabled) || errors.Is(err, dispatch.ErrBlocked) {
 					status = http.StatusForbidden
-				} else if errors.Is(err, dispatch.ErrInvalidDestAddr) {
+				} else if errors.Is(err, dispatch.ErrInvalidDestAddr) || errors.Is(err, dispatch.ErrInvalidMessageLength) {
 					status = http.StatusBadRequest
 				}
 				http.Error(w, err.Error(), status)
@@ -298,7 +300,11 @@ func requestIPAllowed(r *http.Request, allowed, trustedProxies []string) bool {
 	return netutil.RequestIPAllowed(r, allowed, trustedProxies)
 }
 
-func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta map[string]string) error {
+func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta map[string]string, limits ...int) error {
+	limit := maxHTTPSubmitSegments
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
+	}
 	if utf8.RuneCountInString(from) < 1 || utf8.RuneCountInString(from) > 32 {
 		return fmt.Errorf("from must be 1-32 characters")
 	}
@@ -310,15 +316,15 @@ func validateSubmitRequest(from, to, text, clientMsgID, callbackURL string, meta
 	}
 	encoding := message.DetectEncoding(text)
 	segments := message.Split(text, message.SplitOptions{ForceEncoding: encoding})
-	if len(segments) > maxHTTPSubmitSegments {
-		return fmt.Errorf("text exceeds %d SMS segments for %s encoding", maxHTTPSubmitSegments, encoding)
+	if len(segments) > limit {
+		return fmt.Errorf("text exceeds %d SMS segments for %s encoding", limit, encoding)
 	}
 	if clientMsgID != "" && (utf8.RuneCountInString(clientMsgID) < 1 || utf8.RuneCountInString(clientMsgID) > 64 || strings.ContainsAny(clientMsgID, " \t\r\n")) {
 		return fmt.Errorf("client_msg_id must be 1-64 non-space characters")
 	}
 	if callbackURL != "" {
 		u, err := url.Parse(callbackURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" {
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
 			return fmt.Errorf("callback_url must be https")
 		}
 	}
@@ -414,6 +420,8 @@ func (g *Gateway) Config() config.Config {
 }
 
 func (g *Gateway) UpdateConfig(cfg config.Config) error {
+	g.updateMu.Lock()
+	defer g.updateMu.Unlock()
 	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -430,7 +438,9 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 		}
 	}
 	var providers map[string]provider.Provider
-	if g.registry != nil {
+	oldConfig := g.Config()
+	providersChanged := !reflect.DeepEqual(oldConfig.Providers, cfg.Providers) || !reflect.DeepEqual(oldConfig.Outbound, cfg.Outbound)
+	if g.registry != nil && providersChanged {
 		providers = provider.BuildProviders(g.ctx, cfg)
 	}
 	routes := cfg.Routes
@@ -438,7 +448,7 @@ func (g *Gateway) UpdateConfig(cfg config.Config) error {
 	g.mu.Lock()
 	g.cfg = cfg
 	g.mu.Unlock()
-	if g.registry != nil {
+	if g.registry != nil && providersChanged {
 		g.registry.Replace(providers)
 	}
 	if g.dispatcher != nil {
@@ -551,15 +561,16 @@ func (g *Gateway) handleInboundRule(w http.ResponseWriter, r *http.Request, rule
 	}
 	if g.dispatcher != nil && rule.Fields["provider_id"] != "" && rule.Fields["status"] != "" {
 		errCode, _ := strconv.Atoi(valueOf(values, rule.Fields["error_code"], "0"))
-		err := g.dispatcher.HandleDLR(r.Context(), provider.DLR{
+		err := g.dispatcher.EnqueueDLR(r.Context(), provider.DLR{
 			Provider:   rule.Provider,
 			ProviderID: valueOf(values, rule.Fields["provider_id"], ""),
 			State:      valueOf(values, rule.Fields["status"], ""),
 			ErrorCode:  errCode,
-			DoneAt:     time.Now().UTC(),
+			// No source timestamp is mapped: keep zero until durable ingestion
+			// so provider retries retain a stable deduplication key.
 		})
 		if err != nil {
-			status := http.StatusForbidden
+			status := http.StatusServiceUnavailable
 			if errors.Is(err, store.ErrNotFound) {
 				status = http.StatusNotFound
 			}

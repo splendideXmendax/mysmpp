@@ -228,6 +228,11 @@ func chunkUCS2(text string, limit int) []string {
 }
 
 func concatUDH(ref uint16, part, total int) []byte {
+	// Never wrap the one-octet concatenation fields. Callers reject oversized
+	// messages before sending; Split remains useful for counting their segments.
+	if total > 255 || part > 255 {
+		return nil
+	}
 	return []byte{0x05, 0x00, 0x03, byte(ref), byte(total), byte(part)}
 }
 

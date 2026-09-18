@@ -175,6 +175,8 @@ func main() {
 
 func smppSubmitErrorStatus(err error) uint32 {
 	switch {
+	case errors.Is(err, dispatch.ErrInvalidMessageLength):
+		return 0x00000001 // ESME_RINVMSGLEN
 	case errors.Is(err, dispatch.ErrRateExceeded), errors.Is(err, dispatch.ErrQuotaExceeded):
 		return smpp.StatusThrottled
 	case errors.Is(err, dispatch.ErrInvalidDestAddr):

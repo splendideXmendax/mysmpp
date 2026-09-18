@@ -155,6 +155,7 @@ func TestPostgresMigrationsAndConcurrentQuota(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	testReliabilityStore(t, st)
 	if _, err := pool.Exec(ctx, migrationSQL(t, "006_pending_segments_and_provider_key.down.sql")); err == nil {
 		t.Fatal("006 down migration should reject colliding provider IDs")
 	}

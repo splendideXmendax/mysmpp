@@ -38,7 +38,7 @@ type DLR struct {
 	DoneAt     time.Time
 }
 
-type DLRCallback func(DLR)
+type DLRCallback func(DLR) error
 
 type PoolStatus struct {
 	Name        string

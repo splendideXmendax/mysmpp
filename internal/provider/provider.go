@@ -32,7 +32,7 @@ type DLR struct {
 	DoneAt     time.Time
 }
 
-type DLRCallback func(DLR)
+type DLRCallback func(DLR) error
 
 // Provider sends MT messages to an upstream. Providers that do not receive DLRs
 // directly, such as HTTP adapters using inbound callback rules, may ignore OnDLR.

@@ -24,7 +24,7 @@ type connection struct {
 	conn     net.Conn
 	outMu    sync.RWMutex
 	out      chan smpp.PDU
-	onDLR    func(DLR)
+	onDLR    DLRCallback
 	seq      atomic.Uint32
 	bound    atomic.Bool
 	state    atomic.Value
@@ -35,7 +35,7 @@ type connection struct {
 	dlrCount atomic.Uint64
 }
 
-func newConnection(id int, cfg Config, onDLR func(DLR)) *connection {
+func newConnection(id int, cfg Config, onDLR DLRCallback) *connection {
 	c := &connection{
 		id:     id,
 		cfg:    cfg,
@@ -208,15 +208,26 @@ func (c *connection) readLoop(conn net.Conn, done <-chan struct{}, errCh chan<- 
 			c.win.complete(pdu.SequenceID, pdu)
 		case smpp.CommandDeliverSM:
 			c.dlrCount.Add(1)
-			c.send(smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID, Body: smpp.CString("")})
 			dlr, ok, isReceipt := ParseDeliverSM(pdu.Body, c.cfg.SMPP.DLRIDSource, c.cfg.SMPP.MessageIDDLRFormat)
+			status := uint32(smpp.StatusOK)
+			if _, _, valid := parseDeliverBody(pdu.Body); !valid {
+				status = 0x00000001
+			}
+			if isReceipt {
+				status = 0x00000008 // ESME_RSYSERR: upstream must retry until durable
+				if ok && c.onDLR != nil {
+					if err := c.onDLR(dlr); err == nil {
+						status = smpp.StatusOK
+					} else {
+						c.setError(err)
+					}
+				}
+			}
+			c.send(smpp.PDU{CommandID: smpp.CommandDeliverSMResp, Status: status, SequenceID: pdu.SequenceID, Body: smpp.CString("")})
 			if !isReceipt {
 				slog.Warn("smpp upstream deliver_sm MO ignored", "provider", c.cfg.Name, "connection", c.id)
 				c.setError(errors.New("smpp upstream deliver_sm MO ignored"))
 				continue
-			}
-			if ok && c.onDLR != nil {
-				c.onDLR(dlr)
 			}
 		case smpp.CommandEnquireLink:
 			c.send(smpp.PDU{CommandID: smpp.CommandEnquireLinkResp, Status: smpp.StatusOK, SequenceID: pdu.SequenceID})
@@ -294,20 +305,14 @@ func (c *connection) submit(ctx context.Context, body []byte) (string, error) {
 		if res.pdu.Status != smpp.StatusOK {
 			c.errCount.Add(1)
 			err := SubmitStatusError{Status: res.pdu.Status}
-			if permanentStatus(res.pdu.Status) {
-				return "", PermanentError{Err: err}
-			}
-			return "", err
+			return "", PermanentError{Err: err}
 		}
 		c.okCount.Add(1)
 		return readCString(res.pdu.Body), nil
 	case <-timer.C:
 		c.win.fail(seq, TimeoutError{Duration: timeout})
 		c.errCount.Add(1)
-		if c.cfg.SMPP.RetryOnTimeout {
-			return "", TimeoutError{Duration: timeout}
-		}
-		return "", PermanentError{Err: TimeoutError{Duration: timeout}}
+		return "", TimeoutError{Duration: timeout}
 	case <-ctx.Done():
 		c.win.fail(seq, ctx.Err())
 		c.errCount.Add(1)

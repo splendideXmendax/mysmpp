@@ -92,8 +92,9 @@ func TestSMPPProviderSendAndDLR(t *testing.T) {
 	defer provider.Close()
 
 	dlrs := make(chan DLR, 1)
-	provider.OnDLR(func(dlr DLR) {
+	provider.OnDLR(func(dlr DLR) error {
 		dlrs <- dlr
+		return nil
 	})
 	waitProviderBound(t, provider)
 	select {

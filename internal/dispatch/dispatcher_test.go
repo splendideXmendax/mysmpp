@@ -277,7 +277,7 @@ func TestDispatcherHTTPCallbackIncludesSegmentAggregation(t *testing.T) {
 	defer srv.Close()
 	st := store.NewMemory()
 	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), provider.NewRegistry(), nil, testDispatcherConfig(), st)
-	d.httpClient = srv.Client()
+	d.setHTTPClient(srv.Client())
 	defer d.Close()
 	msg := testMessage("g-callback-segments")
 	if err := st.SaveMessage(context.Background(), msg); err != nil {
@@ -1046,7 +1046,7 @@ func TestDispatcherSendsHTTPCallback(t *testing.T) {
 	reg := provider.NewRegistry()
 	st := store.NewMemory()
 	d := New(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), reg, nil, testDispatcherConfig(), st)
-	d.httpClient = srv.Client()
+	d.setHTTPClient(srv.Client())
 	defer d.Close()
 	rec := store.Pending{
 		ProviderID:   "up-1",
@@ -1182,7 +1182,7 @@ func TestDispatcherSendsTerminalFailureDLRToOnlineSMPPClient(t *testing.T) {
 		t.Fatalf("unexpected failure receipt: %q", dlr.Body)
 	}
 	waitForOutboxDepth(t, st, "failed", 1)
-	waitForPending(t, d, 0)
+	waitReceiptState(t, st, "delivery:done", 1)
 }
 
 func TestDispatcherPersistsTerminalFailureDLRForOfflineSMPPClient(t *testing.T) {
@@ -1207,7 +1207,7 @@ func TestDispatcherPersistsTerminalFailureDLRForOfflineSMPPClient(t *testing.T) 
 	}
 	waitForOutboxDepth(t, st, "failed", 1)
 	waitForPending(t, d, 1)
-	items, err := st.ListReadyDLR(context.Background(), "esme-a", 10)
+	items, err := st.ListPendingByGatewayID(context.Background(), receipt.GatewayID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,9 +1243,7 @@ func TestDispatcherSkipsTerminalFailureDLRWhenNotRequested(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForOutboxDepth(t, st, "failed", 1)
-	if size := d.PendingSize(); size != 0 {
-		t.Fatalf("pending size = %d, want 0", size)
-	}
+	waitReceiptState(t, st, "delivery:done", 1)
 }
 
 func TestDispatcherDoesNotRetryAmbiguousProviderError(t *testing.T) {
@@ -1270,8 +1268,8 @@ func TestDispatcherDoesNotRetryAmbiguousProviderError(t *testing.T) {
 	if count := upstream.callCount(); count != 1 {
 		t.Fatalf("provider calls = %d, want 1", count)
 	}
-	if size := d.PendingSize(); size != 0 {
-		t.Fatalf("pending size = %d, want 0", size)
+	if size := d.PendingSize(); size != 1 {
+		t.Fatalf("unknown outcome audit mapping count = %d, want 1", size)
 	}
 	msg, ok, err := st.GetMessage(context.Background(), receipt.GatewayID)
 	if err != nil || !ok || msg.State != "UNKNOWN" {

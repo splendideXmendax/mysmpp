@@ -29,7 +29,7 @@ const pendingSelectColumns = `
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
 	COALESCE(registered_delivery, 0), COALESCE(route, ''), received_at, expires_at,
 	COALESCE(dlr_ready, FALSE), COALESCE(dlr_delivered, FALSE), COALESCE(dlr_state, ''),
-	COALESCE(dlr_err, 0), dlr_done_at`
+	COALESCE(dlr_err, 0), dlr_done_at, reliability_managed,upstream_status`
 
 func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 	if dsn == "" {
@@ -195,13 +195,13 @@ func (s *PostgresStore) SavePending(ctx context.Context, p Pending) error {
 
 func savePendingSQL(ctx context.Context, exec sqlExecer, p Pending) error {
 	p = normalizePending(p)
-	_, err := exec.Exec(ctx, `
+	tag, err := exec.Exec(ctx, `
 INSERT INTO pending (
 	provider, provider_id, gateway_id, tenant_id, account_id, client_msg_id, segment_index, segment_count,
 	source_kind, source_session, source_system, callback_url, callback_rule, from_addr, to_addr,
 	text, data_coding, registered_delivery, route, received_at, expires_at, dlr_ready, dlr_delivered,
-	dlr_state, dlr_err, dlr_done_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+	dlr_state, dlr_err, dlr_done_at, reliability_managed,upstream_status
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 ON CONFLICT (provider, provider_id) DO UPDATE SET
 	gateway_id = EXCLUDED.gateway_id,
 	tenant_id = EXCLUDED.tenant_id,
@@ -226,14 +226,15 @@ ON CONFLICT (provider, provider_id) DO UPDATE SET
 	dlr_delivered = EXCLUDED.dlr_delivered,
 	dlr_state = EXCLUDED.dlr_state,
 	dlr_err = EXCLUDED.dlr_err,
-	dlr_done_at = EXCLUDED.dlr_done_at`,
+	dlr_done_at = EXCLUDED.dlr_done_at, reliability_managed=EXCLUDED.reliability_managed,upstream_status=EXCLUDED.upstream_status
+WHERE pending.gateway_id=EXCLUDED.gateway_id`,
 		p.Provider, p.ProviderID, p.GatewayID, nullString(p.TenantID), nullString(p.AccountID), nullString(p.ClientMsgID),
 		p.SegmentIndex, p.SegmentCount, p.SourceKind, nullString(p.SourceSession), nullString(p.SourceSystem),
 		nullString(p.CallbackURL), nullString(p.CallbackRule), nullString(p.From), nullString(p.To), nullString(p.Text),
 		p.DataCoding, p.RegisteredDelivery, nullString(p.Route), zeroAsNow(p.ReceivedAt), p.ExpiresAt, p.DLRReady,
-		p.DLRDelivered, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt),
+		p.DLRDelivered, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt), p.ReliabilityManaged, int64(p.UpstreamStatus),
 	)
-	return err
+	return checkRows(tag, err)
 }
 
 func (s *PostgresStore) GetPending(ctx context.Context, provider, providerID string) (Pending, bool, error) {
@@ -310,12 +311,13 @@ func (s *PostgresStore) DeletePendingByGatewayID(ctx context.Context, gatewayID 
 
 func (s *PostgresStore) SweepExpiredPending(ctx context.Context, before time.Time) (int, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM pending WHERE ctid IN (
-	SELECT ctid FROM pending WHERE dlr_ready = FALSE AND expires_at < $1 ORDER BY expires_at LIMIT 10000
+	SELECT ctid FROM pending WHERE reliability_managed=FALSE AND dlr_ready = FALSE AND expires_at < $1 ORDER BY expires_at LIMIT 10000
 )`, before)
 	if err != nil {
 		return 0, err
 	}
-	return int(tag.RowsAffected()), nil
+	n, err := s.expireManaged(ctx, before)
+	return int(tag.RowsAffected()) + n, err
 }
 
 func (s *PostgresStore) PendingSize(ctx context.Context) (int, error) {
@@ -433,7 +435,7 @@ FROM outbox WHERE id = $1 FOR UPDATE`, id).Scan(&gatewayID, &providerName, &stat
 	if err != nil {
 		return err
 	}
-	if state == "done" {
+	if state == "done" || ((state == "failed" || state == "uncertain") && claimedBy == workerID) {
 		return nil
 	}
 	if state != "sending" || claimedBy != workerID {
@@ -448,20 +450,32 @@ UPDATE messages SET provider_id = $2, state = 'sent', sent_at = NOW()
 WHERE gateway_id = $1`, gatewayID, pending[0].ProviderID); updateErr != nil || tag.RowsAffected() != 1 {
 		return checkRows(tag, updateErr)
 	}
+	if agg := AggregateReceipt(pending); agg.Final {
+		if _, err := tx.Exec(ctx, `UPDATE messages SET state=$2,error_code=$3,done_at=NOW() WHERE gateway_id=$1`, gatewayID, agg.State, agg.ErrorCode); err != nil {
+			return err
+		}
+	}
+	outcome := completionState(pending)
+	for _, j := range completionJobs(pending) {
+		if _, err := tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, j.ID, j.Kind, j.Payload, j.NextAt, j.ExpiresAt); err != nil {
+			return err
+		}
+	}
 	for _, rec := range pending {
+		rec.ReliabilityManaged = true
 		if err := savePendingSQL(ctx, tx, rec); err != nil {
 			return err
 		}
 	}
 	if tag, updateErr := tx.Exec(ctx, `
 UPDATE outbox
-SET state = 'done',
+SET state = $2,
     payload = payload - ARRAY[
         'udh',
         'raw_payload', 'raw_payload_set',
         'sar_ref_num', 'sar_total_segments', 'sar_segment_seqnum', 'sar_set'
     ]
-WHERE id = $1`, id); updateErr != nil || tag.RowsAffected() != 1 {
+WHERE id = $1`, id, outcome); updateErr != nil || tag.RowsAffected() != 1 {
 		return checkRows(tag, updateErr)
 	}
 	return tx.Commit(ctx)
@@ -730,7 +744,7 @@ func scanPending(row pgx.CollectableRow) (Pending, error) {
 	var doneAt *time.Time
 	err := row.Scan(&p.Provider, &p.ProviderID, &p.GatewayID, &p.TenantID, &p.AccountID, &p.ClientMsgID, &p.SegmentIndex, &p.SegmentCount,
 		&p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.CallbackURL, &p.CallbackRule, &p.From, &p.To, &p.Text, &dataCoding,
-		&registeredDelivery, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRDelivered, &p.DLRState, &p.DLRErrorCode, &doneAt)
+		&registeredDelivery, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRDelivered, &p.DLRState, &p.DLRErrorCode, &doneAt, &p.ReliabilityManaged, &p.UpstreamStatus)
 	if err != nil {
 		return Pending{}, err
 	}
@@ -805,6 +819,12 @@ FROM (
 }
 
 func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `SELECT id,kind,payload,state,lease FROM receipt_jobs LIMIT 0`); err != nil {
+		return fmt.Errorf("postgres receipt_jobs table is missing; run migrations before startup: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `SELECT key,payload,expires_at FROM multipart_bindings LIMIT 0`); err != nil {
+		return fmt.Errorf("postgres multipart_bindings table is missing; run migrations before startup: %w", err)
+	}
 	if _, err := s.OutboxDepth(ctx, "pending"); err != nil {
 		if isUndefinedTable(err) {
 			return fmt.Errorf("postgres schema is missing; run migrations before startup: %w", err)
@@ -817,7 +837,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, `SELECT provider, client_msg_id, segment_index, segment_count, dlr_ready, dlr_delivered, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule FROM pending LIMIT 0`); err != nil {
+	if _, err := s.pool.Exec(ctx, `SELECT provider, client_msg_id, segment_index, segment_count, dlr_ready, dlr_delivered, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule,reliability_managed,upstream_status FROM pending LIMIT 0`); err != nil {
 		return fmt.Errorf("postgres pending DLR columns are missing; run migrations before startup: %w", err)
 	}
 	if ok, err := s.hasUniqueColumns(ctx, "pending", []string{"provider", "provider_id"}); err != nil || !ok {

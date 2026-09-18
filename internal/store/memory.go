@@ -12,6 +12,14 @@ import (
 )
 
 type Store interface {
+	PrepareReceipt(context.Context, ReceiptEvent) error
+	MarkReceiptDelivered(context.Context, Pending) error
+	BindMultipart(context.Context, MultipartBinding, int, string) (MultipartBinding, error)
+	EnqueueReceipt(context.Context, ReceiptJob) error
+	ClaimReceipt(context.Context, string, time.Time) (ReceiptJob, bool, error)
+	FinishReceipt(context.Context, ReceiptJob, time.Time, string) error
+	ReceiptCounts(context.Context) (map[string]int, error)
+	SweepReliability(context.Context, time.Time) error
 	Ping(context.Context) error
 	SaveMessage(context.Context, message.Message) error
 	GetMessage(context.Context, string) (message.Message, bool, error)
@@ -52,6 +60,8 @@ type ListOptions struct {
 }
 
 type Pending struct {
+	ReliabilityManaged bool
+	UpstreamStatus     uint32
 	ProviderID         string
 	GatewayID          string
 	TenantID           string
@@ -146,6 +156,8 @@ type SubmitOptions struct {
 }
 
 type MemoryStore struct {
+	multipart   map[string]MultipartBinding
+	receipts    map[string]ReceiptJob
 	mu          sync.RWMutex
 	messages    []message.Message
 	messageByID map[string]int
@@ -176,6 +188,8 @@ type quotaKey struct {
 
 func NewMemory() *MemoryStore {
 	return &MemoryStore{
+		multipart:   map[string]MultipartBinding{},
+		receipts:    map[string]ReceiptJob{},
 		messageByID: map[string]int{},
 		pending:     map[string]Pending{},
 		outbox:      map[int64]OutboxItem{},
@@ -286,6 +300,9 @@ func (s *MemoryStore) SavePending(_ context.Context, p Pending) error {
 	defer s.mu.Unlock()
 	s.sweepLocked(time.Now().UTC())
 	p = normalizePending(p)
+	if old, ok := s.pending[pendingKey(p.Provider, p.ProviderID)]; ok && old.GatewayID != p.GatewayID {
+		return errors.New("provider message ID already belongs to another gateway message")
+	}
 	s.pending[pendingKey(p.Provider, p.ProviderID)] = p
 	return nil
 }
@@ -368,7 +385,7 @@ func (s *MemoryStore) GetPending(_ context.Context, provider, providerID string)
 	s.sweepLocked(now)
 	key := pendingKey(provider, providerID)
 	p, ok := s.pending[key]
-	if ok && !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+	if ok && !p.ReliabilityManaged && !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
 		delete(s.pending, key)
 		return Pending{}, false, nil
 	}
@@ -420,11 +437,12 @@ func (s *MemoryStore) SweepExpiredPending(_ context.Context, before time.Time) (
 	defer s.mu.Unlock()
 	count := 0
 	for id, p := range s.pending {
-		if !p.DLRReady && p.ExpiresAt.Before(before) {
+		if !p.ReliabilityManaged && !p.DLRReady && p.ExpiresAt.Before(before) {
 			delete(s.pending, id)
 			count++
 		}
 	}
+	count += s.expireManagedLocked(before)
 	return count, nil
 }
 
@@ -527,7 +545,7 @@ func (s *MemoryStore) CompleteOutboxSend(_ context.Context, id int64, workerID s
 	if !ok {
 		return ErrNotFound
 	}
-	if item.State == "done" {
+	if item.State == "done" || ((item.State == "failed" || item.State == "uncertain") && item.ClaimedBy == workerID) {
 		return nil
 	}
 	if item.State != "sending" || item.ClaimedBy != workerID {
@@ -537,6 +555,11 @@ func (s *MemoryStore) CompleteOutboxSend(_ context.Context, id int64, workerID s
 	if err != nil {
 		return err
 	}
+	for _, rec := range pending {
+		if old, ok := s.pending[pendingKey(rec.Provider, rec.ProviderID)]; ok && old.GatewayID != rec.GatewayID {
+			return errors.New("provider message ID already belongs to another gateway message")
+		}
+	}
 	idx, ok := s.messageByID[item.GatewayID]
 	if !ok {
 		return ErrNotFound
@@ -545,12 +568,24 @@ func (s *MemoryStore) CompleteOutboxSend(_ context.Context, id int64, workerID s
 	msg := s.messages[idx]
 	msg.ProviderID = pending[0].ProviderID
 	msg.State = "sent"
+	if agg := AggregateReceipt(pending); agg.Final {
+		msg.State = agg.State
+		msg.ErrorCode = agg.ErrorCode
+		msg.DoneAt = time.Now().UTC()
+	}
 	msg.SentAt = time.Now().UTC()
 	s.messages[idx] = msg
+	outcome := completionState(pending)
+	for _, j := range completionJobs(pending) {
+		if _, ok := s.receipts[j.ID]; !ok {
+			s.receipts[j.ID] = j
+		}
+	}
 	for _, rec := range pending {
+		rec.ReliabilityManaged = true
 		s.pending[pendingKey(rec.Provider, rec.ProviderID)] = rec
 	}
-	item.State = "done"
+	item.State = outcome
 	scrubOutboxPayload(&item.Payload)
 	s.outbox[id] = item
 	return nil
@@ -784,6 +819,7 @@ func validateOutboxCompletion(item OutboxItem, pending []Pending) ([]Pending, er
 		return nil, errors.New("outbox completion requires at least one pending record")
 	}
 	out := make([]Pending, len(pending))
+	seen := map[string]bool{}
 	for i, rec := range pending {
 		rec = normalizePending(rec)
 		if rec.ProviderID == "" {
@@ -792,6 +828,10 @@ func validateOutboxCompletion(item OutboxItem, pending []Pending) ([]Pending, er
 		if rec.GatewayID != item.GatewayID || rec.Provider != item.Provider {
 			return nil, fmt.Errorf("outbox completion pending record %d does not match outbox", i)
 		}
+		if seen[rec.ProviderID] {
+			return nil, errors.New("provider returned duplicate IDs for distinct fragments")
+		}
+		seen[rec.ProviderID] = true
 		out[i] = rec
 	}
 	return out, nil
@@ -819,7 +859,7 @@ func validateDailyQuotaDebit(quota *DailyQuotaDebit) error {
 
 func (s *MemoryStore) sweepLocked(now time.Time) {
 	for id, p := range s.pending {
-		if !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
+		if !p.ReliabilityManaged && !p.DLRReady && !p.ExpiresAt.IsZero() && p.ExpiresAt.Before(now) {
 			delete(s.pending, id)
 		}
 	}

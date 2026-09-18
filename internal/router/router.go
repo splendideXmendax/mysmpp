@@ -15,6 +15,23 @@ type Router struct {
 	enabledProviders map[string]bool
 }
 
+// BindingEnabled honors administrative disable/removal without choosing a
+// different provider for the remaining pieces of an existing message.
+func (r *Router) BindingEnabled(name, provider string) bool {
+	if enabled, known := r.enabledProviders[provider]; known && !enabled {
+		return false
+	}
+	if len(r.enabledProviders) > 0 && !r.enabledProviders[provider] {
+		return false
+	}
+	for _, route := range r.routes {
+		if route.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func New(routes []config.RouteConfig) *Router {
 	cp := make([]config.RouteConfig, len(routes))
 	copy(cp, routes)

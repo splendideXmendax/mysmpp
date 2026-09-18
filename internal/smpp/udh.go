@@ -19,6 +19,7 @@ func SplitUDH(raw []byte, esmClass uint8) (udh, body []byte, err error) {
 	if udhLen <= 1 || udhLen > len(raw) {
 		return nil, nil, errors.New("udh length exceeds short_message")
 	}
+	concatSeen := false
 	for ies := raw[1:udhLen]; len(ies) > 0; {
 		if len(ies) < 2 {
 			return nil, nil, errors.New("malformed udh information element")
@@ -28,6 +29,12 @@ func SplitUDH(raw []byte, esmClass uint8) (udh, body []byte, err error) {
 			return nil, nil, errors.New("malformed udh information element")
 		}
 		data := ies[2 : 2+length]
+		if ies[0] == 0x00 || ies[0] == 0x08 {
+			if concatSeen {
+				return nil, nil, errors.New("duplicate concatenation information element")
+			}
+			concatSeen = true
+		}
 		switch ies[0] {
 		case 0x00:
 			if len(data) != 3 || !validConcatPart(data[1], data[2]) {

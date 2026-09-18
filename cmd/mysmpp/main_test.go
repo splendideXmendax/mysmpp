@@ -17,6 +17,7 @@ func TestSMPPSubmitQuotaErrorsMapToThrottled(t *testing.T) {
 	}{
 		{err: dispatch.ErrRateExceeded, want: smpp.StatusThrottled},
 		{err: dispatch.ErrQuotaExceeded, want: smpp.StatusThrottled},
+		{err: dispatch.ErrInvalidMessageLength, want: 0x00000001},
 		{err: errors.New("other"), want: smpp.StatusSubmitFailed},
 	} {
 		got := smppSubmitErrorStatus(tc.err)

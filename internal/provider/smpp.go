@@ -65,8 +65,8 @@ func (p *SMPPProvider) OnDLR(cb DLRCallback) {
 		p.pool.OnDLR(nil)
 		return
 	}
-	p.pool.OnDLR(func(dlr smppclient.DLR) {
-		cb(DLR{
+	p.pool.OnDLR(func(dlr smppclient.DLR) error {
+		return cb(DLR{
 			Provider:   p.name,
 			ProviderID: dlr.ProviderID,
 			State:      dlr.State,

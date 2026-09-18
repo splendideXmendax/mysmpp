@@ -15,6 +15,9 @@ type submitPart struct {
 }
 
 func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
+	if len(msg.RawPayload)+len(msg.UDH) > 65535 {
+		return nil
+	}
 	encoding := msg.Encoding
 	if encoding == "" || encoding == "auto" {
 		encoding = message.DetectEncoding(msg.Text)
@@ -27,6 +30,9 @@ func BuildSubmitSM(msg Message, cfg config.SMPPClientConfig) []submitPart {
 		encoding = "ucs2"
 	} else if dataCoding == 0x03 {
 		encoding = "8bit"
+	}
+	if !msg.RawPayloadSet && len(message.Split(msg.Text, message.SplitOptions{ForceEncoding: encoding})) > 255 {
+		return nil
 	}
 	registeredDelivery := msg.RegisteredDelivery
 	if cfg.RegisteredDelivery >= 0 {

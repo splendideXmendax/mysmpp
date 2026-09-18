@@ -22,14 +22,16 @@ type FileStore struct {
 }
 
 type fileSnapshot struct {
-	Messages    []message.Message       `json:"messages"`
-	Pending     map[string]Pending      `json:"pending"`
-	Outbox      map[int64]OutboxItem    `json:"outbox"`
-	NextOutbox  int64                   `json:"next_outbox"`
-	GatewaySeq  uint64                  `json:"gateway_seq"`
-	Idempotency []fileIdempotencyRecord `json:"idempotency"`
-	QuotaUsage  []fileQuotaUsage        `json:"quota_usage,omitempty"`
-	SavedAt     time.Time               `json:"saved_at"`
+	Multipart   map[string]MultipartBinding `json:"multipart,omitempty"`
+	Receipts    map[string]ReceiptJob       `json:"receipts,omitempty"`
+	Messages    []message.Message           `json:"messages"`
+	Pending     map[string]Pending          `json:"pending"`
+	Outbox      map[int64]OutboxItem        `json:"outbox"`
+	NextOutbox  int64                       `json:"next_outbox"`
+	GatewaySeq  uint64                      `json:"gateway_seq"`
+	Idempotency []fileIdempotencyRecord     `json:"idempotency"`
+	QuotaUsage  []fileQuotaUsage            `json:"quota_usage,omitempty"`
+	SavedAt     time.Time                   `json:"saved_at"`
 }
 
 type fileIdempotencyRecord struct {
@@ -110,6 +112,12 @@ func (s *FileStore) load() error {
 		}
 	}
 	s.quotaUsage = map[quotaKey]int{}
+	for k, v := range snap.Multipart {
+		s.multipart[k] = cloneBinding(v)
+	}
+	for k, v := range snap.Receipts {
+		s.receipts[k] = v
+	}
 	for _, rec := range snap.QuotaUsage {
 		s.quotaUsage[quotaKey{tenantID: rec.TenantID, date: rec.Date}] = rec.UsedSegments
 	}
@@ -121,6 +129,8 @@ func (s *FileStore) persist() error {
 	defer s.persistMu.Unlock()
 	s.mu.RLock()
 	snap := fileSnapshot{
+		Multipart:   make(map[string]MultipartBinding, len(s.multipart)),
+		Receipts:    make(map[string]ReceiptJob, len(s.receipts)),
 		Messages:    make([]message.Message, len(s.messages)),
 		Pending:     make(map[string]Pending, len(s.pending)),
 		Outbox:      make(map[int64]OutboxItem, len(s.outbox)),
@@ -135,6 +145,13 @@ func (s *FileStore) persist() error {
 	}
 	for k, v := range s.pending {
 		snap.Pending[k] = v
+	}
+	for k, v := range s.multipart {
+		snap.Multipart[k] = cloneBinding(v)
+	}
+	for k, v := range s.receipts {
+		v.Payload = append(json.RawMessage(nil), v.Payload...)
+		snap.Receipts[k] = v
 	}
 	for k, v := range s.outbox {
 		snap.Outbox[k] = cloneOutbox(v)

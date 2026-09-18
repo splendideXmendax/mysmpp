@@ -63,6 +63,7 @@ type SMPPConfig struct {
 }
 
 type DispatcherConfig struct {
+	MaxMessageSegments   int    `json:"max_message_segments,omitempty"`
 	Workers              int    `json:"workers"`
 	PerWorkerConcurrency int    `json:"per_worker_concurrency"`
 	ClaimLimit           int    `json:"claim_limit"`
@@ -518,6 +519,9 @@ func (c Config) validate(allowAutoGenerate bool) error {
 	if c.Dispatcher.Workers < 0 || c.Dispatcher.PerWorkerConcurrency < 0 || c.Dispatcher.ClaimLimit < 0 ||
 		c.Dispatcher.PollIntervalMS < 0 || c.Dispatcher.MaxAttempts < 0 {
 		return fmt.Errorf("dispatcher values must be non-negative")
+	}
+	if c.Dispatcher.MaxMessageSegments < 0 || c.Dispatcher.MaxMessageSegments > 255 {
+		return fmt.Errorf("dispatcher.max_message_segments must be between 1 and 255 (0 uses 20)")
 	}
 	if _, err := time.ParseDuration(c.Dispatcher.PendingTTL); c.Dispatcher.PendingTTL != "" && err != nil {
 		return fmt.Errorf("dispatcher.pending_ttl is invalid: %w", err)

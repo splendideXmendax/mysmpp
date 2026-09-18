@@ -54,17 +54,17 @@ func (p *Pool) SendAll(ctx context.Context, msg Message) ([]string, error) {
 	}
 	parts := BuildSubmitSM(msg, p.cfg.SMPP)
 	if len(parts) == 0 {
-		return nil, errors.New("empty smpp submit")
+		return nil, PermanentError{Err: SubmitStatusError{Status: 0x00000001}}
 	}
 	ids := make([]string, 0, len(parts))
 	for _, part := range parts {
 		conn, ok := p.pick()
 		if !ok {
-			return ids, errors.New("no bound smpp upstream connection")
+			return ids, PartialSubmitError{Err: PermanentError{Err: errors.New("no bound smpp upstream connection")}, Total: len(parts)}
 		}
 		id, err := conn.submit(ctx, part.Body)
 		if err != nil {
-			return ids, err
+			return ids, PartialSubmitError{Err: err, Total: len(parts)}
 		}
 		id = NormalizeID(id, p.cfg.SMPP.MessageIDRespFormat)
 		ids = append(ids, id)
@@ -108,11 +108,12 @@ func (p *Pool) pick() (*connection, bool) {
 	return nil, false
 }
 
-func (p *Pool) handleDLR(dlr DLR) {
+func (p *Pool) handleDLR(dlr DLR) error {
 	p.onDLRMu.RLock()
 	cb := p.onDLR
 	p.onDLRMu.RUnlock()
 	if cb != nil {
-		cb(dlr)
+		return cb(dlr)
 	}
+	return errors.New("receipt handler unavailable")
 }
