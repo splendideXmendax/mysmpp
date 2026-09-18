@@ -812,6 +812,8 @@ Postgres 模式:
 
 ## 修改配置的方式
 
+v1.2.2 可通过 `dispatcher.callback_forwarding` 为指定租户和完整 HTTP 回调 URL 配置固定内网转发。默认不启用；HTTPS 不降级，其他回调保留公网地址检查。该字段支持现有配置热加载，不改变已入库消息的 callback_url。配置示例、匹配规则和安全边界见 [HTTP 测试桩 DR 转发说明](HTTP测试桩DR转发说明.md)。
+
 ### 方式一: 管理后台
 
 ```text

@@ -77,6 +77,8 @@ v1.2.1 支持公网 HTTP 和 HTTPS 回调，无需增加配置开关；v1.2.0 �
 
 上游部分分片明确拒绝时，已成功分片继续跟踪真实 DR；未提交分片标记 UNDELIV，不确定片标记 UNKNOWN。SMPP 文本回执错误字段保持三位格式，超范围映射为 999；完整 uint32 上游状态保存在 pending 的 upstream_status，以及 HTTP/CDR 的 submit_status，不会因数据库整数范围而保存失败。消息状态聚合按失败优先级确定，不能由最后一片到达顺序覆盖成成功。
 
+v1.2.2 为公网 HTTP 地址无法回流访问的测试桩提供可选的管理员精确转发规则：指定 tenant_id + 完整 callback_url 对应固定私有 IP 的 HTTP 接收地址。只命中登记规则时使用该目标；原消息 URL、投递正文、失败重试和其他客户安全检查保持不变。详见 [HTTP 测试桩 DR 转发说明](HTTP测试桩DR转发说明.md)。
+
 新版本受理的记录带 `pending.reliability_managed=true`。到期还缺真实 DR 或缺少分片记录时，保存 EXPIRED 投递快照再清理映射，避免永远 PENDING。旧记录保持原清理策略，不因升级批量补推历史 HTTP 回调。
 
 SMPP 回执会再次校验接收会话所属 system_id。进程重启后 session ID 被其他客户复用，也不能串发 DR；历史记录若缺少 system_id 则拒绝猜测收件人。

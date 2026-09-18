@@ -71,6 +71,8 @@ type Dispatcher struct {
 	rateLimiter    tenant.RateLimiter
 	maxSegments    atomic.Int64
 
+	callbackForwards atomic.Pointer[callbackForwardTable]
+
 	mu      sync.RWMutex
 	smppSrv SMPPServer
 }
@@ -134,6 +136,7 @@ func New(logger *slog.Logger, reg *provider.Registry, srv SMPPServer, cfg config
 	}
 	d.tenantResolver.Store(&tenantResolverHolder{resolver: tenant.NewResolver(config.Config{})})
 	d.ReloadLimits(cfg)
+	d.ReloadCallbacks(cfg)
 	reg.SetDLRHandler(d.OnDLR)
 	d.StartWorkers(d.workers)
 	return d
@@ -192,6 +195,7 @@ func (d *Dispatcher) ReloadFilter(e *filter.Engine) {
 func (d *Dispatcher) ReloadTenants(cfg config.Config) {
 	d.tenantResolver.Store(&tenantResolverHolder{resolver: tenant.NewResolver(cfg)})
 	d.ReloadLimits(cfg.Dispatcher)
+	d.ReloadCallbacks(cfg.Dispatcher)
 }
 
 func (d *Dispatcher) SetCDRSink(s CDRSink) {
@@ -652,6 +656,9 @@ func (d *Dispatcher) PendingSize() int {
 func (d *Dispatcher) Close() error {
 	d.cancelWorkers()
 	d.wg.Wait()
+	if table := d.callbackForwards.Load(); table != nil {
+		table.closeIdle()
+	}
 	if holder := d.cdrSink.Load(); holder != nil && holder.sink != nil {
 		return holder.sink.Close()
 	}
@@ -1395,14 +1402,21 @@ func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dl
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rec.CallbackURL, strings.NewReader(string(body)))
+	callbackURL := rec.CallbackURL
+	d.httpClientMu.RLock()
+	client := *d.httpClient
+	d.httpClientMu.RUnlock()
+	if table := d.callbackForwards.Load(); table != nil {
+		if forward, ok := table.routes[callbackForwardKey{rec.TenantID, rec.CallbackURL}]; ok {
+			callbackURL = forward.target
+			client = *forward.client
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	d.httpClientMu.RLock()
-	client := *d.httpClient
-	d.httpClientMu.RUnlock()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errUnsafeCallback }
 	resp, err := client.Do(req)
 	if err != nil {

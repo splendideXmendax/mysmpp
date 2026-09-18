@@ -73,6 +73,8 @@ type DispatcherConfig struct {
 	ClaimTimeout         string `json:"claim_timeout"`
 	PendingSweepInterval string `json:"pending_sweep_interval"`
 	ValidateDestAddr     *bool  `json:"validate_dest_addr,omitempty"`
+
+	CallbackForwarding []CallbackForwarding `json:"callback_forwarding,omitempty"`
 }
 
 type ESMECred struct {
@@ -670,6 +672,20 @@ func (c Config) validate(allowAutoGenerate bool) error {
 		}
 	}
 	esmeNames := map[string]struct{}{}
+	forwardKeys := map[string]bool{}
+	for _, rule := range c.Dispatcher.CallbackForwarding {
+		if err := rule.Validate(); err != nil {
+			return err
+		}
+		if _, ok := tenantNames[rule.TenantID]; !ok {
+			return fmt.Errorf("callback_forwarding references unknown tenant %q", rule.TenantID)
+		}
+		key := rule.TenantID + "\x00" + rule.CallbackURL
+		if forwardKeys[key] {
+			return fmt.Errorf("duplicate callback_forwarding rule for tenant %q", rule.TenantID)
+		}
+		forwardKeys[key] = true
+	}
 	for _, esme := range c.ESMEs {
 		if esme.SystemID == "" {
 			return fmt.Errorf("esme system_id is required")
