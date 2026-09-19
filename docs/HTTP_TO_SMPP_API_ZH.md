@@ -76,7 +76,7 @@ Content-Type: application/json
 |---|---:|---|
 | `from` | 是 | 源地址或签名，1-32 个 Unicode 字符；还需符合上游允许的 source address 规则 |
 | `to` | 是 | 11 位纯数字，或 `+` 开头的 E.164 号码；路由前会去掉开头的 `+` |
-| `text` | 是 | 非空；自动识别 GSM-7 或 UCS-2，最多拆分为 20 个短信分片 |
+| `text` | 是 | 非空；v1.2.4 支持 ASCII 控制字符（含 NUL，须 JSON 转义）；自动识别 GSM-7 或 UCS-2，最多拆分为 20 个短信分片 |
 | `client_msg_id` | 否 | 客户系统传入的业务消息 ID，1-64 个非空白字符；同一 HTTP `client_id` 下 24 小时内用作幂等键 |
 | `callback_url` | 否 | DLR 回调地址，v1.2.1 允许完整的公网 `http://` 或 `https://` URL；禁止跳转、内网地址和 URL 账号密码，HTTPS 验证证书。v1.2.0 仅支持 HTTPS |
 | `callback_rule` | 否 | 调用方自定义标识；配置后会原样返回在 DLR 回调中 |

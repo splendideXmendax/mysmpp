@@ -222,7 +222,7 @@ func (s *PostgresStore) expireManagedGroup(ctx context.Context, id string, now t
 	}
 	rows, jobs, remove := expireReceiptGroup(rows, now)
 	for _, j := range jobs {
-		if _, err = tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, j.ID, j.Kind, j.Payload, j.NextAt, j.ExpiresAt); err != nil {
+		if err = insertReceiptSQL(ctx, tx, j); err != nil {
 			return 0, err
 		}
 	}

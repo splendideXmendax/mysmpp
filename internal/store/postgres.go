@@ -29,7 +29,7 @@ const pendingSelectColumns = `
 	COALESCE(from_addr, ''), COALESCE(to_addr, ''), COALESCE(text, ''), COALESCE(data_coding, 0),
 	COALESCE(registered_delivery, 0), COALESCE(route, ''), received_at, expires_at,
 	COALESCE(dlr_ready, FALSE), COALESCE(dlr_delivered, FALSE), COALESCE(dlr_state, ''),
-	COALESCE(dlr_err, 0), dlr_done_at, reliability_managed,upstream_status`
+	COALESCE(dlr_err, 0), dlr_done_at, reliability_managed,upstream_status,text_bytes`
 
 func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 	if dsn == "" {
@@ -74,6 +74,7 @@ func (s *PostgresStore) SaveMessage(ctx context.Context, msg message.Message) er
 }
 
 func saveMessageSQL(ctx context.Context, exec sqlExecer, msg message.Message) error {
+	text, textBytes := postgresText(msg.Text)
 	meta, err := json.Marshal(msg.Metadata)
 	if err != nil {
 		return err
@@ -86,11 +87,11 @@ func saveMessageSQL(ctx context.Context, exec sqlExecer, msg message.Message) er
 INSERT INTO messages (
 	gateway_id, provider_id, direction, from_addr, to_addr, text, encoding, data_coding,
 	segments, route, provider, source_kind, source_session, client_id, tenant_id, account_id,
-	client_msg_id, state, error_code, received_at, sent_at, done_at, meta
+	client_msg_id, state, error_code, received_at, sent_at, done_at, meta, text_bytes
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14, $15, $16,
-	$17, $18, $19, $20, $21, $22, $23
+	$17, $18, $19, $20, $21, $22, $23, $24
 )
 ON CONFLICT (gateway_id) DO UPDATE SET
 	provider_id = EXCLUDED.provider_id,
@@ -98,6 +99,7 @@ ON CONFLICT (gateway_id) DO UPDATE SET
 	from_addr = EXCLUDED.from_addr,
 	to_addr = EXCLUDED.to_addr,
 	text = EXCLUDED.text,
+	text_bytes = EXCLUDED.text_bytes,
 	encoding = EXCLUDED.encoding,
 	data_coding = EXCLUDED.data_coding,
 	segments = EXCLUDED.segments,
@@ -115,10 +117,10 @@ ON CONFLICT (gateway_id) DO UPDATE SET
 	sent_at = EXCLUDED.sent_at,
 	done_at = EXCLUDED.done_at,
 	meta = EXCLUDED.meta`,
-		msg.ID, nullString(msg.ProviderID), string(msg.Direction), msg.From, msg.To, msg.Text, nullString(msg.Encoding), dataCodingFromEncoding(msg.Encoding),
+		msg.ID, nullString(msg.ProviderID), string(msg.Direction), msg.From, msg.To, text, nullString(msg.Encoding), dataCodingFromEncoding(msg.Encoding),
 		segments, nullString(msg.Route), nullString(msg.Provider), nullString(msg.SourceKind), nullString(msg.SourceID), nullString(msg.Metadata["client_id"]),
 		nullString(msg.TenantID), nullString(msg.AccountID), nullString(msg.ClientMsgID), msg.State, msg.ErrorCode,
-		zeroAsNow(msg.SubmittedAt), nullTime(msg.SentAt), nullTime(msg.DoneAt), meta,
+		zeroAsNow(msg.SubmittedAt), nullTime(msg.SentAt), nullTime(msg.DoneAt), meta, textBytes,
 	)
 	return err
 }
@@ -128,7 +130,7 @@ func (s *PostgresStore) GetMessage(ctx context.Context, gatewayID string) (messa
 SELECT gateway_id, COALESCE(provider_id, ''), direction, from_addr, to_addr, text, COALESCE(encoding, ''),
 	COALESCE(route, ''), COALESCE(provider, ''), COALESCE(source_kind, ''), COALESCE(source_session, ''),
 	COALESCE(tenant_id, ''), COALESCE(account_id, ''), COALESCE(client_msg_id, ''),
-	state, COALESCE(error_code, 0), received_at, sent_at, done_at, COALESCE(meta, '{}'::jsonb)
+	state, COALESCE(error_code, 0), received_at, sent_at, done_at, COALESCE(meta, '{}'::jsonb), text_bytes
 FROM messages WHERE gateway_id = $1`, gatewayID)
 	if err != nil {
 		return message.Message{}, false, err
@@ -174,7 +176,7 @@ func (s *PostgresStore) ListMessagesPage(ctx context.Context, opts ListOptions) 
 SELECT gateway_id, COALESCE(provider_id, ''), direction, from_addr, to_addr, text, COALESCE(encoding, ''),
 	COALESCE(route, ''), COALESCE(provider, ''), COALESCE(source_kind, ''), COALESCE(source_session, ''),
 	COALESCE(tenant_id, ''), COALESCE(account_id, ''), COALESCE(client_msg_id, ''),
-	state, COALESCE(error_code, 0), received_at, sent_at, done_at, COALESCE(meta, '{}'::jsonb)
+	state, COALESCE(error_code, 0), received_at, sent_at, done_at, COALESCE(meta, '{}'::jsonb), text_bytes
 FROM messages`
 	args := []any{limit, offset}
 	if opts.ClientID != "" {
@@ -195,13 +197,14 @@ func (s *PostgresStore) SavePending(ctx context.Context, p Pending) error {
 
 func savePendingSQL(ctx context.Context, exec sqlExecer, p Pending) error {
 	p = normalizePending(p)
+	text, textBytes := postgresText(p.Text)
 	tag, err := exec.Exec(ctx, `
 INSERT INTO pending (
 	provider, provider_id, gateway_id, tenant_id, account_id, client_msg_id, segment_index, segment_count,
 	source_kind, source_session, source_system, callback_url, callback_rule, from_addr, to_addr,
 	text, data_coding, registered_delivery, route, received_at, expires_at, dlr_ready, dlr_delivered,
-	dlr_state, dlr_err, dlr_done_at, reliability_managed,upstream_status
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+	dlr_state, dlr_err, dlr_done_at, reliability_managed,upstream_status,text_bytes
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
 ON CONFLICT (provider, provider_id) DO UPDATE SET
 	gateway_id = EXCLUDED.gateway_id,
 	tenant_id = EXCLUDED.tenant_id,
@@ -217,6 +220,7 @@ ON CONFLICT (provider, provider_id) DO UPDATE SET
 	from_addr = EXCLUDED.from_addr,
 	to_addr = EXCLUDED.to_addr,
 	text = EXCLUDED.text,
+	text_bytes = EXCLUDED.text_bytes,
 	data_coding = EXCLUDED.data_coding,
 	registered_delivery = EXCLUDED.registered_delivery,
 	route = EXCLUDED.route,
@@ -230,9 +234,9 @@ ON CONFLICT (provider, provider_id) DO UPDATE SET
 WHERE pending.gateway_id=EXCLUDED.gateway_id`,
 		p.Provider, p.ProviderID, p.GatewayID, nullString(p.TenantID), nullString(p.AccountID), nullString(p.ClientMsgID),
 		p.SegmentIndex, p.SegmentCount, p.SourceKind, nullString(p.SourceSession), nullString(p.SourceSystem),
-		nullString(p.CallbackURL), nullString(p.CallbackRule), nullString(p.From), nullString(p.To), nullString(p.Text),
+		nullString(p.CallbackURL), nullString(p.CallbackRule), nullString(p.From), nullString(p.To), nullString(text),
 		p.DataCoding, p.RegisteredDelivery, nullString(p.Route), zeroAsNow(p.ReceivedAt), p.ExpiresAt, p.DLRReady,
-		p.DLRDelivered, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt), p.ReliabilityManaged, int64(p.UpstreamStatus),
+		p.DLRDelivered, nullString(p.DLRState), p.DLRErrorCode, nullTime(p.DLRDoneAt), p.ReliabilityManaged, int64(p.UpstreamStatus), textBytes,
 	)
 	return checkRows(tag, err)
 }
@@ -360,7 +364,7 @@ func (s *PostgresStore) EnqueueOutbox(ctx context.Context, item OutboxItem) (int
 	if item.MaxAttempts <= 0 {
 		item.MaxAttempts = 5
 	}
-	payload, err := json.Marshal(item.Payload)
+	payload, err := marshalPostgresOutbox(item.Payload)
 	if err != nil {
 		return 0, err
 	}
@@ -459,7 +463,7 @@ WHERE gateway_id = $1`, gatewayID, pending[0].ProviderID); updateErr != nil || t
 	}
 	outcome := completionState(pending)
 	for _, j := range completionJobs(pending) {
-		if _, err := tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, j.ID, j.Kind, j.Payload, j.NextAt, j.ExpiresAt); err != nil {
+		if err := insertReceiptSQL(ctx, tx, j); err != nil {
 			return err
 		}
 	}
@@ -685,7 +689,7 @@ WHERE tenant_quota_usage.used_segments <= $4 - EXCLUDED.used_segments`,
 	if item.MaxAttempts <= 0 {
 		item.MaxAttempts = 5
 	}
-	payload, err := json.Marshal(item.Payload)
+	payload, err := marshalPostgresOutbox(item.Payload)
 	if err != nil {
 		return 0, "", false, err
 	}
@@ -705,15 +709,18 @@ RETURNING id`, item.GatewayID, item.Provider, payload, item.State, item.NextRetr
 func scanMessage(row pgx.CollectableRow) (message.Message, error) {
 	var msg message.Message
 	var direction string
-	var meta []byte
+	var meta, textBytes []byte
 	var sentAt, doneAt *time.Time
 	err := row.Scan(&msg.ID, &msg.ProviderID, &direction, &msg.From, &msg.To, &msg.Text, &msg.Encoding,
 		&msg.Route, &msg.Provider, &msg.SourceKind, &msg.SourceID, &msg.TenantID, &msg.AccountID, &msg.ClientMsgID, &msg.State, &msg.ErrorCode,
-		&msg.SubmittedAt, &sentAt, &doneAt, &meta)
+		&msg.SubmittedAt, &sentAt, &doneAt, &meta, &textBytes)
 	if err != nil {
 		return message.Message{}, err
 	}
 	msg.Direction = message.Direction(direction)
+	if textBytes != nil {
+		msg.Text = string(textBytes)
+	}
 	if sentAt != nil {
 		msg.SentAt = *sentAt
 	}
@@ -734,7 +741,8 @@ func scanOutbox(row pgx.CollectableRow) (OutboxItem, error) {
 	if err != nil {
 		return OutboxItem{}, err
 	}
-	if err := json.Unmarshal(payload, &item.Payload); err != nil {
+	item.Payload, err = unmarshalPostgresOutbox(payload)
+	if err != nil {
 		return OutboxItem{}, err
 	}
 	return item, nil
@@ -742,15 +750,19 @@ func scanOutbox(row pgx.CollectableRow) (OutboxItem, error) {
 
 func scanPending(row pgx.CollectableRow) (Pending, error) {
 	var p Pending
+	var textBytes []byte
 	var dataCoding, registeredDelivery int16
 	var doneAt *time.Time
 	err := row.Scan(&p.Provider, &p.ProviderID, &p.GatewayID, &p.TenantID, &p.AccountID, &p.ClientMsgID, &p.SegmentIndex, &p.SegmentCount,
 		&p.SourceKind, &p.SourceSession, &p.SourceSystem, &p.CallbackURL, &p.CallbackRule, &p.From, &p.To, &p.Text, &dataCoding,
-		&registeredDelivery, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRDelivered, &p.DLRState, &p.DLRErrorCode, &doneAt, &p.ReliabilityManaged, &p.UpstreamStatus)
+		&registeredDelivery, &p.Route, &p.ReceivedAt, &p.ExpiresAt, &p.DLRReady, &p.DLRDelivered, &p.DLRState, &p.DLRErrorCode, &doneAt, &p.ReliabilityManaged, &p.UpstreamStatus, &textBytes)
 	if err != nil {
 		return Pending{}, err
 	}
 	p.DataCoding = uint8(dataCoding)
+	if textBytes != nil {
+		p.Text = string(textBytes)
+	}
 	p.RegisteredDelivery = uint8(registeredDelivery)
 	if doneAt != nil {
 		p.DLRDoneAt = *doneAt
@@ -839,7 +851,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, `SELECT provider, client_msg_id, segment_index, segment_count, dlr_ready, dlr_delivered, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule,reliability_managed,upstream_status FROM pending LIMIT 0`); err != nil {
+	if _, err := s.pool.Exec(ctx, `SELECT provider, client_msg_id, segment_index, segment_count, dlr_ready, dlr_delivered, dlr_state, dlr_err, dlr_done_at, callback_url, callback_rule,reliability_managed,upstream_status,text_bytes FROM pending LIMIT 0`); err != nil {
 		return fmt.Errorf("postgres pending DLR columns are missing; run migrations before startup: %w", err)
 	}
 	if ok, err := s.hasUniqueColumns(ctx, "pending", []string{"provider", "provider_id"}); err != nil || !ok {
@@ -848,7 +860,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 		return errors.New("postgres pending composite key is missing; run migrations before startup")
 	}
-	if _, err := s.pool.Exec(ctx, `SELECT tenant_id, account_id, client_msg_id FROM messages LIMIT 0`); err != nil {
+	if _, err := s.pool.Exec(ctx, `SELECT tenant_id, account_id, client_msg_id,text_bytes FROM messages LIMIT 0`); err != nil {
 		return fmt.Errorf("postgres message tenant columns are missing; run migrations before startup: %w", err)
 	}
 	if _, err := s.pool.Exec(ctx, `SELECT tenant_id, quota_date, used_segments FROM tenant_quota_usage LIMIT 0`); err != nil {

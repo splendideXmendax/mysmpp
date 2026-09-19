@@ -61,7 +61,7 @@ func (s *PostgresStore) PrepareReceipt(ctx context.Context, event ReceiptEvent) 
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, j.ID, j.Kind, j.Payload, j.NextAt, j.ExpiresAt); err != nil {
+	if err = insertReceiptSQL(ctx, tx, j); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -129,7 +129,7 @@ func (s *PostgresStore) EnqueueReceipt(ctx context.Context, job ReceiptJob) erro
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO receipt_jobs(id,kind,payload,next_at,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`, job.ID, job.Kind, job.Payload, job.NextAt, job.ExpiresAt); err != nil {
+	if err = insertReceiptSQL(ctx, tx, job); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -146,6 +146,9 @@ FROM candidate c WHERE j.id=c.id RETURNING j.id,j.kind,j.payload,j.state,j.attem
 		&j.ID, &j.Kind, &j.Payload, &j.State, &j.Attempt, &j.Lease, &j.LeaseUntil, &j.NextAt, &j.ExpiresAt, &j.LastError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReceiptJob{}, false, nil
+	}
+	if err == nil && j.Kind == "delivery" {
+		j.Payload, err = unmarshalPostgresReceipt(j.Payload)
 	}
 	return j, err == nil, err
 }
