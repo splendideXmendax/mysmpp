@@ -157,11 +157,12 @@ func TestPersistedReceiptUsesForwardingAfterRestart(t *testing.T) {
 	if err := st.SaveMessage(ctx, testMessage("forward-existing")); err != nil {
 		t.Fatal(err)
 	}
-	p := store.Pending{GatewayID: "forward-existing", TenantID: rule.TenantID, Provider: "test-provider", ProviderID: "test-id", SourceKind: "http", CallbackURL: rule.CallbackURL, ReliabilityManaged: true, SegmentIndex: 1, SegmentCount: 1, ExpiresAt: time.Now().Add(time.Hour)}
+	p := store.Pending{GatewayID: "forward-existing", TenantID: rule.TenantID, Provider: "test-provider", ProviderID: "test-id", Route: "private-route", ClientMsgID: "order-existing", SourceKind: "http", CallbackURL: rule.CallbackURL, ReliabilityManaged: true, SegmentIndex: 1, SegmentCount: 1, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := st.SavePending(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PrepareReceipt(ctx, store.ReceiptEvent{Provider: p.Provider, ProviderID: p.ProviderID, State: "DELIVRD", DoneAt: time.Now().UTC()}); err != nil {
+	event := store.ReceiptEvent{Provider: p.Provider, ProviderID: p.ProviderID, State: "DELIVRD", DoneAt: time.Now().UTC()}
+	if err := st.PrepareReceipt(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 	st, err = store.NewFile(path)
@@ -181,6 +182,8 @@ func TestPersistedReceiptUsesForwardingAfterRestart(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := &Dispatcher{store: st, logger: slog.Default(), httpClient: newCallbackClient()}
+	sink := &captureCDR{}
+	d.SetCDRSink(sink)
 	d.ReloadCallbacks(config.DispatcherConfig{CallbackForwarding: []config.CallbackForwarding{rule}})
 	table := d.callbackForwards.Load()
 	defer table.closeIdle()
@@ -192,12 +195,34 @@ func TestPersistedReceiptUsesForwardingAfterRestart(t *testing.T) {
 	finished := make(chan struct{})
 	go func() { defer close(finished); d.receiptWorker(workerCtx, "delivery") }()
 	defer func() { cancel(); <-finished }()
-	waitReceiptState(t, st, "delivery:done", 1)
-	if calls.Load() != 2 || <-bodies != <-bodies {
+	waitReceiptState(t, st, "delivery:done", 2)
+	if calls.Load() != 2 {
+		t.Fatalf("expected two callback attempts, got %d", calls.Load())
+	}
+	first, second := <-bodies, <-bodies
+	if first != second {
 		t.Fatal("durable retry changed payload or attempt count")
 	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(first), &payload); err != nil {
+		t.Fatal(err)
+	}
+	assertCallbackRoutingPrivate(t, payload)
+	for _, secret := range []string{p.Provider, p.ProviderID, p.Route} {
+		if strings.Contains(first, secret) {
+			t.Fatalf("persisted snapshot leaked %q: %s", secret, first)
+		}
+	}
+	if payload["delivery_id"] != httpFinalReceiptID(p.GatewayID) || payload["gateway_id"] != p.GatewayID || payload["client_msg_id"] != p.ClientMsgID || payload["final"] != true || payload["message_state"] != "DELIVRD" {
+		t.Fatalf("persisted receipt lost correlation or final state: %s", first)
+	}
 	stored, ok, err := st.GetPending(ctx, p.Provider, p.ProviderID)
-	if err != nil || !ok || !stored.DLRDelivered || stored.CallbackURL != rule.CallbackURL {
-		t.Fatalf("stored receipt changed URL or missed delivery: %+v %v", stored, err)
+	if err != nil || !ok || !stored.DLRDelivered || stored.CallbackURL != rule.CallbackURL || stored.Provider != p.Provider || stored.ProviderID != p.ProviderID || stored.Route != p.Route {
+		t.Fatalf("stored receipt lost internal mapping, URL or delivery: %+v %v", stored, err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.events) != 1 || sink.events[0].Kind != "dlr" || sink.events[0].Provider != p.Provider || sink.events[0].ProviderID != p.ProviderID || sink.events[0].Route != p.Route {
+		t.Fatalf("internal CDR lost routing or duplicated delivery: %+v", sink.events)
 	}
 }

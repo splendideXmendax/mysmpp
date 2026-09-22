@@ -84,6 +84,8 @@ Content-Type: application/json
 
 同一 `X-Client-ID` 下重复提交相同 `client_msg_id`，24 小时内会返回原 `gateway_id`，不会重复入队，也不会重复扣减日额度。不同 HTTP client 可使用相同的 `client_msg_id`，互不冲突。SMPP 没有对应的客户业务 ID 字段，网关会为 SMPP 请求生成内部幂等键。
 
+小写 cedilla 字母 `ç`（U+00E7）在本次兼容修复中可按 GSM-7 发送，占 1 个 septet，编码为 `0x09`；原有大写 `Ç` 支持继续保留。正文包含中文等其他非 GSM-7 字符时仍选择 UCS-2。网关存储和查询保留输入原文；GSM-7 的该码位不区分这两个大小写，终端显示取决于接收方实现。此修复不是 DCS0→DCS3→DCS8 自动选择策略，详见 [修复边界与验证说明](GSM7小写cedilla兼容说明.md)。
+
 ### curl 示例
 
 ```bash
@@ -109,9 +111,6 @@ HTTP 状态为 `200 OK`：
 ```json
 {
   "gateway_id": "m0000abc",
-  "provider_id": "",
-  "provider": "stub-2778",
-  "route": "tenant-a-http-weighted",
   "state": "queued"
 }
 ```
@@ -119,10 +118,9 @@ HTTP 状态为 `200 OK`：
 | 字段 | 说明 |
 |---|---|
 | `gateway_id` | mysmpp 生成的消息 ID，应由调用方保存 |
-| `provider_id` | 异步入队时通常为空；上游返回 `submit_sm_resp` 后才产生 |
-| `provider` | 本次路由选中的上游 provider |
-| `route` | 命中的路由 |
 | `state` | 提交响应通常为 `queued`；幂等命中旧请求时可能返回旧消息当前状态 |
+
+租户响应不再包含 `provider`、`provider_id`、`route`；幂等重试也不会返回这些内部字段。关联短信请保存 `gateway_id`，不要依赖供应商 ID。无 `clients` 时的管理员 Basic Auth 兼容模式仍保留内部字段。
 
 ## 4. 查询消息状态
 
@@ -142,13 +140,12 @@ curl --fail-with-body \
 
 客户端模式会先按已鉴权 `client_id` 过滤，再应用分页；A、B、C 只能查询各自消息。请求头中的租户 ID 只有在 token 校验成功后才生效。
 
-响应是 JSON 数组。当前版本的字段名使用 Go 结构体字段名，区分大小写：
+响应是 JSON 数组。业务字段保留原大小写，租户响应移除 `Provider`、`ProviderID`、`Route`。以下为响应节选：
 
 ```json
 [
   {
     "ID": "m0000abc",
-    "ProviderID": "123456789",
     "TenantID": "customer-a",
     "AccountID": "tenant-a",
     "ClientMsgID": "order-20260813-000001",
@@ -157,8 +154,6 @@ curl --fail-with-body \
     "To": "8613800138000",
     "Text": "test message",
     "Encoding": "gsm7",
-    "Route": "tenant-a-http-weighted",
-    "Provider": "stub-2778",
     "SourceKind": "http",
     "State": "DELIVRD",
     "ErrorCode": 0,
@@ -185,7 +180,7 @@ curl --fail-with-body \
 
 ## 5. DLR 回调
 
-提交时提供 `callback_url` 后，mysmpp 收到上游 SMPP `deliver_sm` 状态报告时，会向该 URL 发送 JSON：
+提交时提供 `callback_url` 后，mysmpp 等同一 `gateway_id` 的所有分片进入最终态，再向该 URL 推送一次聚合 JSON。短短信也使用相同格式；不逐片通知，不推送中间态：
 
 ```http
 POST /sms/dlr HTTP/1.1
@@ -194,25 +189,36 @@ Content-Type: application/json
 
 ```json
 {
+  "delivery_id": "http-final:<opaque-gateway-fingerprint>",
   "gateway_id": "m0000abc",
   "client_msg_id": "order-20260813-000001",
-  "provider_id": "123456789",
-  "provider": "stub-2778",
-  "route": "tenant-a-http-weighted",
-  "segment_index": 2,
   "segment_count": 3,
   "state": "DELIVRD",
-  "message_state": "PENDING",
-  "final": false,
+  "message_state": "DELIVRD",
+  "final": true,
   "error_code": 0,
   "done_at": "2026-08-13T01:00:02.123456789Z",
   "callback_rule": "order-service"
 }
 ```
 
-`state` 是当前上游分片状态；`message_state` 是同一 `gateway_id` 下所有上游分片的聚合状态；只有所有分片都进入最终态时 `final=true`。聚合范围不包含客户预先拆成多个独立 `submit_sm` 的 SMPP 长短信，因为这些请求各自拥有独立 `gateway_id`。
+`state` 和 `message_state` 均为整条聚合状态，`error_code` 对应聚合错误，`final=true`。全部分片成功才为 `DELIVRD`；例如一片 `UNDELIV`、其余成功，最终仍为 `UNDELIV`。未到齐时等待后续回执或既有超时处理。本项只改变 HTTP 客户通知，SMPP 原有逐条提交回执保持不变。
 
-回调接收端应返回任意 `2xx` 状态。持久化回执任务会重试，接收端应允许中间状态和重复投递，优先使用新增的 `delivery_id` 做幂等处理；不能用较迟收到的非终态覆盖终态。当前回调没有签名或自定义鉴权头，接收端不应仅凭请求体来源执行敏感操作。
+回调接收端应返回任意 `2xx` 状态。一次最终通知不等于网络绝对只请求一次：失败、应答丢失或发送后进程退出仍可能触发重试，同一任务的 `delivery_id` 和正文保持稳定，接收端须据此幂等处理。当前回调没有签名或自定义鉴权头，接收端不应仅凭请求体来源执行敏感操作。
+
+回调不包含供应商名称、路由名称或上游消息 ID。字段关联方式：
+
+| 字段 | 用途 |
+|---|---|
+| `delivery_id` | 整条最终通知的不透明 ID；同一任务重试时保持不变，用于去重 |
+| `gateway_id` | 网关消息 ID，与提交响应关联 |
+| `client_msg_id` | 调用方在 HTTP 提交时传入的业务 ID，未提供时为空 |
+| `segment_index` | v1.2.5 起 HTTP 聚合回调不再返回该字段 |
+| `segment_count` | 同一网关消息的上游分片总数，现有口径不变 |
+| `callback_rule` | 调用方自定义标识，仅在提供时返回 |
+| `submit_status` | 上游提交被拒绝等场景的非零 SMPP 数字状态码，仅在有值时返回 |
+
+兼容性：`provider`、`provider_id`、`route` 是移除而非置空。升级前未完成的旧任务也使用最终聚合通知，但已发送的旧通知无法撤回。旧 ID 前缀为 `delivery:`，新 ID 前缀为 `http-final:`；跨版本需兼容两种格式，可额外按 `gateway_id + final` 去重。不更改回调 URL、HTTP/HTTPS 地址安全策略、重试间隔或 SMPP DR 格式。
 
 最终状态包括：`DELIVRD`、`EXPIRED`、`DELETED`、`UNDELIV`、`REJECTD`、`UNKNOWN`。
 
@@ -226,10 +232,13 @@ Content-Type: application/json
 | `401 Unauthorized` | 缺少或错误的 Basic Auth / client 凭据 |
 | `403 Forbidden` | client 来源 IP 不在白名单，或内容过滤规则拒绝 |
 | `429 Too Many Requests` | 命中号码/client 风控、主租户 TPS 或主租户单日分片额度 |
+| `500 Internal Server Error` | 查询失败或非 dispatcher 模式存储失败 |
 | `502 Bad Gateway` | 没有可用路由、入队失败或调度器提交失败 |
 | `405 Method Not Allowed` | 对 `/v1/messages` 使用了 GET/POST 之外的方法 |
 
 上游在异步发送阶段拒绝 `submit_sm` 不会改写已经返回的 HTTP `200`；调用方需通过查询或 DLR 判断后续结果。
+
+租户侧不透传内部错误详情，例如无可用路由时返回 `no route matched`，未知提交异常返回 `message submission failed`；查询和非 dispatcher 存储异常分别返回 `message query failed`、`message storage failed`。限频、限额等错误仍使用既有状态码和基础提示，运维可从内部日志继续排查详细原因。
 
 ## 7. 健康检查
 

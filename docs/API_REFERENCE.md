@@ -65,7 +65,7 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 | `to` | 是 | 目标号码，支持 11 位数字或 E.164 |
 | `text` | 是 | 非空短信正文，支持 ASCII 控制字符（含 NUL，须 JSON 转义）；自动按编码拆分，默认最多 20 段，由 `dispatcher.max_message_segments` 控制 |
 | `client_msg_id` | 否 | 幂等键，1-64 非空白字符 |
-| `callback_url` | 否 | 客户 DLR 回调 URL，v1.2.1 支持完整的公网 `http://` 或 `https://` 地址；POST JSON，可能包含中间状态与重试通知。v1.2.0 仅支持 HTTPS |
+| `callback_url` | 否 | 客户 DLR 回调 URL，支持完整的公网 `http://` 或 `https://` 地址；v1.2.5 起每个网关消息只通知最终聚合结果，失败重试使用同一 `delivery_id` |
 | `callback_rule` | 否 | 可选回调规则标识，会原样出现在回调 JSON 的 `callback_rule` 字段 |
 | `meta` | 否 | 最多 10 个键，每个值最多 200 字符 |
 
@@ -74,12 +74,11 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 ```json
 {
   "gateway_id": "g0000000001",
-  "provider_id": "",
-  "provider": "stub-provider",
-  "route": "default",
   "state": "queued"
 }
 ```
+
+租户提交及幂等重试响应只返回 `gateway_id`、`state`，不返回供应商、路由或上游消息 ID。幂等命中时仍返回原 `gateway_id` 和该消息当前状态。无 `clients` 时的管理员 Basic Auth 兼容模式保留内部字段。
 
 常见错误：
 
@@ -87,9 +86,12 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 |---:|---|
 | `400` | JSON 或字段校验失败 |
 | `401` | 缺少 client/admin 鉴权 |
-| `403` | client IP 不在白名单 |
-| `429` | 风控限流或命中黑名单 |
+| `403` | client IP 不在白名单、主租户禁用或内容过滤拒绝 |
+| `429` | 风控限流/黑名单、主租户 TPS 或日分片额度超限 |
+| `500` | 查询或非 dispatcher 模式存储失败 |
 | `502` | 无路由、入队失败或 dispatcher 提交失败 |
+
+状态码保持原有语义。租户错误响应为固定提示，不透传包含线路、供应商或数据库详情的内部错误；运维应通过服务日志排查。
 
 ## `GET /v1/messages`
 
@@ -104,7 +106,7 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
 
 客户端 token 鉴权模式只返回当前租户的消息，并在租户过滤后应用 `limit` / `offset`。管理员 Basic Auth 模式返回全部租户和历史消息。
 
-响应为消息数组。Go JSON 当前使用结构体字段名：
+租户响应为消息数组，保留原字段名大小写和业务字段，但移除 `Provider`、`ProviderID`、`Route`。管理员 Basic Auth 模式保留完整字段。以下为租户响应节选：
 
 ```json
 [
@@ -114,12 +116,21 @@ SMPP 上游 provider 的 DLR 不走 HTTP inbound callback；它通过上游 `del
     "From": "10690000",
     "To": "13800138000",
     "Text": "hello",
-    "State": "DELIVRD",
-    "Provider": "stub-provider",
-    "ProviderID": "stub-..."
+    "State": "DELIVRD"
   }
 ]
 ```
+
+## 推送给租户的 DLR
+
+按提交时的 `callback_url` 发送 HTTP/HTTPS POST JSON。回调同样不包含 `provider`、`provider_id`、`route`，详见 [HTTP 接入文档](HTTP_TO_SMPP_API_ZH.md#5-dlr-回调)。
+
+- 消息关联使用 `gateway_id` 或客户提交的 `client_msg_id`。
+- HTTP 长短信按 `gateway_id` 聚合，只通知一个最终结果；`segment_count` 保留上游分片总数，不再返回 `segment_index`。
+- `state`、`message_state` 均表示整条最终状态，`error_code` 使用聚合错误码；`final` 为 `true`。
+- 回调去重使用 `delivery_id`，v1.2.5 起为整条消息的 `http-final:<opaque-fingerprint>`，同一消息重试时保持不变。
+
+升级后尚未完成的旧分片任务也转为最终聚合通知；旧版 `delivery:` ID 与新版 `http-final:` ID 不同，跨版本可额外按 `gateway_id + final` 去重。已发送的历史通知无法撤回。回调失败、应答丢失或进程重启可能造成同一最终通知重试，接收端返回 `2xx` 并按 `delivery_id` 幂等处理。没有新增配置或数据库迁移，内部逐片回执、CDR、管理员排障数据和 SMPP DR 保留。
 
 ## `GET /v1/config`
 

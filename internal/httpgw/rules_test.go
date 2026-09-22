@@ -55,6 +55,10 @@ func TestMessageSubmitAppliesRoute(t *testing.T) {
 	if messages[0].Metadata["client_id"] != "client-a" {
 		t.Fatalf("authenticated client id not persisted: %+v", messages[0].Metadata)
 	}
+	assertNoRoutingFields(t, rec.Body.Bytes())
+	if strings.Contains(rec.Body.String(), "cmcc") || strings.Contains(rec.Body.String(), "mobile") {
+		t.Fatalf("fallback response leaked internal routing: %s", rec.Body.String())
+	}
 }
 
 func TestMessageSubmitReturns429WhenTenantDailyQuotaExceeded(t *testing.T) {
@@ -144,8 +148,14 @@ func TestMessageSubmitUsesDispatcherWhenConfigured(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"provider":"mock-a"`) {
-		t.Fatalf("dispatcher receipt not returned: %s", rec.Body.String())
+	assertNoRoutingFields(t, rec.Body.Bytes())
+	var receipt map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := receipt["gateway_id"].(string)
+	if len(receipt) != 2 || id == "" || receipt["state"] != "queued" {
+		t.Fatalf("unexpected tenant receipt: %s", rec.Body.String())
 	}
 	waitForMessages(t, st, 1)
 	messages, err := st.ListMessages(context.Background())
@@ -355,6 +365,10 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
 		t.Fatal(err)
 	}
+	assertNoRoutingFields(t, rec.Body.Bytes())
+	// Replay after the upstream ID exists: this used to expose more information
+	// than the first response even though both refer to the same submission.
+	waitForPending(t, dispatcher, 1)
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -368,6 +382,7 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
 		t.Fatal(err)
 	}
+	assertNoRoutingFields(t, rec.Body.Bytes())
 	if first.GatewayID != second.GatewayID {
 		t.Fatalf("expected idempotent gateway id, got %q and %q", first.GatewayID, second.GatewayID)
 	}
@@ -377,6 +392,16 @@ func TestMessageSubmitIdempotencyReturnsSameGatewayID(t *testing.T) {
 	}
 	if len(messages) != 1 {
 		t.Fatalf("expected one stored message, got %d", len(messages))
+	}
+	if first.GatewayID == "" || second.State != "sent" || messages[0].ProviderID == "" || messages[0].Provider != "mock-a" || messages[0].Route != "default" {
+		t.Fatalf("idempotency or internal routing changed: receipt=%+v messages=%+v", second, messages)
+	}
+	if strings.Contains(rec.Body.String(), messages[0].ProviderID) || strings.Contains(rec.Body.String(), "mock-a") {
+		t.Fatalf("idempotent response leaked upstream identifiers: %s", rec.Body.String())
+	}
+	pending, ok, err := st.GetPending(context.Background(), messages[0].Provider, messages[0].ProviderID)
+	if err != nil || !ok || pending.GatewayID != first.GatewayID {
+		t.Fatalf("internal receipt mapping lost: %+v %v", pending, err)
 	}
 }
 

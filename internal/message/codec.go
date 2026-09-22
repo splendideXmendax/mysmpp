@@ -106,6 +106,11 @@ func init() {
 			gsm7DefaultCodes[r] = byte(i)
 		}
 	}
+	// Unicode's GSM0338 mapping uses U+00E7 at 0x09. Accept it as an
+	// encoding alias while retaining legacy U+00C7 encoding and decoding:
+	// https://www.unicode.org/Public/MAPPINGS/ETSI/GSM0338.TXT
+	// Both spellings share one septet, so the wire cannot preserve their case.
+	gsm7DefaultCodes['ç'] = 0x09
 	gsm7RuneToExt = map[rune]byte{}
 	for code, r := range gsm7ExtToRune {
 		gsm7RuneToExt[r] = code

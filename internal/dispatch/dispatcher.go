@@ -612,14 +612,11 @@ func (d *Dispatcher) HandleDLR(ctx context.Context, dlr provider.DLR) error {
 		}
 		return d.finishDLRDelivery(ctx, rec)
 	case SourceHTTPAPI.String():
-		if rec.CallbackURL != "" {
-			if err := d.sendHTTPCallback(ctx, rec, dlr, aggregate); err != nil {
-				d.logger.Warn("http dlr callback failed", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "url", rec.CallbackURL, "err", err)
-				return err
-			}
-			d.logger.Info("http dlr callback sent", "gateway_id", rec.GatewayID, "provider_id", dlr.ProviderID, "url", rec.CallbackURL)
-		} else {
-			d.logger.Info("dlr for http source without callback", "gateway_id", rec.GatewayID, "state", dlr.State)
+		if err := d.enqueueHTTPFinal(ctx, store.ReceiptDelivery{
+			Pending: rec, Aggregate: aggregate,
+			Event: store.ReceiptEvent{Provider: dlr.Provider, ProviderID: dlr.ProviderID, State: dlr.State, ErrorCode: dlr.ErrorCode, DoneAt: dlr.DoneAt},
+		}, time.Now().UTC().Add(48*time.Hour)); err != nil {
+			return err
 		}
 		return d.finishDLRDelivery(ctx, rec)
 	}
@@ -1377,27 +1374,7 @@ func (d *Dispatcher) sendHTTPCallback(ctx context.Context, rec store.Pending, dl
 	if err := ValidateCallbackURL(rec.CallbackURL); err != nil {
 		return err
 	}
-	payload := map[string]any{
-		"delivery_id":   store.ReceiptKey("delivery", store.ReceiptEvent{Provider: dlr.Provider, ProviderID: dlr.ProviderID, State: dlr.State, ErrorCode: dlr.ErrorCode, DoneAt: dlr.DoneAt}),
-		"gateway_id":    rec.GatewayID,
-		"client_msg_id": rec.ClientMsgID,
-		"provider_id":   dlr.ProviderID,
-		"provider":      rec.Provider,
-		"route":         rec.Route,
-		"segment_index": rec.SegmentIndex,
-		"segment_count": rec.SegmentCount,
-		"state":         dlr.State,
-		"message_state": aggregate.State,
-		"final":         aggregate.Final,
-		"error_code":    dlr.ErrorCode,
-		"done_at":       dlr.DoneAt.Format(time.RFC3339Nano),
-	}
-	if rec.CallbackRule != "" {
-		payload["callback_rule"] = rec.CallbackRule
-	}
-	if rec.UpstreamStatus != 0 {
-		payload["submit_status"] = rec.UpstreamStatus
-	}
+	payload := newHTTPCallbackPayload(rec, dlr, aggregate)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

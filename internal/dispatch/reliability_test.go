@@ -158,7 +158,7 @@ func TestReceiptInboxSurvivesRestartBeforeMappingAndCallbackRetries(t *testing.T
 	d.setHTTPClient(srv.Client())
 	defer d.Close()
 	waitReceiptState(t, st, "inbox:done", 1)
-	waitReceiptState(t, st, "delivery:done", 1)
+	waitReceiptState(t, st, "delivery:done", 2)
 	first, second := <-bodies, <-bodies
 	if !bytes.Equal(first, second) {
 		t.Fatalf("retry changed immutable callback: %s / %s", first, second)
@@ -193,17 +193,58 @@ func TestCallbackHTTPAndHTTPSCompatibility(t *testing.T) {
 			// Trusted test transport permits only this local fixture; production
 			// continues to use the public-address dialer tested below.
 			d := &Dispatcher{httpClient: srv.Client()}
-			rec := store.Pending{CallbackURL: srv.URL, GatewayID: "gateway", ClientMsgID: "order", SegmentIndex: 1, SegmentCount: 2}
-			e := provider.DLR{Provider: "p", ProviderID: "up", State: "DELIVRD", DoneAt: time.Now().UTC()}
-			if err := d.sendHTTPCallback(context.Background(), rec, e, dlrAggregate{State: "PENDING"}); err != nil {
-				t.Fatal(err)
-			}
-			body := <-bodies
-			deliveryID, _ := body["delivery_id"].(string)
-			if body["client_msg_id"] != "order" || body["gateway_id"] != "gateway" || body["segment_count"] != float64(2) || body["final"] != false || deliveryID == "" {
-				t.Fatalf("callback fields changed: %v", body)
+			for _, state := range []string{"DELIVRD", "REJECTD", "EXPIRED", "UNKNOWN"} {
+				t.Run(state, func(t *testing.T) {
+					rec := store.Pending{CallbackURL: srv.URL, GatewayID: "gateway", ClientMsgID: "order", Provider: "private-provider", ProviderID: "private-upstream-id", Route: "private-route", SegmentIndex: 1, SegmentCount: 2}
+					aggregate := dlrAggregate{State: "PENDING"}
+					if state != "ENROUTE" {
+						aggregate = dlrAggregate{State: state, Final: true}
+						rec.CallbackRule = "customer-rule"
+					}
+					errorCode := 0
+					if state == "REJECTD" {
+						rec.UpstreamStatus = 0x58
+						errorCode = 8
+					}
+					aggregate.ErrorCode = errorCode
+					e := provider.DLR{Provider: rec.Provider, ProviderID: rec.ProviderID, State: state, ErrorCode: errorCode, DoneAt: time.Now().UTC()}
+					if err := d.sendHTTPCallback(context.Background(), rec, e, aggregate); err != nil {
+						t.Fatal(err)
+					}
+					body := <-bodies
+					assertCallbackRoutingPrivate(t, body)
+					wantID := httpFinalReceiptID(rec.GatewayID)
+					if body["delivery_id"] != wantID || body["client_msg_id"] != "order" || body["gateway_id"] != "gateway" || body["segment_index"] != nil || body["segment_count"] != float64(2) || body["final"] != aggregate.Final || body["message_state"] != aggregate.State || body["state"] != state || body["error_code"] != float64(errorCode) || body["done_at"] != e.DoneAt.Format(time.RFC3339Nano) {
+						t.Fatalf("callback fields changed: %v", body)
+					}
+					wantKeys := 9
+					if rec.CallbackRule != "" {
+						wantKeys++
+						if body["callback_rule"] != rec.CallbackRule {
+							t.Fatalf("callback rule lost: %v", body)
+						}
+					}
+					if rec.UpstreamStatus != 0 {
+						wantKeys++
+						if body["submit_status"] != float64(rec.UpstreamStatus) {
+							t.Fatalf("submit status lost: %v", body)
+						}
+					}
+					if len(body) != wantKeys {
+						t.Fatalf("unexpected callback fields: %v", body)
+					}
+				})
 			}
 		})
+	}
+}
+
+func assertCallbackRoutingPrivate(t *testing.T, body map[string]any) {
+	t.Helper()
+	for _, key := range []string{"provider", "provider_id", "route"} {
+		if _, exists := body[key]; exists {
+			t.Fatalf("callback leaked %q: %v", key, body)
+		}
 	}
 }
 

@@ -21,6 +21,9 @@ type ReceiptDelivery struct {
 	Pending   Pending
 	Event     ReceiptEvent
 	Aggregate ReceiptAggregate
+	// HTTPFinal distinguishes the gateway-level notification from internal
+	// per-part delivery records. Omitted on historical snapshots and SMPP.
+	HTTPFinal bool `json:"HTTPFinal,omitempty"`
 }
 
 func ReceiptKey(kind string, event ReceiptEvent) string {

@@ -285,7 +285,7 @@ func TestDispatcherHTTPCallbackIncludesSegmentAggregation(t *testing.T) {
 	}
 	for i := 1; i <= 2; i++ {
 		if err := st.SavePending(context.Background(), store.Pending{
-			Provider: "mock-a", ProviderID: "cb-" + string(rune('0'+i)), GatewayID: msg.ID,
+			Provider: "mock-a", ProviderID: "cb-" + string(rune('0'+i)), GatewayID: msg.ID, Route: "private-route",
 			ClientMsgID: "order-42", SegmentIndex: i, SegmentCount: 2, SourceKind: SourceHTTPAPI.String(),
 			CallbackURL: srv.URL, ExpiresAt: time.Now().Add(time.Hour),
 		}); err != nil {
@@ -295,11 +295,25 @@ func TestDispatcherHTTPCallbackIncludesSegmentAggregation(t *testing.T) {
 	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "cb-2", State: "DELIVRD"}); err != nil {
 		t.Fatal(err)
 	}
-	payload := <-payloads
-	if payload["client_msg_id"] != "order-42" || payload["segment_index"] != float64(2) || payload["segment_count"] != float64(2) {
+	select {
+	case payload := <-payloads:
+		t.Fatalf("partial result was pushed: %+v", payload)
+	default:
+	}
+	if err := d.HandleDLR(context.Background(), provider.DLR{Provider: "mock-a", ProviderID: "cb-1", State: "UNDELIV", ErrorCode: 42}); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	select {
+	case payload = <-payloads:
+	case <-time.After(4 * time.Second):
+		t.Fatal("no aggregate callback")
+	}
+	assertCallbackRoutingPrivate(t, payload)
+	if payload["client_msg_id"] != "order-42" || payload["segment_index"] != nil || payload["segment_count"] != float64(2) {
 		t.Fatalf("callback segment metadata missing: %+v", payload)
 	}
-	if payload["message_state"] != "PENDING" || payload["final"] != false {
+	if payload["message_state"] != "UNDELIV" || payload["state"] != "UNDELIV" || payload["error_code"] != float64(42) || payload["final"] != true {
 		t.Fatalf("callback aggregate state is incorrect: %+v", payload)
 	}
 }

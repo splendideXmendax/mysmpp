@@ -104,6 +104,14 @@ func (d *Dispatcher) deliverReceipt(ctx context.Context, job store.ReceiptJob) e
 		return err
 	}
 	rec, e := delivery.Pending, delivery.Event
+	if delivery.HTTPFinal {
+		if rec.SourceKind != SourceHTTPAPI.String() || !delivery.Aggregate.Final {
+			return errors.New("invalid aggregate HTTP receipt")
+		}
+		// This immutable snapshot survives pending expiry and does not emit a
+		// second internal per-segment CDR. The job lease owns callback retries.
+		return d.sendHTTPCallback(ctx, rec, provider.DLR{DoneAt: e.DoneAt}, delivery.Aggregate)
+	}
 	current, found, err := d.store.GetPending(ctx, rec.Provider, rec.ProviderID)
 	if err != nil {
 		return err
@@ -114,9 +122,7 @@ func (d *Dispatcher) deliverReceipt(ctx context.Context, job store.ReceiptJob) e
 	dlr := provider.DLR{Provider: e.Provider, ProviderID: e.ProviderID, State: e.State, ErrorCode: e.ErrorCode, DoneAt: e.DoneAt}
 	switch rec.SourceKind {
 	case SourceHTTPAPI.String():
-		if rec.CallbackURL != "" {
-			err = d.sendHTTPCallback(ctx, rec, dlr, delivery.Aggregate)
-		}
+		err = d.enqueueHTTPFinal(ctx, delivery, job.ExpiresAt)
 	case SourceSMPP.String():
 		if rec.RegisteredDelivery&3 != 0 {
 			err = d.pushSMPPDLR(rec, dlr)
@@ -130,4 +136,22 @@ func (d *Dispatcher) deliverReceipt(ctx context.Context, job store.ReceiptJob) e
 	}
 	d.emitCDR(d.dlrEvent(ctx, rec, dlr, delivery.Aggregate))
 	return nil
+}
+
+// enqueueHTTPFinal coalesces all final snapshots (including batch expiry,
+// synthetic submit failures and pre-upgrade jobs) into one durable notification.
+// Insert-if-absent must succeed before the source delivery may be acknowledged.
+func (d *Dispatcher) enqueueHTTPFinal(ctx context.Context, delivery store.ReceiptDelivery, expiresAt time.Time) error {
+	if delivery.Pending.CallbackURL == "" || !delivery.Aggregate.Final {
+		return nil
+	}
+	delivery.HTTPFinal = true
+	raw, err := json.Marshal(delivery)
+	if err != nil {
+		return err
+	}
+	return d.store.EnqueueReceipt(ctx, store.ReceiptJob{
+		ID: httpFinalReceiptID(delivery.Pending.GatewayID), Kind: "delivery",
+		Payload: raw, ExpiresAt: expiresAt,
+	})
 }

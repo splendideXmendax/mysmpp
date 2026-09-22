@@ -175,7 +175,11 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			ClientID: clientIDFromRequest(r),
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeMessageError(w, r, err, http.StatusInternalServerError, "message query failed")
+			return
+		}
+		if clientIDFromRequest(r) != "" {
+			writeJSON(w, http.StatusOK, tenantMessages(messages))
 			return
 		}
 		writeJSON(w, http.StatusOK, messages)
@@ -221,15 +225,12 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 				Meta:       req.Meta,
 			})
 			if err != nil {
-				status := http.StatusBadGateway
-				if errors.Is(err, dispatch.ErrRateExceeded) || errors.Is(err, dispatch.ErrQuotaExceeded) {
-					status = http.StatusTooManyRequests
-				} else if errors.Is(err, dispatch.ErrTenantDisabled) || errors.Is(err, dispatch.ErrBlocked) {
-					status = http.StatusForbidden
-				} else if errors.Is(err, dispatch.ErrInvalidDestAddr) || errors.Is(err, dispatch.ErrInvalidMessageLength) {
-					status = http.StatusBadRequest
-				}
-				http.Error(w, err.Error(), status)
+				status, text := submitErrorResponse(err)
+				writeMessageError(w, r, err, status, text)
+				return
+			}
+			if clientID != "" {
+				writeJSON(w, http.StatusOK, tenantSubmitResponse{GatewayID: receipt.GatewayID, State: receipt.State})
 				return
 			}
 			writeJSON(w, http.StatusOK, receipt)
@@ -250,7 +251,11 @@ func (g *Gateway) messages(w http.ResponseWriter, r *http.Request) {
 			msg.Provider = route.Provider
 		}
 		if err := g.store.SaveMessage(r.Context(), msg); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeMessageError(w, r, err, http.StatusInternalServerError, "message storage failed")
+			return
+		}
+		if clientID != "" {
+			writeJSON(w, http.StatusOK, tenantMessage(msg))
 			return
 		}
 		writeJSON(w, http.StatusOK, msg)
