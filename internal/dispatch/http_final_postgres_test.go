@@ -67,4 +67,5 @@ func TestHTTPFinalReceiptPostgres(t *testing.T) {
 	defer st.Close()
 	t.Run("concurrent", func(t *testing.T) { testHTTPFinalConcurrent(t, st) })
 	t.Run("batch-failure-expiry-nul", func(t *testing.T) { testHTTPFinalBatches(t, st) })
+	t.Run("persistence-failure-boundaries", func(t *testing.T) { testHTTPFinalFailureBoundaries(t, st) })
 }
